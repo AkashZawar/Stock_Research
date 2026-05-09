@@ -1,0 +1,14 @@
+{
+  "name": "stock-research-desk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Django stock research app with one-year chart, technical analysis, fundamentals, events, commodity monitor, and research levels.",
+  "scripts": {
+    "dev": "python3 manage.py runserver",
+    "start": "python3 manage.py runserver",
+    "check": "python3 manage.py check"
+  },
+  "engines": {
+    "python": ">=3.11"
+  }
+}
