@@ -31,6 +31,18 @@ def search(request):
         return JsonResponse({"error": str(error)}, status=500)
 
 
+def search_assets(request):
+    query = request.GET.get("q", "").strip()
+    asset_type = request.GET.get("type", "").strip()
+    if len(query) < 1:
+        return JsonResponse({"results": []})
+
+    try:
+        return JsonResponse({"results": services.search_assets(query, asset_type)})
+    except Exception as error:
+        return JsonResponse({"error": str(error)}, status=500)
+
+
 def analyze(request):
     raw_input = request.GET.get("symbol", "").strip()
     symbol = ""
@@ -43,6 +55,30 @@ def analyze(request):
             error_message = "Enter a valid ticker symbol or stock name."
             return JsonResponse({"error": error_message}, status=status_code)
         payload = services.analyze_symbol(symbol)
+        status_code = 200
+        return JsonResponse(payload)
+    except Exception as error:
+        error_message = str(error)
+        status_code = 500
+        return JsonResponse({"error": error_message}, status=status_code)
+    finally:
+        record_stock_search(request, raw_input, symbol, status_code, error_message)
+
+
+def analyze_asset(request):
+    raw_input = request.GET.get("symbol", "").strip()
+    asset_type = request.GET.get("type", "").strip()
+    symbol = ""
+    status_code = 500
+    error_message = ""
+    try:
+        asset_type = services.normalize_asset_type(asset_type)
+        symbol = services.resolve_asset_input(raw_input, asset_type)
+        if not symbol:
+            status_code = 400
+            error_message = "Enter a valid ETF or mutual fund symbol/name."
+            return JsonResponse({"error": error_message}, status=status_code)
+        payload = services.analyze_asset(symbol, asset_type)
         status_code = 200
         return JsonResponse(payload)
     except Exception as error:

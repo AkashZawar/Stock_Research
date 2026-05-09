@@ -17,6 +17,7 @@ import certifi
 CACHE_TTL_SECONDS = 5 * 60
 SEC_CACHE_TTL_SECONDS = 24 * 60 * 60
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
+OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 _cache = {}
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
@@ -128,6 +129,43 @@ ORDER_CATALYST_WATCHLIST = [
     if "Orders" in stock["tags"] or "Defence" in stock["tags"] or "Railways" in stock["tags"]
 ]
 
+ETF_UNIVERSE = [
+    ("NIFTYBEES.NS", "Nippon India ETF Nifty 50 BeES", "NSE", ["India", "Nifty 50", "Large cap"]),
+    ("JUNIORBEES.NS", "Nippon India ETF Junior BeES", "NSE", ["India", "Nifty Next 50"]),
+    ("BANKBEES.NS", "Nippon India ETF Bank BeES", "NSE", ["India", "Banking"]),
+    ("GOLDBEES.NS", "Nippon India ETF Gold BeES", "NSE", ["India", "Gold"]),
+    ("ITBEES.NS", "Nippon India ETF IT BeES", "NSE", ["India", "Information technology"]),
+    ("SETFNIF50.NS", "SBI ETF Nifty 50", "NSE", ["India", "Nifty 50"]),
+    ("SETFNIFBK.NS", "SBI ETF Nifty Bank", "NSE", ["India", "Banking"]),
+    ("SPY", "SPDR S&P 500 ETF Trust", "NYSE Arca", ["US", "S&P 500", "Large cap"]),
+    ("QQQ", "Invesco QQQ Trust", "Nasdaq", ["US", "Nasdaq 100", "Growth"]),
+    ("VOO", "Vanguard S&P 500 ETF", "NYSE Arca", ["US", "S&P 500", "Large cap"]),
+    ("VTI", "Vanguard Total Stock Market ETF", "NYSE Arca", ["US", "Total market"]),
+    ("GLD", "SPDR Gold Shares", "NYSE Arca", ["Gold", "Commodity"]),
+]
+
+MUTUAL_FUND_UNIVERSE = [
+    ("VFIAX", "Vanguard 500 Index Fund Admiral Shares", "Nasdaq", ["US", "S&P 500", "Index fund"]),
+    ("FXAIX", "Fidelity 500 Index Fund", "Nasdaq", ["US", "S&P 500", "Index fund"]),
+    ("SWPPX", "Schwab S&P 500 Index Fund", "Nasdaq", ["US", "S&P 500", "Index fund"]),
+    ("VTSAX", "Vanguard Total Stock Market Index Fund Admiral Shares", "Nasdaq", ["US", "Total market"]),
+    ("VBTLX", "Vanguard Total Bond Market Index Fund Admiral Shares", "Nasdaq", ["US", "Bond fund"]),
+    ("VBIAX", "Vanguard Balanced Index Fund Admiral Shares", "Nasdaq", ["US", "Balanced fund"]),
+]
+
+ASSET_TYPE_CONFIG = {
+    "etf": {
+        "label": "ETF",
+        "quoteTypes": {"ETF"},
+        "universe": ETF_UNIVERSE,
+    },
+    "mutual-fund": {
+        "label": "Mutual Fund",
+        "quoteTypes": {"MUTUALFUND", "MUTUAL_FUND"},
+        "universe": MUTUAL_FUND_UNIVERSE,
+    },
+}
+
 ORDER_CATALYST_KEYWORDS = [
     "order",
     "orders",
@@ -224,7 +262,17 @@ def analyze_symbol(symbol):
     return cached(f"analysis:{symbol}", lambda: _analyze_symbol(symbol), CACHE_TTL_SECONDS)
 
 
+def analyze_asset(symbol, asset_type):
+    normalized_asset_type = normalize_asset_type(asset_type)
+    return cached(
+        f"asset-analysis:{normalized_asset_type}:{symbol}",
+        lambda: _analyze_asset(symbol, normalized_asset_type),
+        CACHE_TTL_SECONDS,
+    )
+
+
 def _analyze_symbol(symbol):
+    benchmark_symbol = benchmark_symbol_for(symbol)
     loaders = {
         "chart": lambda: get_chart(symbol),
         "quote": lambda: get_quote(symbol),
@@ -232,8 +280,11 @@ def _analyze_symbol(symbol):
         "sec": lambda: get_sec_fundamentals(symbol),
         "screener": lambda: get_screener_fundamentals(symbol),
     }
+    if benchmark_symbol:
+        loaders["benchmark"] = lambda: get_benchmark_chart(benchmark_symbol)
+
     results = {}
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=len(loaders)) as executor:
         futures = {executor.submit(loader): key for key, loader in loaders.items()}
         for future in as_completed(futures):
             key = futures[future]
@@ -254,7 +305,37 @@ def _analyze_symbol(symbol):
     summary = results.get("summary", (False, {}))[1] if results.get("summary", (False,))[0] else {}
     sec = results.get("sec", (False, {}))[1] if results.get("sec", (False,))[0] else {}
     screener = results.get("screener", (False, {}))[1] if results.get("screener", (False,))[0] else {}
-    return build_report(symbol, chart.get("meta", {}), candles, quote_data, summary, sec, screener)
+    benchmark = results.get("benchmark", (False, {}))[1] if results.get("benchmark", (False,))[0] else {}
+    return build_report(symbol, chart.get("meta", {}), candles, quote_data, summary, sec, screener, benchmark)
+
+
+def _analyze_asset(symbol, asset_type):
+    loaders = {
+        "chart": lambda: get_chart_range(symbol, "2y", "1d"),
+        "quote": lambda: get_quote(symbol),
+        "summary": lambda: get_asset_summary(symbol),
+    }
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(loaders)) as executor:
+        futures = {executor.submit(loader): key for key, loader in loaders.items()}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                results[key] = (True, future.result())
+            except Exception as error:
+                results[key] = (False, error)
+
+    chart_ok, chart = results.get("chart", (False, RuntimeError("Could not load chart data.")))
+    if not chart_ok:
+        raise RuntimeError(str(chart))
+
+    candles = chart.get("candles") or []
+    if len(candles) < 30:
+        raise RuntimeError("Not enough daily data was returned for this ETF or mutual fund.")
+
+    quote_data = results.get("quote", (False, {}))[1] if results.get("quote", (False,))[0] else {}
+    summary = results.get("summary", (False, {}))[1] if results.get("summary", (False,))[0] else {}
+    return build_asset_report(symbol, asset_type, chart.get("meta", {}), candles, quote_data, summary)
 
 
 def build_market_monitor():
@@ -839,6 +920,109 @@ def search_symbols(query):
     return cached(f"search:{normalized_query.lower()}", loader, CACHE_TTL_SECONDS)
 
 
+def resolve_asset_input(value, asset_type):
+    normalized_asset_type = normalize_asset_type(asset_type)
+    normalized = normalize_symbol(value)
+    if normalized:
+        return normalized
+
+    results = search_assets(value, normalized_asset_type)
+    best = choose_asset_search_result(results, value, normalized_asset_type)
+    return best["symbol"] if best else ""
+
+
+def search_assets(query, asset_type):
+    normalized_query = str(query or "").strip()
+    normalized_asset_type = normalize_asset_type(asset_type)
+    config = ASSET_TYPE_CONFIG[normalized_asset_type]
+
+    def loader():
+        endpoint = f"https://query2.finance.yahoo.com/v1/finance/search?q={quote(normalized_query)}&quotesCount=24&newsCount=0"
+        local_results = local_asset_search_symbols(normalized_query, normalized_asset_type)
+        try:
+            payload = fetch_json(endpoint)
+            yahoo_results = [
+                {
+                    "symbol": item.get("symbol"),
+                    "name": item.get("shortname") or item.get("longname") or item.get("symbol"),
+                    "exchange": item.get("exchDisp") or item.get("exchange") or "",
+                    "type": item.get("quoteType") or "",
+                }
+                for item in payload.get("quotes", [])
+                if item.get("symbol") and normalized_quote_type(item.get("quoteType")) in config["quoteTypes"]
+            ]
+        except Exception:
+            yahoo_results = []
+        return sort_asset_search_results(
+            merge_search_results(local_results + yahoo_results),
+            normalized_query,
+            normalized_asset_type,
+        )[:24]
+
+    return cached(f"asset-search:{normalized_asset_type}:{normalized_query.lower()}", loader, CACHE_TTL_SECONDS)
+
+
+def local_asset_search_symbols(query, asset_type):
+    lower_query = str(query or "").strip().lower()
+    compact_query = re.sub(r"[^a-z0-9]", "", lower_query)
+    if not compact_query:
+        return []
+
+    results = []
+    for symbol, name, exchange, tags in ASSET_TYPE_CONFIG[asset_type]["universe"]:
+        searchable = " ".join([symbol, name, exchange, *tags]).lower()
+        compact_searchable = re.sub(r"[^a-z0-9]", "", searchable)
+        if lower_query not in searchable and compact_query not in compact_searchable:
+            continue
+        results.append({
+            "symbol": symbol,
+            "name": name,
+            "exchange": exchange,
+            "type": "ETF" if asset_type == "etf" else "MUTUALFUND",
+        })
+
+    return results
+
+
+def local_asset_metadata(symbol, asset_type):
+    target = str(symbol or "").upper()
+    for item_symbol, name, exchange, tags in ASSET_TYPE_CONFIG[asset_type]["universe"]:
+        if item_symbol.upper() == target:
+            return {"name": name, "exchange": exchange, "tags": tags}
+    return {}
+
+
+def choose_asset_search_result(results, query, asset_type):
+    sorted_results = sort_asset_search_results(results, query, asset_type)
+    quote_types = ASSET_TYPE_CONFIG[asset_type]["quoteTypes"]
+    return next((item for item in sorted_results if normalized_quote_type(item.get("type")) in quote_types), None) or (sorted_results[0] if sorted_results else None)
+
+
+def sort_asset_search_results(results, query, asset_type):
+    quote_types = ASSET_TYPE_CONFIG[asset_type]["quoteTypes"]
+    lower_query = str(query or "").lower()
+    return sorted(
+        results,
+        key=lambda item: (
+            0 if normalized_quote_type(item.get("type")) in quote_types else 1,
+            exchange_priority(item),
+            -search_score(item, lower_query),
+            item.get("symbol", ""),
+        ),
+    )
+
+
+def normalize_asset_type(asset_type):
+    normalized = str(asset_type or "").strip().lower().replace("_", "-")
+    if normalized not in ASSET_TYPE_CONFIG:
+        raise ValueError("Asset type must be etf or mutual-fund.")
+    return normalized
+
+
+def normalized_quote_type(value):
+    return str(value or "").strip().upper().replace("-", "_")
+
+
 def local_search_symbols(query):
     lower_query = str(query or "").strip().lower()
     compact_query = re.sub(r"[^a-z0-9]", "", lower_query)
@@ -950,6 +1134,31 @@ def get_chart(symbol):
     return get_chart_range(symbol, "1y", "1d")
 
 
+def benchmark_symbol_for(symbol):
+    if symbol.endswith(".NS") or symbol.endswith(".BO"):
+        return "^NSEI"
+    if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", symbol or ""):
+        return "^GSPC"
+    return None
+
+
+def get_benchmark_chart(benchmark_symbol):
+    chart = get_chart(benchmark_symbol)
+    return {
+        "symbol": benchmark_symbol,
+        "name": benchmark_name_for(benchmark_symbol),
+        "candles": chart.get("candles") or [],
+    }
+
+
+def benchmark_name_for(benchmark_symbol):
+    names = {
+        "^NSEI": "Nifty 50",
+        "^GSPC": "S&P 500",
+    }
+    return names.get(benchmark_symbol, benchmark_symbol or "Benchmark")
+
+
 def get_chart_range(symbol, range_value="1y", interval="1d"):
     endpoint = (
         "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -1008,6 +1217,23 @@ def get_summary(symbol):
     return (summary.get("result") or [{}])[0] or {}
 
 
+def get_asset_summary(symbol):
+    modules = ",".join([
+        "price",
+        "summaryDetail",
+        "defaultKeyStatistics",
+        "fundProfile",
+        "topHoldings",
+        "fundPerformance",
+    ])
+    endpoint = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{quote(symbol)}?modules={modules}"
+    payload = fetch_json(endpoint)
+    summary = payload.get("quoteSummary") or {}
+    if summary.get("error"):
+        raise RuntimeError(summary["error"].get("description") or "Fund data was not available.")
+    return (summary.get("result") or [{}])[0] or {}
+
+
 def get_sec_fundamentals(symbol):
     if not re.fullmatch(r"[A-Z]{1,5}", symbol or ""):
         return {}
@@ -1042,10 +1268,26 @@ def get_screener_fundamentals(symbol):
         lambda: fetch_text(f"https://www.screener.in/company/{quote(screener_symbol)}/"),
         SEC_CACHE_TTL_SECONDS,
     )
-    return extract_screener_metrics(page)
+    screener = extract_screener_metrics(page)
+
+    if not has_shareholding_categories(screener.get("shareholding"), ("Promoters", "FIIs", "DIIs")):
+        consolidated_page = cached(
+            f"screener-consolidated:{screener_symbol}",
+            lambda: fetch_text(f"https://www.screener.in/company/{quote(screener_symbol)}/consolidated/"),
+            SEC_CACHE_TTL_SECONDS,
+        )
+        consolidated = extract_screener_metrics(consolidated_page)
+        screener["shareholding"] = merge_shareholding(screener.get("shareholding"), consolidated.get("shareholding"))
+        screener["metrics"]["promoterHolding"] = first_present(
+            screener["metrics"].get("promoterHolding"),
+            consolidated.get("metrics", {}).get("promoterHolding"),
+            latest_shareholding_value(screener.get("shareholding"), "Promoters"),
+        )
+
+    return screener
 
 
-def build_report(symbol, meta, candles, quote_data, summary, sec, screener):
+def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benchmark=None):
     closes = [item["close"] for item in candles]
     volumes = [item.get("volume") or 0 for item in candles]
     current = closes[-1]
@@ -1065,6 +1307,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener):
         screener.get("companyName"),
         symbol,
     )
+    screener = ensure_shareholding_data(symbol, long_name, screener)
 
     sma20 = sma(closes, 20)
     sma50 = sma(closes, 50)
@@ -1083,6 +1326,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener):
     fundamentals = extract_fundamentals(summary, quote_data, meta, sec, screener, current)
     events = extract_events(summary, screener)
     growth_drivers = build_growth_drivers(symbol, long_name, fundamentals, screener)
+    relative_strength = build_relative_strength(candles, benchmark)
     technical = score_technical({
         "current": current,
         "yearHigh": year_high,
@@ -1124,6 +1368,9 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener):
         "eventRisk": event_risk,
         "supportResistance": support_resistance,
         "source": source,
+        "symbol": symbol,
+        "ownership": growth_drivers.get("ownership"),
+        "relativeStrength": relative_strength,
     })
     scenarios = build_scenarios({
         "current": current,
@@ -1233,6 +1480,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener):
                 "sixMonth": round_or_none(period_return(closes, 126)),
                 "oneYear": round_or_none(period_return(closes, len(closes) - 1)),
             },
+            "relativeStrength": relative_strength,
             "levels": support_resistance,
         },
         "fundamentals": {
@@ -1249,6 +1497,342 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener):
         "researchLevels": research_levels,
         "series": series,
     }
+
+
+def build_asset_report(symbol, asset_type, meta, candles, quote_data, summary):
+    closes = [item["close"] for item in candles]
+    volumes = [item.get("volume") or 0 for item in candles]
+    current = closes[-1]
+    previous = closes[-2] if len(closes) > 1 else current
+    local_meta = local_asset_metadata(symbol, asset_type)
+    currency = first_present(
+        quote_data.get("currency"),
+        meta.get("currency"),
+        raw((summary.get("price") or {}).get("currency")),
+        "",
+    )
+    asset_label = ASSET_TYPE_CONFIG[asset_type]["label"]
+    price = summary.get("price") or {}
+    long_name = first_present(
+        quote_data.get("longName"),
+        quote_data.get("shortName"),
+        price.get("longName"),
+        price.get("shortName"),
+        local_meta.get("name"),
+        symbol,
+    )
+    sma50_value = last(sma(closes, 50))
+    sma200_value = last(sma(closes, 200))
+    atr14 = atr(candles, 14)
+    levels = find_levels(candles, current, last(atr14))
+    profile = extract_asset_profile(summary, quote_data, meta, asset_type, local_meta)
+    top_holdings = extract_asset_holdings(summary)
+    sectors = extract_sector_weightings(summary)
+    performance = build_asset_performance(closes)
+    risk = build_asset_risk_report(closes)
+    momentum = build_asset_momentum_report(current, sma50_value, sma200_value, performance)
+    confidence = build_asset_confidence_report(candles, profile, top_holdings, summary)
+    plan = build_asset_plan(asset_type, current, currency, levels, performance, risk, profile)
+    suitability_score = score_asset_suitability(momentum, risk, confidence, profile)
+    references = build_asset_references(symbol, long_name, quote_data, meta, asset_type)
+
+    series = [
+        {
+            "date": item["date"],
+            "open": round2(item["open"]),
+            "high": round2(item["high"]),
+            "low": round2(item["low"]),
+            "close": round2(item["close"]),
+            "volume": item.get("volume") or 0,
+        }
+        for item in candles[-260:]
+    ]
+
+    return {
+        "symbol": symbol,
+        "longName": long_name,
+        "assetType": asset_type,
+        "assetLabel": asset_label,
+        "currency": currency,
+        "source": "Yahoo Finance public endpoints",
+        "generatedAt": iso_now(),
+        "quote": {
+            "price": round2(current),
+            "previousClose": round2(previous),
+            "change": round2(current - previous),
+            "changePercent": round2(safe_divide(current - previous, previous) * 100),
+            "marketTime": iso_from_epoch(quote_data.get("regularMarketTime")) if quote_data.get("regularMarketTime") else None,
+            "exchange": quote_data.get("fullExchangeName") or quote_data.get("exchange") or meta.get("exchangeName") or local_meta.get("exchange") or "",
+            "quoteType": quote_data.get("quoteType") or price.get("quoteType") or "",
+        },
+        "scores": {
+            "suitability": suitability_score,
+            "momentum": momentum["score"],
+            "risk": risk["score"],
+            "confidence": confidence["score"],
+        },
+        "summary": summarize_asset_report(asset_label, suitability_score, momentum, risk, profile),
+        "profile": profile,
+        "performance": performance,
+        "risk": risk,
+        "momentum": momentum,
+        "confidence": confidence,
+        "holdings": {
+            "top": top_holdings,
+            "sectors": sectors,
+        },
+        "plan": plan,
+        "levels": levels,
+        "references": references,
+        "series": series,
+        "volume": {
+            "average20": round(last(sma(volumes, 20)) or 0),
+            "latest": round(volumes[-1] or 0),
+        },
+    }
+
+
+def extract_asset_profile(summary, quote_data, meta, asset_type, local_meta=None):
+    local_meta = local_meta or {}
+    price = summary.get("price") or {}
+    detail = summary.get("summaryDetail") or {}
+    key = summary.get("defaultKeyStatistics") or {}
+    profile = summary.get("fundProfile") or {}
+    return {
+        "category": first_present(raw(profile.get("categoryName")), raw(detail.get("category")), quote_data.get("market"), ", ".join(local_meta.get("tags") or [])),
+        "family": first_present(raw(profile.get("family")), quote_data.get("fundFamily")),
+        "legalType": first_present(raw(profile.get("legalType")), ASSET_TYPE_CONFIG[asset_type]["label"]),
+        "totalAssets": first_present(raw(detail.get("totalAssets")), raw(key.get("totalAssets")), quote_data.get("totalAssets")),
+        "navPrice": first_present(raw(detail.get("navPrice")), raw(price.get("regularMarketPrice")), quote_data.get("regularMarketPrice")),
+        "yield": first_present(raw(detail.get("yield")), raw(key.get("yield")), quote_data.get("yield")),
+        "expenseRatio": first_present(raw(detail.get("annualReportExpenseRatio")), raw(key.get("annualReportExpenseRatio")), raw(profile.get("annualReportExpenseRatio"))),
+        "turnover": first_present(raw(profile.get("annualHoldingsTurnover")), raw(key.get("annualHoldingsTurnover"))),
+        "beta3Year": first_present(raw(key.get("beta3Year")), raw(detail.get("beta3Year"))),
+        "ytdReturn": first_present(raw(key.get("ytdReturn")), raw(detail.get("ytdReturn"))),
+        "inceptionDate": iso_from_epoch(raw(key.get("fundInceptionDate"))) if raw(key.get("fundInceptionDate")) else None,
+        "exchange": quote_data.get("fullExchangeName") or quote_data.get("exchange") or meta.get("exchangeName") or local_meta.get("exchange") or "",
+        "quoteType": quote_data.get("quoteType") or price.get("quoteType") or "",
+    }
+
+
+def extract_asset_holdings(summary):
+    top_holdings = summary.get("topHoldings") or {}
+    holdings = []
+    for item in arrayify(top_holdings.get("holdings"))[:10]:
+        name = first_present(item.get("holdingName"), item.get("symbol"), item.get("name"))
+        if not name:
+            continue
+        percent = first_present(raw(item.get("holdingPercent")), raw(item.get("holdingPercentage")))
+        holdings.append({
+            "symbol": item.get("symbol") or "",
+            "name": name,
+            "percent": round_ratio_or_none(percent),
+        })
+    return holdings
+
+
+def extract_sector_weightings(summary):
+    top_holdings = summary.get("topHoldings") or {}
+    sectors = []
+    raw_sectors = top_holdings.get("sectorWeightings") or []
+    for item in arrayify(raw_sectors):
+        if not isinstance(item, dict):
+            continue
+        for key, value in item.items():
+            percent = raw(value)
+            if not is_finite(percent):
+                continue
+            sectors.append({
+                "name": humanize_sector_key(key),
+                "percent": round_ratio_or_none(percent),
+            })
+    return sorted(sectors, key=lambda item: item["percent"] or 0, reverse=True)[:8]
+
+
+def build_asset_performance(closes):
+    rows = [
+        {"key": "oneWeek", "label": "1W", "return": round_or_none(period_return(closes, 5))},
+        {"key": "oneMonth", "label": "1M", "return": round_or_none(period_return(closes, 21))},
+        {"key": "threeMonth", "label": "3M", "return": round_or_none(period_return(closes, 63))},
+        {"key": "sixMonth", "label": "6M", "return": round_or_none(period_return(closes, 126))},
+        {"key": "oneYear", "label": "1Y", "return": round_or_none(period_return(closes, min(252, len(closes) - 1)))},
+    ]
+    return {
+        "rows": rows,
+        "best": max([row for row in rows if is_finite(row.get("return"))], key=lambda row: row["return"], default=None),
+        "worst": min([row for row in rows if is_finite(row.get("return"))], key=lambda row: row["return"], default=None),
+    }
+
+
+def build_asset_risk_report(closes):
+    volatility = annualized_volatility(closes)
+    drawdown = max_drawdown_percent(closes)
+    score = 72
+    if is_finite(volatility):
+        score -= max(0, volatility - 12) * 1.1
+    if is_finite(drawdown):
+        score -= abs(min(drawdown, 0)) * 0.75
+    score = round(clamp(score, 0, 100))
+    label = "Low risk" if score >= 72 else "Moderate risk" if score >= 48 else "High risk"
+    return {
+        "score": score,
+        "label": label,
+        "summary": f"{label}. Check volatility, drawdown, expense ratio, and category fit before allocating.",
+        "annualizedVolatility": round_or_none(volatility),
+        "maxDrawdown": round_or_none(drawdown),
+    }
+
+
+def build_asset_momentum_report(current, sma50_value, sma200_value, performance):
+    one_month = next((row.get("return") for row in performance["rows"] if row["key"] == "oneMonth"), None)
+    three_month = next((row.get("return") for row in performance["rows"] if row["key"] == "threeMonth"), None)
+    six_month = next((row.get("return") for row in performance["rows"] if row["key"] == "sixMonth"), None)
+    score = 50
+    if is_finite(one_month):
+        score += clamp(one_month * 1.4, -15, 18)
+    if is_finite(three_month):
+        score += clamp(three_month * 0.9, -16, 18)
+    if is_finite(six_month):
+        score += clamp(six_month * 0.45, -12, 16)
+    if is_finite(sma50_value) and current > sma50_value:
+        score += 8
+    elif is_finite(sma50_value):
+        score -= 8
+    if is_finite(sma200_value) and current > sma200_value:
+        score += 8
+    elif is_finite(sma200_value):
+        score -= 8
+    score = round(clamp(score, 0, 100))
+    label = "Strong" if score >= 70 else "Neutral" if score >= 45 else "Weak"
+    return {
+        "score": score,
+        "label": label,
+        "summary": f"{label} momentum based on recent returns and 50/200-day trend position.",
+        "sma50": round_or_none(sma50_value),
+        "sma200": round_or_none(sma200_value),
+    }
+
+
+def build_asset_confidence_report(candles, profile, holdings, summary):
+    score = 45
+    checks = []
+    if len(candles) >= 250:
+        score += 20
+        checks.append("At least one year of daily history is available.")
+    else:
+        checks.append("Price history is shorter than one year.")
+    if is_finite(profile.get("expenseRatio")):
+        score += 12
+        checks.append("Expense ratio was available.")
+    else:
+        checks.append("Expense ratio was not available.")
+    if is_finite(profile.get("totalAssets")):
+        score += 12
+        checks.append("AUM / total assets was available.")
+    if holdings:
+        score += 10
+        checks.append("Top holdings were available.")
+    if summary.get("fundProfile"):
+        score += 8
+        checks.append("Fund profile data was available.")
+    score = round(clamp(score, 0, 100))
+    return {
+        "score": score,
+        "label": "High" if score >= 75 else "Moderate" if score >= 55 else "Low",
+        "checks": checks,
+    }
+
+
+def build_asset_plan(asset_type, current, currency, levels, performance, risk, profile):
+    first_support = array_get(levels.get("supportZones"), 0)
+    first_resistance = array_get(levels.get("resistanceZones"), 0)
+    support = first_support["price"] if first_support else current * 0.96
+    resistance = first_resistance["price"] if first_resistance else current * 1.06
+    one_month = next((row.get("return") for row in performance["rows"] if row["key"] == "oneMonth"), None)
+    expense = expense_ratio_percent(profile.get("expenseRatio"))
+
+    if asset_type == "etf":
+        title = "ETF allocation plan"
+        items = [
+            {"label": "Entry discipline", "value": f"{format_currency_value(support, currency)} - {format_currency_value(current, currency)}", "detail": "Prefer staggered buying near support or after a close back above short-term trend."},
+            {"label": "Exit / trim zone", "value": format_currency_value(resistance, currency), "detail": "Trim tactical ETF exposure near resistance if momentum fades or market breadth weakens."},
+            {"label": "Risk control", "value": risk["label"], "detail": "Reassess if price closes below support with rising volatility."},
+        ]
+    else:
+        title = "Mutual fund allocation plan"
+        items = [
+            {"label": "SIP suitability", "value": "Prefer staggered allocation", "detail": "Use SIP/STP for volatile categories; avoid judging a mutual fund only from one-month returns."},
+            {"label": "Lump-sum filter", "value": f"Review near {format_currency_value(support, currency)}", "detail": "For equity funds, deploy lump sum more cautiously after sharp short-term rallies."},
+            {"label": "Review trigger", "value": risk["label"], "detail": "Review category, benchmark, manager consistency, expense ratio, and drawdown every quarter."},
+        ]
+
+    if is_finite(one_month):
+        items.append({
+            "label": "Short-term trend",
+            "value": f"{one_month:+.2f}%",
+            "detail": "Use short-term return as timing context, not as the primary fund selection criterion.",
+        })
+    if is_finite(expense):
+        items.append({
+            "label": "Cost check",
+            "value": f"{expense:.2f}%",
+            "detail": "Lower cost improves long-term compounding when tracking and category quality are similar.",
+        })
+
+    return {
+        "title": title,
+        "items": items,
+    }
+
+
+def score_asset_suitability(momentum, risk, confidence, profile):
+    expense = expense_ratio_percent(profile.get("expenseRatio"))
+    cost_score = 70
+    if is_finite(expense):
+        cost_score = clamp(92 - expense * 18, 35, 95)
+    return round(weighted_average([
+        (momentum["score"], 0.35),
+        (risk["score"], 0.28),
+        (confidence["score"], 0.22),
+        (cost_score, 0.15),
+    ]))
+
+
+def summarize_asset_report(asset_label, suitability_score, momentum, risk, profile):
+    cost = expense_ratio_percent(profile.get("expenseRatio"))
+    cost_text = f" Expense ratio: {cost:.2f}%." if is_finite(cost) else " Expense ratio was not available."
+    label = "Strong" if suitability_score >= 72 else "Balanced" if suitability_score >= 52 else "Weak"
+    return f"{label} {asset_label} setup: {momentum['label'].lower()} momentum with {risk['label'].lower()}.{cost_text}"
+
+
+def build_asset_references(symbol, long_name, quote_data, meta, asset_type):
+    tv_symbol = to_trading_view_symbol(symbol, quote_data, meta)
+    links = [
+        {
+            "label": "Yahoo Finance profile",
+            "url": f"https://finance.yahoo.com/quote/{quote(symbol)}",
+            "note": "Cross-check NAV/price, expense ratio, AUM, holdings, and performance source fields.",
+        },
+    ]
+    if tv_symbol:
+        links.append({
+            "label": "TradingView chart",
+            "url": f"https://www.tradingview.com/chart/?symbol={quote(tv_symbol)}",
+            "note": "Review live chart, trend, and support/resistance behavior.",
+        })
+    if asset_type == "mutual-fund":
+        links.append({
+            "label": "Morningstar search",
+            "url": f"https://www.morningstar.com/search?query={quote(long_name or symbol)}",
+            "note": "Cross-check fund category, risk, returns, holdings, and expense details.",
+        })
+    else:
+        links.append({
+            "label": "ETF.com search",
+            "url": f"https://www.etf.com/search?query={quote(long_name or symbol)}",
+            "note": "Cross-check ETF holdings, liquidity, expense ratio, and tracking exposure.",
+        })
+    return {"tradingViewSymbol": tv_symbol, "links": links}
 
 
 def extract_fundamentals(summary, quote_data, meta, sec, screener, current_price):
@@ -1336,6 +1920,299 @@ def extract_screener_metrics(page):
         "shareholding": extract_screener_shareholding(page),
         "events": extract_screener_events(page),
     }
+
+
+def ensure_shareholding_data(symbol, long_name, screener):
+    if not (symbol.endswith(".NS") or symbol.endswith(".BO")):
+        return screener or {}
+
+    screener = dict(screener or {})
+    metrics = dict(screener.get("metrics") or {})
+    shareholding = screener.get("shareholding") or {"periods": [], "rows": []}
+    missing_rows = not has_shareholding_categories(shareholding, ("Promoters", "FIIs", "DIIs"))
+    missing_promoter_metric = not is_finite(metrics.get("promoterHolding"))
+
+    if missing_rows:
+        fallback = safe_public_shareholding(symbol, long_name)
+        if fallback.get("rows"):
+            shareholding = merge_shareholding(shareholding, fallback)
+
+    if missing_promoter_metric:
+        metrics["promoterHolding"] = latest_shareholding_value(shareholding, "Promoters")
+
+    screener["metrics"] = metrics
+    screener["shareholding"] = shareholding
+    if shareholding.get("source"):
+        screener["source"] = combine_source_labels(screener.get("source"), shareholding.get("source"))
+    return screener
+
+
+def safe_public_shareholding(symbol, long_name):
+    try:
+        return cached(
+            f"public-shareholding:{symbol}:{stock_slug_seed(long_name)}",
+            lambda: get_public_shareholding(symbol, long_name),
+            SEC_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        return {"periods": [], "rows": []}
+
+
+def get_public_shareholding(symbol, long_name):
+    if not (symbol.endswith(".NS") or symbol.endswith(".BO")):
+        return {"periods": [], "rows": []}
+
+    combined = {"periods": [], "rows": [], "source": ""}
+    for loader in (get_groww_shareholding, get_upstox_shareholding):
+        source = loader(symbol, long_name)
+        if source.get("rows"):
+            combined = merge_shareholding(combined, source)
+            if has_shareholding_categories(combined, ("Promoters", "FIIs", "DIIs")):
+                break
+    return combined
+
+
+def get_groww_shareholding(symbol, long_name):
+    for slug in company_slug_candidates(symbol, long_name, groww=True):
+        try:
+            page = fetch_text(f"https://groww.in/stocks/{quote(slug)}/share-holding")
+        except Exception:
+            continue
+        shareholding = extract_groww_shareholding(page)
+        if shareholding.get("rows"):
+            return shareholding
+    return {"periods": [], "rows": []}
+
+
+def get_upstox_shareholding(symbol, long_name):
+    for slug in company_slug_candidates(symbol, long_name, groww=False):
+        try:
+            page = fetch_text(f"https://upstox.com/stocks/{quote(slug)}-shareholding/")
+        except Exception:
+            continue
+        shareholding = extract_upstox_shareholding(page)
+        if shareholding.get("rows"):
+            return shareholding
+    return {"periods": [], "rows": []}
+
+
+def extract_groww_shareholding(page):
+    script = match_first(page, r"<script[^>]+id=\"__NEXT_DATA__\"[^>]*>([\s\S]*?)</script>")
+    if not script:
+        return {"periods": [], "rows": []}
+
+    try:
+        data = json.loads(html.unescape(script))
+    except json.JSONDecodeError:
+        return {"periods": [], "rows": []}
+
+    stock_data = (((data.get("props") or {}).get("pageProps") or {}).get("stockData") or {})
+    pattern = stock_data.get("shareHoldingPattern") or {}
+    series = {name: [] for name in OWNERSHIP_ROW_NAMES}
+
+    for period, values in pattern.items():
+        promoter = nested_percent_total(values.get("promoters"))
+        fii = nested_percent_total(values.get("foreignInstitutions"))
+        domestic = add_numbers(
+            nested_percent_total(values.get("otherDomesticInstitutions")),
+            nested_percent_total(values.get("mutualFunds")),
+        )
+        public = nested_percent_total(values.get("retailAndOthers"))
+        add_shareholding_point(series, "Promoters", period, promoter)
+        add_shareholding_point(series, "FIIs", period, fii)
+        add_shareholding_point(series, "DIIs", period, domestic)
+        add_shareholding_point(series, "Public", period, public)
+
+    return build_shareholding_from_series(series, "Groww public shareholding")
+
+
+def extract_upstox_shareholding(page):
+    text = html.unescape(page).replace('\\"', '"')
+    series = {name: [] for name in OWNERSHIP_ROW_NAMES}
+    for match in re.finditer(r'\{"shareHolderType":"([^"]+)"[\s\S]*?"history":\[(.*?)\]\}', text):
+        row_name = normalize_shareholder_name(match.group(1))
+        if row_name not in set(OWNERSHIP_ROW_NAMES) | {"Mutual Funds"}:
+            continue
+        for item in re.finditer(r'\{"period":"([^"]+)","totalPercent":(-?[\d.]+)', match.group(2)):
+            period = item.group(1)
+            value = parse_loose_number(item.group(2))
+            target_name = "DIIs" if row_name == "Mutual Funds" else row_name
+            add_shareholding_point(series, target_name, period, value)
+
+    return build_shareholding_from_series(series, "Upstox public shareholding")
+
+
+def add_shareholding_point(series, name, period, percent_value):
+    if not period or not is_finite(percent_value):
+        return
+    ratio_value = percent_value / 100
+    existing = next((item for item in series[name] if item["period"] == period), None)
+    if existing:
+        existing["value"] = add_numbers(existing["value"], ratio_value)
+    else:
+        series[name].append({"period": normalize_period_label(period), "value": ratio_value})
+
+
+def build_shareholding_from_series(series, source):
+    rows = []
+    for name in OWNERSHIP_ROW_NAMES:
+        quarters = [
+            quarter
+            for quarter in sorted(series.get(name) or [], key=lambda item: shareholding_period_key(item["period"]))
+            if is_finite(quarter.get("value"))
+        ][-4:]
+        if quarters:
+            rows.append({"name": name, "quarters": quarters})
+
+    return {
+        "periods": shareholding_periods_from_rows(rows),
+        "rows": rows,
+        "source": source if rows else "",
+    }
+
+
+def nested_percent_total(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        if is_finite(value.get("percent")):
+            return value["percent"]
+        values = [nested_percent_total(item) for item in value.values()]
+        values = [item for item in values if is_finite(item)]
+        return sum(values) if values else None
+    if isinstance(value, list):
+        values = [nested_percent_total(item) for item in value]
+        values = [item for item in values if is_finite(item)]
+        return sum(values) if values else None
+    return None
+
+
+def merge_shareholding(primary, fallback):
+    primary = primary or {"periods": [], "rows": []}
+    fallback = fallback or {"periods": [], "rows": []}
+    rows_by_name = {
+        row.get("name"): {"name": row.get("name"), "quarters": list(row.get("quarters") or [])}
+        for row in primary.get("rows") or []
+        if row.get("name")
+    }
+
+    for row in fallback.get("rows") or []:
+        name = row.get("name")
+        quarters = row.get("quarters") or []
+        if not name or not quarters:
+            continue
+        if name not in rows_by_name or not rows_by_name[name].get("quarters"):
+            rows_by_name[name] = {"name": name, "quarters": list(quarters)}
+
+    rows = [
+        {"name": name, "quarters": sorted(row["quarters"], key=lambda item: shareholding_period_key(item["period"]))[-4:]}
+        for name, row in rows_by_name.items()
+        if row.get("quarters")
+    ]
+
+    source = combine_source_labels(primary.get("source"), fallback.get("source"))
+    return {
+        "periods": shareholding_periods_from_rows(rows),
+        "rows": rows,
+        "source": source,
+    }
+
+
+def has_shareholding_categories(shareholding, names):
+    rows_by_name = {
+        row.get("name"): row
+        for row in (shareholding or {}).get("rows") or []
+    }
+    return all(rows_by_name.get(name, {}).get("quarters") for name in names)
+
+
+def latest_shareholding_value(shareholding, name):
+    rows = (shareholding or {}).get("rows") or []
+    row = next((item for item in rows if item.get("name") == name), None)
+    quarters = row.get("quarters") if row else []
+    return quarters[-1]["value"] if quarters and is_finite(quarters[-1].get("value")) else None
+
+
+def shareholding_periods_from_rows(rows):
+    periods = {
+        quarter["period"]
+        for row in rows
+        for quarter in row.get("quarters") or []
+        if quarter.get("period")
+    }
+    return sorted(periods, key=shareholding_period_key)
+
+
+def normalize_period_label(period):
+    text = clean_html(str(period)).replace("Sept", "Sep").strip()
+    match = re.search(r"\b(Mar|Jun|Sep|Dec)\s+'?(\d{2}|\d{4})\b", text, flags=re.IGNORECASE)
+    if not match:
+        return text
+    month = match.group(1).title()
+    year = int(match.group(2))
+    year = 2000 + year if year < 100 else year
+    return f"{month} {year}"
+
+
+def shareholding_period_key(period):
+    text = normalize_period_label(period)
+    month_order = {"Mar": 3, "Jun": 6, "Sep": 9, "Dec": 12}
+    match = re.search(r"\b(Mar|Jun|Sep|Dec)\s+(\d{4})\b", text)
+    if not match:
+        return (0, 0, text)
+    return (int(match.group(2)), month_order.get(match.group(1), 0), text)
+
+
+def company_slug_candidates(symbol, long_name, groww):
+    base_symbol = re.sub(r"\.(NS|BO)$", "", symbol, flags=re.IGNORECASE)
+    seeds = [long_name or "", base_symbol]
+    candidates = []
+
+    for seed in seeds:
+        cleaned = clean_company_slug_seed(seed)
+        variants = [cleaned]
+        variants.append(re.sub(r"\blimited\b", "ltd", cleaned))
+        variants.append(re.sub(r"\bltd\b", "limited", cleaned))
+        variants.append(re.sub(r"\b(limited|ltd)\b", "", cleaned))
+        for variant in variants:
+            slug = slugify_company_name(variant)
+            if slug and slug not in candidates:
+                candidates.append(slug)
+
+    if groww:
+        return candidates[:8]
+    return candidates[:10]
+
+
+def clean_company_slug_seed(value):
+    text = html.unescape(str(value or "")).lower()
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = text.replace("&", " and ")
+    text = text.replace("'", "")
+    text = re.sub(r"\b(company|co)\b", " ", text)
+    return text
+
+
+def slugify_company_name(value):
+    text = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    text = re.sub(r"-{2,}", "-", text)
+    return text
+
+
+def stock_slug_seed(value):
+    return slugify_company_name(clean_company_slug_seed(value or "stock"))
+
+
+def combine_source_labels(*sources):
+    labels = []
+    for source in sources:
+        for label in str(source or "").split(" + "):
+            clean = label.strip()
+            if clean and clean not in labels:
+                labels.append(clean)
+    return " + ".join(labels)
 
 
 def extract_sec_metrics(payload, fallback_name):
@@ -1548,12 +2425,16 @@ def build_ownership_trend(shareholding, fundamentals):
         latest = quarters[-1]["value"]
         previous = quarters[-2]["value"] if len(quarters) > 1 else None
         change_points = (latest - first) * 100 if is_finite(latest) and is_finite(first) else None
+        quarter_change_points = (latest - previous) * 100 if is_finite(latest) and is_finite(previous) else None
         rows.append({
             "name": row["name"],
             "latest": round_ratio_or_none(latest),
             "previous": round_ratio_or_none(previous),
             "changePoints": round_or_none(change_points),
+            "quarterChangePoints": round_or_none(quarter_change_points),
             "trend": holding_trend(change_points),
+            "latestPeriod": quarters[-1].get("period"),
+            "previousPeriod": quarters[-2].get("period") if len(quarters) > 1 else None,
             "quarters": [
                 {"period": quarter["period"], "value": round_ratio_or_none(quarter["value"])}
                 for quarter in quarters
@@ -1566,7 +2447,10 @@ def build_ownership_trend(shareholding, fundamentals):
             "latest": round_ratio_or_none(fundamentals["promoterHolding"]),
             "previous": None,
             "changePoints": None,
+            "quarterChangePoints": None,
             "trend": "Latest only",
+            "latestPeriod": "Latest",
+            "previousPeriod": None,
             "quarters": [{"period": "Latest", "value": round_ratio_or_none(fundamentals["promoterHolding"])}],
         })
 
@@ -1582,7 +2466,57 @@ def build_ownership_trend(shareholding, fundamentals):
         "periods": shareholding.get("periods") or [],
         "rows": rows,
         "signals": signals,
+        "flags": build_ownership_flags(rows, shareholding.get("source") or ""),
+        "source": shareholding.get("source") or "",
     }
+
+
+def build_ownership_flags(rows, source):
+    flags = []
+    rows_by_name = {row.get("name"): row for row in rows if row.get("name")}
+
+    for name in ["Promoters", "FIIs", "DIIs"]:
+        row = rows_by_name.get(name)
+        if not row or not is_finite(row.get("latest")):
+            flags.append({
+                "type": "warning",
+                "title": f"{name} holding unavailable",
+                "detail": "Cross-check the latest exchange shareholding pattern before relying on ownership signals.",
+            })
+
+    promoter_change = (rows_by_name.get("Promoters") or {}).get("quarterChangePoints")
+    if is_finite(promoter_change):
+        if promoter_change <= -0.5:
+            flags.append({
+                "type": "warning",
+                "title": "Promoter holding reduced",
+                "detail": f"Promoters reduced holding by {abs(promoter_change):.2f} pp versus the previous available quarter.",
+            })
+        elif promoter_change >= 0.5:
+            flags.append({
+                "type": "positive",
+                "title": "Promoter holding improved",
+                "detail": f"Promoters increased holding by {promoter_change:.2f} pp versus the previous available quarter.",
+            })
+
+    for name in ["FIIs", "DIIs"]:
+        change = (rows_by_name.get(name) or {}).get("quarterChangePoints")
+        if not is_finite(change) or abs(change) < 0.5:
+            continue
+        flags.append({
+            "type": "positive" if change > 0 else "warning",
+            "title": f"{name} {'accumulation' if change > 0 else 'reduction'}",
+            "detail": f"{name} {'added' if change > 0 else 'reduced'} {abs(change):.2f} pp versus the previous available quarter.",
+        })
+
+    if source:
+        flags.append({
+            "type": "neutral",
+            "title": "Ownership source",
+            "detail": source,
+        })
+
+    return flags[:6]
 
 
 def holding_trend(change_points):
@@ -1669,6 +2603,72 @@ def score_growth_catalyst(text, published_epoch):
         age_days = max(0, (time.time() - float(published_epoch)) / 86400)
         recency_score = clamp(28 - age_days * 0.12, 0, 28)
     return round(clamp(keyword_score + value_score + recency_score, 0, 100))
+
+
+def build_relative_strength(candles, benchmark):
+    benchmark = benchmark or {}
+    stock_closes = [item["close"] for item in candles if is_finite(item.get("close"))]
+    benchmark_candles = benchmark.get("candles") or []
+    benchmark_closes = [item["close"] for item in benchmark_candles if is_finite(item.get("close"))]
+    benchmark_symbol = benchmark.get("symbol") or ""
+    benchmark_name = benchmark.get("name") or benchmark_symbol or "Benchmark"
+    periods = [
+        ("oneWeek", "1W", 5),
+        ("oneMonth", "1M", 21),
+        ("threeMonth", "3M", 63),
+        ("sixMonth", "6M", 126),
+    ]
+    rows = []
+
+    for key, label, sessions in periods:
+        stock_return = period_return(stock_closes, sessions)
+        benchmark_return = period_return(benchmark_closes, sessions)
+        spread = (
+            stock_return - benchmark_return
+            if is_finite(stock_return) and is_finite(benchmark_return)
+            else None
+        )
+        rows.append({
+            "period": key,
+            "label": label,
+            "stockReturn": round_or_none(stock_return),
+            "benchmarkReturn": round_or_none(benchmark_return),
+            "spread": round_or_none(spread),
+        })
+
+    spreads = [row["spread"] for row in rows if is_finite(row.get("spread"))]
+    average_spread = sum(spreads) / len(spreads) if spreads else None
+    label = relative_strength_label(average_spread)
+
+    return {
+        "available": bool(spreads),
+        "expected": bool(benchmark_symbol),
+        "benchmarkSymbol": benchmark_symbol,
+        "benchmarkName": benchmark_name,
+        "rows": rows,
+        "averageSpread": round_or_none(average_spread),
+        "label": label,
+        "summary": relative_strength_summary(label, average_spread, benchmark_name),
+    }
+
+
+def relative_strength_label(average_spread):
+    if not is_finite(average_spread):
+        return "Unavailable"
+    if average_spread >= 5:
+        return "Strong outperformer"
+    if average_spread >= 1.5:
+        return "Outperforming"
+    if average_spread > -1.5:
+        return "In line"
+    return "Lagging"
+
+
+def relative_strength_summary(label, average_spread, benchmark_name):
+    if not is_finite(average_spread):
+        return f"Benchmark comparison with {benchmark_name} could not be calculated from the available data."
+    direction = "outperforming" if average_spread >= 0 else "underperforming"
+    return f"{label}: average {abs(average_spread):.2f} pp {direction} versus {benchmark_name} across available lookbacks."
 
 
 def build_budget_impacts(symbol, long_name, fundamentals):
@@ -1819,12 +2819,9 @@ def extract_screener_shareholding(page):
             rows.append({"name": row_name, "quarters": quarters})
 
     return {
-        "periods": list(dict.fromkeys([
-            quarter["period"]
-            for row in rows
-            for quarter in row["quarters"]
-        ])),
+        "periods": shareholding_periods_from_rows(rows),
         "rows": rows,
+        "source": "Screener.in shareholding",
     }
 
 
@@ -2422,6 +3419,10 @@ def build_quality_report(data):
     available_metrics = len([name for name in metric_names if is_finite(data["fundamentals"].get(name))])
     chart_points = len(data["candles"])
     level_count = len(data["supportResistance"].get("supportZones") or []) + len(data["supportResistance"].get("resistanceZones") or [])
+    symbol = data.get("symbol") or ""
+    is_indian_symbol = symbol.endswith(".NS") or symbol.endswith(".BO")
+    ownership = data.get("ownership") or {}
+    relative_strength = data.get("relativeStrength") or {}
     warnings = []
     strengths = []
     score = 55
@@ -2454,6 +3455,23 @@ def build_quality_report(data):
         score -= 4
         warnings.append("Indian fundamentals use Screener.in summary parsing, so the fields should be cross-checked.")
 
+    if has_shareholding_categories(ownership, ("Promoters", "FIIs", "DIIs")):
+        score += 8
+        strengths.append("Promoter, FII, and DII holdings were available for the latest ownership view.")
+    elif is_indian_symbol:
+        score -= 10
+        warnings.append("Promoter/FII/DII holding coverage is incomplete for this symbol.")
+
+    if ownership.get("source"):
+        strengths.append(f"Ownership source: {ownership['source']}.")
+
+    if relative_strength.get("available"):
+        score += 7
+        strengths.append(f"Relative strength versus {relative_strength.get('benchmarkName') or 'benchmark'} was calculated.")
+    elif relative_strength.get("expected"):
+        score -= 6
+        warnings.append("Benchmark-relative strength could not be calculated from the available data.")
+
     if not data["quote"].get("regularMarketTime"):
         score -= 4
         warnings.append("Provider did not return an official market timestamp for the quote.")
@@ -2471,6 +3489,9 @@ def build_quality_report(data):
     else:
         warnings.append("Analyst target data was not available.")
 
+    if is_indian_symbol:
+        warnings.append("Use the NSE/BSE filing links to verify shareholding, board changes, and order announcements before trading.")
+
     score = clamp(round(score), 0, 100)
     return {
         "score": score,
@@ -2485,9 +3506,54 @@ def build_quality_report(data):
         "chartPoints": chart_points,
         "availableFundamentalMetrics": available_metrics,
         "dataSources": data["source"],
+        "checks": build_accuracy_checks(data, ownership, relative_strength),
         "strengths": strengths,
         "warnings": warnings,
     }
+
+
+def build_accuracy_checks(data, ownership, relative_strength):
+    symbol = data.get("symbol") or ""
+    is_indian_symbol = symbol.endswith(".NS") or symbol.endswith(".BO")
+    checks = []
+
+    checks.append({
+        "label": "Price and chart history",
+        "status": "Available" if len(data["candles"]) >= 200 else "Partial",
+        "tone": "positive" if len(data["candles"]) >= 200 else "warning",
+        "detail": f"{len(data['candles'])} daily candles loaded for the setup.",
+    })
+
+    checks.append({
+        "label": "Promoter/FII/DII holdings",
+        "status": "Available" if has_shareholding_categories(ownership, ("Promoters", "FIIs", "DIIs")) else "Needs verification",
+        "tone": "positive" if has_shareholding_categories(ownership, ("Promoters", "FIIs", "DIIs")) else "warning",
+        "detail": ownership.get("source") or "Latest ownership rows were not available from public sources.",
+    })
+
+    checks.append({
+        "label": "Relative strength",
+        "status": relative_strength.get("label") or "Unavailable",
+        "tone": "positive" if relative_strength.get("available") and (relative_strength.get("averageSpread") or 0) >= 0 else "warning" if relative_strength.get("expected") else "neutral",
+        "detail": relative_strength.get("summary") or "Benchmark comparison was not available.",
+    })
+
+    if is_indian_symbol:
+        checks.append({
+            "label": "Official exchange filings",
+            "status": "Manual cross-check",
+            "tone": "neutral",
+            "detail": "NSE/BSE links are provided to verify shareholding pattern, announcements, results, and board changes.",
+        })
+
+    checks.append({
+        "label": "Fundamental coverage",
+        "status": "Strong" if data["fundamentals"].get("dataSource") and data["fundamental"]["score"] >= 60 else "Review",
+        "tone": "positive" if data["fundamental"]["score"] >= 60 else "warning",
+        "detail": f"{data['fundamental']['score']}/100 fundamental score with {data['source'] or 'available public'} sources.",
+    })
+
+    return checks
 
 
 def build_scenarios(data):
@@ -2556,6 +3622,26 @@ def build_references(symbol, long_name, quote_data, meta):
             "label": "Screener company page",
             "url": f"https://www.screener.in/company/{quote(base_symbol)}/",
             "note": "Cross-check Indian fundamentals and announcements.",
+        })
+        links.append({
+            "label": "NSE shareholding pattern",
+            "url": f"https://www.nseindia.com/companies-listing/corporate-filings-shareholding-pattern?symbol={quote(base_symbol)}&tabIndex=equity",
+            "note": "Official promoter/public shareholding filings; verify latest quarter and XBRL details.",
+        })
+        links.append({
+            "label": "NSE announcements",
+            "url": f"https://www.nseindia.com/companies-listing/corporate-filings-announcements?symbol={quote(base_symbol)}&tabIndex=equity",
+            "note": "Official filings for orders, board changes, results, and investor updates.",
+        })
+        links.append({
+            "label": "BSE shareholding pattern",
+            "url": "https://www.bseindia.com/corporates/shpSecurities.aspx?lang=en-gb",
+            "note": "Official BSE shareholding page; enter the company or scrip code if the page does not auto-load.",
+        })
+        links.append({
+            "label": "BSE announcements",
+            "url": "https://www.bseindia.com/corporates/ann.html",
+            "note": "Official BSE announcements for orders, promoter changes, results, and disclosures.",
         })
         links.append({
             "label": "Moneycontrol search",
@@ -2830,6 +3916,56 @@ def period_return(values, sessions):
     start = values[-1 - sessions]
     end = values[-1]
     return safe_divide(end - start, start) * 100
+
+
+def daily_return_series(values):
+    returns = []
+    for index in range(1, len(values)):
+        previous = values[index - 1]
+        current = values[index]
+        if is_finite(previous) and previous and is_finite(current):
+            returns.append((current - previous) / previous)
+    return returns
+
+
+def annualized_volatility(values):
+    returns = daily_return_series(values)
+    if len(returns) < 20:
+        return None
+    average = sum(returns) / len(returns)
+    variance = sum((item - average) ** 2 for item in returns) / (len(returns) - 1)
+    return math.sqrt(variance) * math.sqrt(252) * 100
+
+
+def max_drawdown_percent(values):
+    peak = None
+    max_drawdown = 0
+    for value in values:
+        if not is_finite(value):
+            continue
+        peak = value if peak is None else max(peak, value)
+        if peak:
+            drawdown = (value - peak) / peak * 100
+            max_drawdown = min(max_drawdown, drawdown)
+    return max_drawdown
+
+
+def expense_ratio_percent(value):
+    if not is_finite(value):
+        return None
+    return value * 100 if value <= 1 else value
+
+
+def humanize_sector_key(value):
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(value or ""))
+    text = text.replace("_", " ").replace("-", " ").strip()
+    return text.title() if text else "Other"
+
+
+def format_currency_value(value, currency):
+    if not is_finite(value):
+        return "n/a"
+    return f"{currency + ' ' if currency else ''}{round2(value)}"
 
 
 def fetch_json(endpoint, sec=False):

@@ -7,10 +7,14 @@ const errorState = document.querySelector("#errorState");
 const reportEl = document.querySelector("#report");
 const canvas = document.querySelector("#priceChart");
 const analysisTab = document.querySelector("#analysisTab");
+const etfTab = document.querySelector("#etfTab");
+const fundTab = document.querySelector("#fundTab");
 const monitorTab = document.querySelector("#monitorTab");
 const tradeTab = document.querySelector("#tradeTab");
 const searchLogTab = document.querySelector("#searchLogTab");
 const analysisView = document.querySelector("#analysisView");
+const etfView = document.querySelector("#etfView");
+const fundView = document.querySelector("#fundView");
 const monitorView = document.querySelector("#monitorView");
 const tradeView = document.querySelector("#tradeView");
 const searchLogView = document.querySelector("#searchLogView");
@@ -30,12 +34,34 @@ const tradeError = document.querySelector("#tradeError");
 const useCurrentReport = document.querySelector("#useCurrentReport");
 const chartSupportToggle = document.querySelector("#chartSupportToggle");
 const chartResistanceToggle = document.querySelector("#chartResistanceToggle");
+const assetContexts = {
+  etf: {
+    tab: etfTab,
+    view: etfView,
+    form: document.querySelector("#etfForm"),
+    input: document.querySelector("#etfInput"),
+    suggestions: document.querySelector("#etfSuggestions"),
+    type: "etf",
+    prefix: "etf"
+  },
+  fund: {
+    tab: fundTab,
+    view: fundView,
+    form: document.querySelector("#fundForm"),
+    input: document.querySelector("#fundInput"),
+    suggestions: document.querySelector("#fundSuggestions"),
+    type: "mutual-fund",
+    prefix: "fund"
+  }
+};
 
 let latestReport = null;
 let latestMonitor = null;
 let latestTradeReferences = null;
 let latestSearchLogs = null;
+let latestAssetReports = { etf: null, fund: null };
 let searchTimer = null;
+let assetSearchTimers = { etf: null, fund: null };
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -48,6 +74,8 @@ form.addEventListener("submit", async (event) => {
 });
 
 analysisTab.addEventListener("click", () => setActiveTab("analysis"));
+etfTab.addEventListener("click", () => setActiveTab("etf"));
+fundTab.addEventListener("click", () => setActiveTab("fund"));
 monitorTab.addEventListener("click", () => {
   setActiveTab("monitor");
   if (!latestMonitor) {
@@ -93,6 +121,28 @@ tradeRows.addEventListener("click", async (event) => {
   await deleteTradeReference(button.dataset.deleteTrade);
 });
 
+for (const context of Object.values(assetContexts)) {
+  context.form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const symbol = context.input.value.trim();
+    if (!symbol) {
+      return;
+    }
+    setActiveTab(context.prefix);
+    await analyzeAsset(context, symbol);
+  });
+
+  context.input.addEventListener("input", () => {
+    clearTimeout(assetSearchTimers[context.prefix]);
+    const query = context.input.value.trim();
+    if (query.length < 1) {
+      context.suggestions.innerHTML = "";
+      return;
+    }
+    assetSearchTimers[context.prefix] = setTimeout(() => searchAssets(context, query), 180);
+  });
+}
+
 symbolInput.addEventListener("input", () => {
   clearTimeout(searchTimer);
   const query = symbolInput.value.trim();
@@ -110,21 +160,34 @@ window.addEventListener("resize", () => {
 });
 
 function setActiveTab(tab) {
+  const isEtf = tab === "etf";
+  const isFund = tab === "fund";
   const isMonitor = tab === "monitor";
   const isTrade = tab === "trade";
   const isLogs = tab === "logs";
-  const isAnalysis = !isMonitor && !isTrade && !isLogs;
+  const isAnalysis = !isEtf && !isFund && !isMonitor && !isTrade && !isLogs;
   analysisTab.classList.toggle("is-active", isAnalysis);
+  etfTab.classList.toggle("is-active", isEtf);
+  fundTab.classList.toggle("is-active", isFund);
   monitorTab.classList.toggle("is-active", isMonitor);
   tradeTab.classList.toggle("is-active", isTrade);
   searchLogTab.classList.toggle("is-active", isLogs);
   analysisView.classList.toggle("is-hidden", !isAnalysis);
+  etfView.classList.toggle("is-hidden", !isEtf);
+  fundView.classList.toggle("is-hidden", !isFund);
   monitorView.classList.toggle("is-hidden", !isMonitor);
   tradeView.classList.toggle("is-hidden", !isTrade);
   searchLogView.classList.toggle("is-hidden", !isLogs);
   if (isAnalysis && latestReport) {
     redrawChart();
   }
+}
+
+function showAssetState(prefix, state) {
+  document.querySelector(`#${prefix}Empty`).classList.toggle("is-hidden", state !== "empty");
+  document.querySelector(`#${prefix}Loading`).classList.toggle("is-hidden", state !== "loading");
+  document.querySelector(`#${prefix}Error`).classList.toggle("is-hidden", state !== "error");
+  document.querySelector(`#${prefix}Report`).classList.toggle("is-hidden", state !== "report");
 }
 
 async function analyze(symbol) {
@@ -146,6 +209,25 @@ async function analyze(symbol) {
   }
 }
 
+async function analyzeAsset(context, symbol) {
+  showAssetState(context.prefix, "loading");
+  try {
+    const response = await fetch(`/api/analyze-asset?type=${encodeURIComponent(context.type)}&symbol=${encodeURIComponent(symbol)}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Could not build fund report.");
+    }
+    latestAssetReports[context.prefix] = payload;
+    showAssetState(context.prefix, "report");
+    renderAssetReport(context.prefix, payload);
+  } catch (error) {
+    document.querySelector(`#${context.prefix}Error`).textContent = error.message;
+    showAssetState(context.prefix, "error");
+  } finally {
+    latestSearchLogs = null;
+  }
+}
+
 async function searchSymbols(query) {
   try {
     const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
@@ -159,6 +241,22 @@ async function searchSymbols(query) {
     }
   } catch {
     suggestions.innerHTML = "";
+  }
+}
+
+async function searchAssets(context, query) {
+  try {
+    const response = await fetch(`/api/search-assets?type=${encodeURIComponent(context.type)}&q=${encodeURIComponent(query)}`);
+    const payload = await response.json();
+    context.suggestions.innerHTML = "";
+    for (const item of payload.results || []) {
+      const option = document.createElement("option");
+      option.value = item.symbol;
+      option.label = `${item.name} ${item.exchange ? "- " + item.exchange : ""}`;
+      context.suggestions.appendChild(option);
+    }
+  } catch {
+    context.suggestions.innerHTML = "";
   }
 }
 
@@ -381,6 +479,7 @@ function renderReport(report) {
   document.querySelector("#eventRiskSummary").textContent = report.events.risk.label;
   document.querySelector("#confidenceSummary").textContent = report.quality.label;
 
+  renderOwnershipSnapshot(report.growthDrivers, report.fundamentals.metrics);
   renderLevels(report.researchLevels, currency, report.technical.levels);
   renderTechnical(report.technical, currency);
   renderFundamentals(report.fundamentals.metrics, report.fundamentals.signals, currency);
@@ -390,6 +489,153 @@ function renderReport(report) {
   renderSwingTradePlan(report.swingTradePlan, currency);
   renderReferences(report.references);
   redrawChart();
+}
+
+function renderAssetReport(prefix, report) {
+  const currency = report.currency;
+  document.querySelector(`#${prefix}Exchange`).textContent = [report.symbol, report.quote.exchange || report.assetLabel].filter(Boolean).join(" - ");
+  document.querySelector(`#${prefix}Name`).textContent = report.longName;
+  document.querySelector(`#${prefix}Generated`).textContent = `Generated ${formatDateTime(report.generatedAt)} from ${report.source}`;
+  document.querySelector(`#${prefix}Price`).textContent = formatMoney(report.quote.price, currency);
+
+  const change = document.querySelector(`#${prefix}Change`);
+  change.textContent = `${signed(report.quote.change)} (${signed(report.quote.changePercent)}%)`;
+  change.className = report.quote.change >= 0 ? "positive" : "negative";
+
+  document.querySelector(`#${prefix}Suitability`).textContent = scoreText(report.scores.suitability);
+  document.querySelector(`#${prefix}Summary`).textContent = report.summary;
+  document.querySelector(`#${prefix}Momentum`).textContent = scoreText(report.scores.momentum);
+  document.querySelector(`#${prefix}MomentumText`).textContent = report.momentum.summary;
+  document.querySelector(`#${prefix}Risk`).textContent = scoreText(report.scores.risk);
+  document.querySelector(`#${prefix}RiskText`).textContent = report.risk.summary;
+  document.querySelector(`#${prefix}Confidence`).textContent = scoreText(report.scores.confidence);
+  document.querySelector(`#${prefix}ConfidenceText`).textContent = report.confidence.label;
+
+  renderAssetProfile(prefix, report);
+  renderAssetPerformance(prefix, report);
+  renderAssetPlan(prefix, report.plan);
+  renderAssetHoldings(prefix, report.holdings);
+  renderList(`#${prefix}Checks`, [
+    ...(report.confidence.checks || []),
+    `Quote type: ${report.quote.quoteType || "n/a"}`,
+    `Data source: ${report.source || "n/a"}`
+  ]);
+  renderAssetReferences(`#${prefix}ReferenceLinks`, report.references);
+}
+
+function renderAssetProfile(prefix, report) {
+  const profile = report.profile || {};
+  renderTable(`#${prefix}ProfileMetrics`, [
+    ["Category", profile.category || "n/a"],
+    ["Family", profile.family || "n/a"],
+    ["Type", profile.legalType || report.assetLabel || "n/a"],
+    ["Total assets / AUM", formatLarge(profile.totalAssets, report.currency)],
+    ["NAV / price", formatMoney(profile.navPrice, report.currency)],
+    ["Expense ratio", formatExpenseRatio(profile.expenseRatio)],
+    ["Yield", formatRatioPercent(profile.yield)],
+    ["YTD return", formatRatioPercent(profile.ytdReturn)],
+    ["3Y beta", formatNumber(profile.beta3Year)],
+    ["Inception", profile.inceptionDate ? formatDateTime(profile.inceptionDate) : "n/a"]
+  ]);
+}
+
+function renderAssetPerformance(prefix, report) {
+  const rows = (report.performance.rows || []).map((item) => [`${item.label} return`, formatPercentValue(item.return)]);
+  rows.push(
+    ["Annualized volatility", formatPercentValue(report.risk.annualizedVolatility)],
+    ["Max drawdown", formatPercentValue(report.risk.maxDrawdown)],
+    ["SMA 50", formatMoney(report.momentum.sma50, report.currency)],
+    ["SMA 200", formatMoney(report.momentum.sma200, report.currency)]
+  );
+  renderTable(`#${prefix}PerformanceMetrics`, rows);
+}
+
+function renderAssetPlan(prefix, plan) {
+  const container = document.querySelector(`#${prefix}PlanList`);
+  container.innerHTML = "";
+  if (!plan || !Array.isArray(plan.items) || !plan.items.length) {
+    container.innerHTML = "<p class=\"muted\">Allocation plan was not available.</p>";
+    return;
+  }
+
+  for (const item of plan.items) {
+    const row = document.createElement("div");
+    row.className = "asset-plan-item";
+    row.innerHTML = `
+      <span>${escapeHtml(item.label || "Check")}</span>
+      <strong>${escapeHtml(item.value || "n/a")}</strong>
+      <p>${escapeHtml(item.detail || "")}</p>
+    `;
+    container.appendChild(row);
+  }
+}
+
+function renderAssetHoldings(prefix, holdings) {
+  const container = document.querySelector(`#${prefix}HoldingList`);
+  const top = holdings?.top || [];
+  const sectors = holdings?.sectors || [];
+  container.innerHTML = "";
+
+  if (!top.length && !sectors.length) {
+    container.innerHTML = "<p class=\"muted\">Holdings or sector weightings were not available from the data provider.</p>";
+    return;
+  }
+
+  if (top.length) {
+    const group = document.createElement("div");
+    group.className = "asset-holding-group";
+    group.innerHTML = "<h4>Top Holdings</h4>";
+    for (const item of top) {
+      const row = document.createElement("div");
+      row.className = "asset-holding-row";
+      row.innerHTML = `
+        <span>${escapeHtml(item.symbol || "")}</span>
+        <strong>${escapeHtml(item.name || "n/a")}</strong>
+        <em>${formatRatioPercent(item.percent)}</em>
+      `;
+      group.appendChild(row);
+    }
+    container.appendChild(group);
+  }
+
+  if (sectors.length) {
+    const group = document.createElement("div");
+    group.className = "asset-holding-group";
+    group.innerHTML = "<h4>Sector Weight</h4>";
+    for (const item of sectors) {
+      const row = document.createElement("div");
+      row.className = "asset-holding-row";
+      row.innerHTML = `
+        <span></span>
+        <strong>${escapeHtml(item.name || "n/a")}</strong>
+        <em>${formatRatioPercent(item.percent)}</em>
+      `;
+      group.appendChild(row);
+    }
+    container.appendChild(group);
+  }
+}
+
+function renderAssetReferences(selector, references) {
+  const container = document.querySelector(selector);
+  container.innerHTML = "";
+  if (!references || !Array.isArray(references.links) || !references.links.length) {
+    container.innerHTML = "<p class=\"muted\">No external reference links were generated.</p>";
+    return;
+  }
+
+  for (const link of references.links) {
+    const anchor = document.createElement("a");
+    anchor.className = "reference-link";
+    anchor.href = link.url;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    anchor.innerHTML = `
+      <strong>${escapeHtml(link.label || "Reference")}</strong>
+      <span>${escapeHtml(link.note || "")}</span>
+    `;
+    container.appendChild(anchor);
+  }
 }
 
 function confirmTradingViewRedirect() {
@@ -546,6 +792,7 @@ function renderLevels(levels, currency, technicalLevels) {
 
 function renderTechnical(technical, currency) {
   const indicators = technical.indicators;
+  const relativeStrength = technical.relativeStrength || {};
   const rows = [
     ["SMA 20", formatMoney(indicators.sma20, currency)],
     ["SMA 50", formatMoney(indicators.sma50, currency)],
@@ -560,8 +807,21 @@ function renderTechnical(technical, currency) {
     ["1Y return", formatPercentValue(technical.performance.oneYear)]
   ];
 
+  if (relativeStrength.available) {
+    const oneMonth = relativeStrength.rows?.find((row) => row.period === "oneMonth");
+    const threeMonth = relativeStrength.rows?.find((row) => row.period === "threeMonth");
+    rows.push(
+      [`RS vs ${relativeStrength.benchmarkName}`, relativeStrength.label || "n/a"],
+      ["1M relative", formatPointChange(oneMonth?.spread)],
+      ["3M relative", formatPointChange(threeMonth?.spread)]
+    );
+  }
+
   renderTable("#technicalMetrics", rows);
-  renderList("#technicalSignals", technical.signals);
+  renderList("#technicalSignals", [
+    ...(technical.signals || []),
+    ...(relativeStrength.available ? [relativeStrength.summary] : [])
+  ]);
 }
 
 function renderFundamentals(metrics, signals, currency) {
@@ -590,6 +850,59 @@ function renderFundamentals(metrics, signals, currency) {
 
   renderTable("#fundamentalMetrics", rows);
   renderList("#fundamentalSignals", signals);
+}
+
+function renderOwnershipSnapshot(growthDrivers, fundamentals) {
+  const container = document.querySelector("#ownershipSnapshotList");
+  const period = document.querySelector("#ownershipSnapshotPeriod");
+  const note = document.querySelector("#ownershipSnapshotNote");
+
+  if (!container || !period || !note) {
+    return;
+  }
+
+  const ownership = growthDrivers?.ownership || {};
+  const rows = ownership.rows || [];
+  const periods = ownership.periods || [];
+  const latestPeriod = periods.length ? periods[periods.length - 1] : "";
+  const lookback = growthDrivers?.lookback || "Latest available source data";
+  const sourceText = ownership.source ? ` Source: ${ownership.source}.` : "";
+  const wanted = [
+    { key: "Promoters", label: "Promoters" },
+    { key: "FIIs", label: "FII" },
+    { key: "DIIs", label: "DII" }
+  ];
+
+  container.innerHTML = "";
+  period.textContent = latestPeriod || "Latest";
+
+  for (const item of wanted) {
+    const row = rows.find((entry) => entry.name === item.key);
+    const fallbackLatest = item.key === "Promoters" ? fundamentals?.promoterHolding : null;
+    const latest = Number.isFinite(row?.latest) ? row.latest : fallbackLatest;
+    const previousQuarter = row?.quarters?.length > 1 ? row.quarters[row.quarters.length - 2] : null;
+    const latestQuarter = row?.quarters?.length ? row.quarters[row.quarters.length - 1] : null;
+    const latestLabel = latestQuarter?.period || latestPeriod || "Latest";
+    const quarterChangePoints = Number.isFinite(row?.quarterChangePoints)
+      ? row.quarterChangePoints
+      : Number.isFinite(latest) && Number.isFinite(previousQuarter?.value)
+      ? (latest - previousQuarter.value) * 100
+      : null;
+
+    const card = document.createElement("article");
+    card.className = "ownership-snapshot-card";
+    card.innerHTML = `
+      <span>${escapeHtml(item.label)}</span>
+      <div class="ownership-value-row">
+        <strong>${formatRatioPercent(latest)}</strong>
+        <em class="ownership-change-badge ${holdingChangeClass(quarterChangePoints)}">${escapeHtml(formatHoldingChange(quarterChangePoints))}</em>
+      </div>
+      <p>Current holding as of ${escapeHtml(latestLabel)}</p>
+    `;
+    container.appendChild(card);
+  }
+
+  note.textContent = `${lookback}.${sourceText} Change badges compare the current holding with the previous available quarter.`;
 }
 
 function renderEvents(events) {
@@ -651,6 +964,23 @@ function renderGrowthDrivers(data, currency) {
     container.appendChild(card);
   }
 
+  const ownershipFlags = data.ownership?.flags || [];
+  if (ownershipFlags.length) {
+    const card = document.createElement("article");
+    card.className = "growth-card";
+    const items = ownershipFlags.map((item) => `
+      <div class="ownership-alert is-${escapeHtml(item.type || "neutral")}">
+        <strong>${escapeHtml(item.title || "Ownership check")}</strong>
+        <small>${escapeHtml(item.detail || "")}</small>
+      </div>
+    `).join("");
+    card.innerHTML = `
+      <h4>Ownership Alerts</h4>
+      <div class="ownership-alert-list">${items}</div>
+    `;
+    container.appendChild(card);
+  }
+
   const catalysts = data.catalysts || [];
   if (catalysts.length) {
     const card = document.createElement("article");
@@ -706,10 +1036,36 @@ function renderQuality(quality) {
     ["Fundamental metrics", formatNumber(quality.availableFundamentalMetrics)],
     ["Data sources", quality.dataSources || "n/a"]
   ]);
+  renderAccuracyChecks(quality.checks || []);
   renderList("#qualityWarnings", [
     ...(quality.strengths || []).map((item) => `Strength: ${item}`),
     ...(quality.warnings || []).map((item) => `Warning: ${item}`)
   ]);
+}
+
+function renderAccuracyChecks(checks) {
+  const container = document.querySelector("#qualityChecks");
+  if (!container) {
+    return;
+  }
+
+  container.innerHTML = "";
+  if (!checks.length) {
+    return;
+  }
+
+  for (const check of checks) {
+    const item = document.createElement("div");
+    item.className = `accuracy-check is-${check.tone || "neutral"}`;
+    item.innerHTML = `
+      <div>
+        <span>${escapeHtml(check.label || "Check")}</span>
+        <strong>${escapeHtml(check.status || "Review")}</strong>
+      </div>
+      <p>${escapeHtml(check.detail || "")}</p>
+    `;
+    container.appendChild(item);
+  }
 }
 
 function renderScenarios(scenarios, currency) {
@@ -1183,6 +1539,14 @@ function formatRatioPercent(value) {
   return `${(value * 100).toFixed(2)}%`;
 }
 
+function formatExpenseRatio(value) {
+  if (!Number.isFinite(value)) {
+    return "n/a";
+  }
+  const percent = value <= 1 ? value * 100 : value;
+  return `${percent.toFixed(2)}%`;
+}
+
 function formatPercentValue(value) {
   if (!Number.isFinite(value)) {
     return "n/a";
@@ -1195,6 +1559,23 @@ function formatPointChange(value) {
     return "n/a";
   }
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)} pp`;
+}
+
+function formatHoldingChange(value) {
+  if (!Number.isFinite(value)) {
+    return "n/a";
+  }
+  if (Math.abs(value) < 0.005) {
+    return "No change";
+  }
+  return `${value > 0 ? "+" : "-"}${Math.abs(value).toFixed(2)} pp`;
+}
+
+function holdingChangeClass(value) {
+  if (!Number.isFinite(value) || Math.abs(value) < 0.005) {
+    return "is-flat";
+  }
+  return value > 0 ? "is-up" : "is-down";
 }
 
 function scoreText(value) {

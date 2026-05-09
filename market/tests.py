@@ -81,6 +81,150 @@ class GrowthDriverTests(SimpleTestCase):
         self.assertEqual(promoters["quarters"][-1]["value"], 0.516)
         self.assertEqual(fii["quarters"][-1]["value"], 0.132)
 
+    def test_extract_groww_shareholding_maps_institution_rows(self):
+        html = """
+        <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"stockData":{"shareHoldingPattern":{
+          "Dec '25":{
+            "promoters":{"individual":{"percent":50.01}},
+            "foreignInstitutions":{"percent":19.09},
+            "otherDomesticInstitutions":{"insurance":{"percent":10.66}},
+            "mutualFunds":{"percent":9.52},
+            "retailAndOthers":{"percent":10.73}
+          },
+          "Mar '26":{
+            "promoters":{"individual":{"percent":50}},
+            "foreignInstitutions":{"percent":18.67},
+            "otherDomesticInstitutions":{"insurance":{"percent":10.77}},
+            "mutualFunds":{"percent":9.78},
+            "retailAndOthers":{"percent":10.79}
+          }
+        }}}}}
+        </script>
+        """
+
+        shareholding = services.extract_groww_shareholding(html)
+        promoters = next(row for row in shareholding["rows"] if row["name"] == "Promoters")
+        dii = next(row for row in shareholding["rows"] if row["name"] == "DIIs")
+
+        self.assertEqual(shareholding["source"], "Groww public shareholding")
+        self.assertEqual(promoters["quarters"][-1]["period"], "Mar 2026")
+        self.assertEqual(promoters["quarters"][-1]["value"], 0.5)
+        self.assertAlmostEqual(dii["quarters"][-1]["value"], 0.2055)
+
+    def test_extract_upstox_shareholding_merges_mutual_funds_into_diis(self):
+        html = """
+        {\\"shareHolderType\\":\\"Promoters\\",\\"history\\":[{\\"period\\":\\"Mar 2026\\",\\"totalPercent\\":50}]}
+        {\\"shareHolderType\\":\\"Foreign institutions-FII\\",\\"history\\":[{\\"period\\":\\"Mar 2026\\",\\"totalPercent\\":18.67}]}
+        {\\"shareHolderType\\":\\"Other domestic institutions\\",\\"history\\":[{\\"period\\":\\"Mar 2026\\",\\"totalPercent\\":10.77}]}
+        {\\"shareHolderType\\":\\"Mutual Funds\\",\\"history\\":[{\\"period\\":\\"Mar 2026\\",\\"totalPercent\\":9.78}]}
+        """
+
+        shareholding = services.extract_upstox_shareholding(html)
+        fii = next(row for row in shareholding["rows"] if row["name"] == "FIIs")
+        dii = next(row for row in shareholding["rows"] if row["name"] == "DIIs")
+
+        self.assertEqual(shareholding["source"], "Upstox public shareholding")
+        self.assertEqual(fii["quarters"][-1]["value"], 0.1867)
+        self.assertAlmostEqual(dii["quarters"][-1]["value"], 0.2055)
+
+    def test_merge_shareholding_fills_missing_categories_from_fallback(self):
+        primary = {
+            "periods": ["Mar 2026"],
+            "rows": [{"name": "Promoters", "quarters": [{"period": "Mar 2026", "value": 0.5}]}],
+            "source": "Screener.in shareholding",
+        }
+        fallback = {
+            "periods": ["Mar 2026"],
+            "rows": [{"name": "FIIs", "quarters": [{"period": "Mar 2026", "value": 0.18}]}],
+            "source": "Groww public shareholding",
+        }
+
+        merged = services.merge_shareholding(primary, fallback)
+        self.assertIn("Screener.in shareholding", merged["source"])
+        self.assertIn("Groww public shareholding", merged["source"])
+        self.assertTrue(services.has_shareholding_categories(merged, ("Promoters", "FIIs")))
+
+    def test_build_ownership_trend_adds_quarter_change_flags(self):
+        shareholding = {
+            "periods": ["Dec 2025", "Mar 2026"],
+            "source": "Screener.in shareholding",
+            "rows": [
+                {"name": "Promoters", "quarters": [{"period": "Dec 2025", "value": 0.507}, {"period": "Mar 2026", "value": 0.5}]},
+                {"name": "FIIs", "quarters": [{"period": "Dec 2025", "value": 0.12}, {"period": "Mar 2026", "value": 0.128}]},
+                {"name": "DIIs", "quarters": [{"period": "Dec 2025", "value": 0.18}, {"period": "Mar 2026", "value": 0.179}]},
+            ],
+        }
+
+        trend = services.build_ownership_trend(shareholding, {})
+        promoters = next(row for row in trend["rows"] if row["name"] == "Promoters")
+        titles = {flag["title"] for flag in trend["flags"]}
+
+        self.assertEqual(promoters["quarterChangePoints"], -0.7)
+        self.assertIn("Promoter holding reduced", titles)
+        self.assertIn("FIIs accumulation", titles)
+
+
+class RelativeStrengthTests(SimpleTestCase):
+    def test_build_relative_strength_compares_stock_with_benchmark(self):
+        candles = [{"close": 100 + index * 1.0} for index in range(130)]
+        benchmark = {
+            "symbol": "^NSEI",
+            "name": "Nifty 50",
+            "candles": [{"close": 100 + index * 0.25} for index in range(130)],
+        }
+
+        result = services.build_relative_strength(candles, benchmark)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["benchmarkName"], "Nifty 50")
+        self.assertGreater(result["averageSpread"], 0)
+        self.assertEqual(len(result["rows"]), 4)
+
+
+class AssetAnalysisTests(SimpleTestCase):
+    def test_local_asset_search_prefers_matching_etfs(self):
+        results = services.local_asset_search_symbols("nifty", "etf")
+        symbols = [item["symbol"] for item in results]
+
+        self.assertIn("NIFTYBEES.NS", symbols)
+        self.assertTrue(all(item["type"] == "ETF" for item in results if item["symbol"].endswith(".NS")))
+
+    def test_build_asset_report_includes_profile_risk_and_plan(self):
+        candles = [
+            {
+                "date": f"2025-01-{(index % 28) + 1:02d}",
+                "open": 100 + index * 0.1,
+                "high": 101 + index * 0.1,
+                "low": 99 + index * 0.1,
+                "close": 100 + index * 0.1,
+                "volume": 100000 + index,
+            }
+            for index in range(260)
+        ]
+        summary = {
+            "price": {"longName": "Test ETF", "currency": "USD"},
+            "summaryDetail": {
+                "annualReportExpenseRatio": {"raw": 0.0009},
+                "totalAssets": {"raw": 1000000000},
+                "yield": {"raw": 0.012},
+            },
+            "defaultKeyStatistics": {"ytdReturn": {"raw": 0.08}},
+            "fundProfile": {"categoryName": "Large Blend", "family": "Test Family", "legalType": "ETF"},
+            "topHoldings": {
+                "holdings": [{"symbol": "AAA", "holdingName": "AAA Corp", "holdingPercent": {"raw": 0.12}}],
+                "sectorWeightings": [{"technology": {"raw": 0.35}}],
+            },
+        }
+
+        report = services.build_asset_report("TEST", "etf", {"currency": "USD"}, candles, {"quoteType": "ETF"}, summary)
+
+        self.assertEqual(report["assetLabel"], "ETF")
+        self.assertEqual(report["profile"]["category"], "Large Blend")
+        self.assertEqual(report["holdings"]["top"][0]["symbol"], "AAA")
+        self.assertTrue(report["plan"]["items"])
+        self.assertGreaterEqual(report["scores"]["confidence"], 75)
+
 
 class SearchSuggestionTests(SimpleTestCase):
     def test_local_suggestions_include_initial_character_matches(self):
