@@ -1,4 +1,4 @@
-# The Bigh Picture Investment
+# The Big Picture Investment
 
 A Django app for stock research reports, chart analysis, support/resistance levels, commodity monitoring, breakout scans, fundamentals, and event-risk checks.
 

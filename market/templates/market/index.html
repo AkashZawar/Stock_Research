@@ -4,8 +4,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>The Bigh Picture Investment</title>
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260509-professional-layout-1">
+    <title>The Big Picture Investment</title>
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260509-shooting-star-1">
   </head>
   <body>
     <main class="app-shell">
@@ -18,19 +18,29 @@
                 <i></i>
                 <i></i>
               </span>
-              <p class="eyebrow">The Bigh Picture Investment</p>
+              <p class="eyebrow">The Big Picture Investment</p>
             </div>
-            <h1>The Bigh Picture Investment</h1>
+            <h1>The Big Picture Investment</h1>
             <p class="hero-copy">A sharper dashboard for swing setups, ownership trends, catalysts, risk levels, and market context across Indian and global equities.</p>
             <div class="market-visual" aria-hidden="true">
-              <span style="--bar-height: 44%"></span>
-              <span style="--bar-height: 70%"></span>
-              <span style="--bar-height: 52%"></span>
-              <span style="--bar-height: 82%"></span>
-              <span style="--bar-height: 62%"></span>
-              <span style="--bar-height: 92%"></span>
-              <span style="--bar-height: 74%"></span>
-              <span style="--bar-height: 58%"></span>
+              <div class="hero-chart-head">
+                <strong>Swing Profit Pattern</strong>
+                <span>+3.42%</span>
+              </div>
+              <div class="hero-chart-area">
+                <span class="chart-grid"></span>
+                <span class="profit-ribbon">Profit Run</span>
+                <span class="pattern-tag">Shooting Star</span>
+                <span class="trend-line trend-line-one"></span>
+                <span class="trend-line trend-line-two"></span>
+                <i class="candle up" style="--x: 8%; --open: 67%; --close: 52%; --wick-top: 46%; --wick-bottom: 72%;"></i>
+                <i class="candle up" style="--x: 21%; --open: 58%; --close: 41%; --wick-top: 35%; --wick-bottom: 64%;"></i>
+                <i class="candle down" style="--x: 34%; --open: 39%; --close: 48%; --wick-top: 31%; --wick-bottom: 54%;"></i>
+                <i class="candle up" style="--x: 47%; --open: 49%; --close: 31%; --wick-top: 24%; --wick-bottom: 56%;"></i>
+                <i class="candle up" style="--x: 60%; --open: 37%; --close: 22%; --wick-top: 16%; --wick-bottom: 44%;"></i>
+                <i class="candle up" style="--x: 73%; --open: 31%; --close: 17%; --wick-top: 10%; --wick-bottom: 38%;"></i>
+                <i class="candle down shooting-star" style="--x: 87%; --open: 20%; --close: 29%; --wick-top: 2%; --wick-bottom: 33%;"></i>
+              </div>
             </div>
           </div>
           <form class="search-form hero-search" id="analysisForm">
@@ -445,6 +455,6 @@
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260509-professional-layout-1"></script>
+    <script src="{% static 'app.js' %}?v=20260509-shooting-star-1"></script>
   </body>
 </html>

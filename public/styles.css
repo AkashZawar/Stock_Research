@@ -207,8 +207,8 @@ textarea {
 
 .brand-mark {
   display: inline-flex;
-  gap: 3px;
-  align-items: flex-end;
+  gap: 5px;
+  align-items: center;
   justify-content: center;
   width: 36px;
   height: 36px;
@@ -219,24 +219,44 @@ textarea {
 }
 
 .brand-mark i {
+  position: relative;
   display: block;
   width: 5px;
-  border-radius: 5px 5px 0 0;
-  background: var(--cyan);
+  border-radius: 2px;
+  background: rgba(16, 185, 129, 0.82);
+}
+
+.brand-mark i::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -5px;
+  width: 1px;
+  height: calc(100% + 10px);
+  border-radius: 99px;
+  background: rgba(226, 232, 240, 0.75);
+  transform: translateX(-50%);
 }
 
 .brand-mark i:nth-child(1) {
-  height: 13px;
-  background: var(--gold);
+  height: 11px;
+  margin-top: 8px;
 }
 
 .brand-mark i:nth-child(2) {
-  height: 22px;
-  background: var(--emerald);
+  height: 16px;
 }
 
 .brand-mark i:nth-child(3) {
-  height: 28px;
+  height: 7px;
+  margin-bottom: 7px;
+  background: rgba(248, 113, 113, 0.78);
+}
+
+.brand-mark i:nth-child(3)::before {
+  top: -13px;
+  height: 22px;
+  background: rgba(248, 113, 113, 0.82);
 }
 
 .hero-content {
@@ -254,42 +274,174 @@ textarea {
 }
 
 .market-visual {
-  display: flex;
+  display: grid;
   gap: 8px;
-  align-items: end;
   max-width: 440px;
-  height: 56px;
+  height: 102px;
   margin-top: 2px;
-  padding: 10px 12px;
+  padding: 11px 12px;
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.025));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.025)),
+    rgba(4, 12, 22, 0.1);
 }
 
-.market-visual span {
+.hero-chart-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  color: #d9e4ef;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.hero-chart-head span {
+  color: #86efac;
+}
+
+.hero-chart-area {
   position: relative;
-  flex: 1;
-  min-width: 8px;
-  height: var(--bar-height);
-  border-radius: 6px 6px 2px 2px;
-  background: linear-gradient(180deg, rgba(34, 211, 238, 0.96), rgba(16, 185, 129, 0.92));
-  box-shadow: 0 0 18px rgba(34, 211, 238, 0.16);
+  min-height: 58px;
+  overflow: hidden;
+  border-radius: 6px;
 }
 
-.market-visual span:nth-child(2n) {
-  background: linear-gradient(180deg, rgba(245, 158, 11, 0.98), rgba(16, 185, 129, 0.8));
+.chart-grid {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(226, 232, 240, 0.1) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(226, 232, 240, 0.12) 1px, transparent 1px);
+  background-size: 44px 100%, 100% 18px;
 }
 
-.market-visual span::before {
+.profit-ribbon,
+.pattern-tag {
+  position: absolute;
+  z-index: 2;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.profit-ribbon {
+  left: 8%;
+  bottom: 5px;
+  padding: 5px 8px;
+  color: #bbf7d0;
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(134, 239, 172, 0.28);
+}
+
+.pattern-tag {
+  right: 4%;
+  top: 4px;
+  padding: 5px 7px;
+  color: #fecaca;
+  background: rgba(190, 18, 60, 0.24);
+  border: 1px solid rgba(248, 113, 113, 0.36);
+}
+
+.trend-line {
+  position: absolute;
+  left: 7%;
+  right: 6%;
+  height: 2px;
+  border-radius: 99px;
+  transform-origin: left center;
+}
+
+.trend-line-one {
+  top: 62%;
+  background: rgba(34, 211, 238, 0.9);
+  transform: rotate(-15deg);
+  box-shadow: 0 0 16px rgba(34, 211, 238, 0.22);
+}
+
+.trend-line-two {
+  top: 76%;
+  background: rgba(245, 158, 11, 0.8);
+  transform: rotate(-9deg);
+}
+
+.candle {
+  position: absolute;
+  left: var(--x);
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  transform: translateX(-50%);
+}
+
+.candle::before {
   content: "";
   position: absolute;
   left: 50%;
-  bottom: calc(100% - 6px);
+  top: var(--wick-top);
   width: 2px;
-  height: 18px;
+  height: calc(var(--wick-bottom) - var(--wick-top));
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.5);
   transform: translateX(-50%);
+}
+
+.candle::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: var(--close);
+  width: 100%;
+  height: calc(var(--open) - var(--close));
+  min-height: 8px;
+  border-radius: 2px;
+}
+
+.candle.up {
+  filter: drop-shadow(0 0 7px rgba(16, 185, 129, 0.2));
+}
+
+.candle.up::after {
+  border: 1px solid rgba(134, 239, 172, 0.95);
+  background: rgba(16, 185, 129, 0.24);
+}
+
+.candle.up::before {
+  background: rgba(134, 239, 172, 0.78);
+}
+
+.candle.down {
+  filter: drop-shadow(0 0 7px rgba(190, 18, 60, 0.24));
+}
+
+.candle.down::after {
+  top: var(--open);
+  height: calc(var(--close) - var(--open));
+  border: 1px solid rgba(248, 113, 113, 0.9);
+  background: rgba(190, 18, 60, 0.62);
+}
+
+.candle.down::before {
+  background: rgba(248, 113, 113, 0.72);
+}
+
+.candle.shooting-star {
+  width: 12px;
+  filter: drop-shadow(0 0 12px rgba(248, 113, 113, 0.42));
+}
+
+.candle.shooting-star::after {
+  border-color: rgba(254, 202, 202, 0.98);
+  background: rgba(190, 18, 60, 0.82);
+  box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.08), 0 0 18px rgba(248, 113, 113, 0.3);
+}
+
+.candle.shooting-star::before {
+  width: 3px;
+  background: rgba(254, 202, 202, 0.96);
 }
 
 .eyebrow {
@@ -1351,8 +1503,8 @@ h3 {
   }
 
   .market-visual {
-    height: 68px;
-    gap: 6px;
+    height: 92px;
+    gap: 7px;
     padding: 12px;
   }
 
