@@ -1,4 +1,4 @@
-# Stock Research Desk
+# The Bigh Picture Investment
 
 A Django app for stock research reports, chart analysis, support/resistance levels, commodity monitoring, breakout scans, fundamentals, and event-risk checks.
 

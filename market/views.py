@@ -22,7 +22,7 @@ def index(request):
 
 def search(request):
     query = request.GET.get("q", "").strip()
-    if len(query) < 2:
+    if len(query) < 1:
         return JsonResponse({"results": []})
 
     try:

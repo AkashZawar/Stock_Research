@@ -96,11 +96,11 @@ tradeRows.addEventListener("click", async (event) => {
 symbolInput.addEventListener("input", () => {
   clearTimeout(searchTimer);
   const query = symbolInput.value.trim();
-  if (query.length < 2) {
+  if (query.length < 1) {
     suggestions.innerHTML = "";
     return;
   }
-  searchTimer = setTimeout(() => searchSymbols(query), 250);
+  searchTimer = setTimeout(() => searchSymbols(query), 180);
 });
 
 window.addEventListener("resize", () => {
@@ -431,7 +431,6 @@ function renderMarketMonitor(data) {
   renderBreakoutRows(data.breakoutCandidates || []);
   renderHighVolumeRows(data.highVolumeCandidates || []);
   renderOrderCatalystRows(data.orderCatalysts || []);
-  renderImpactGroups(data.impacted || []);
 }
 
 function renderCommodities(items) {
@@ -530,33 +529,6 @@ function renderOrderCatalystRows(items) {
       <td><strong>${scoreText(item.score)}</strong></td>
     `;
     body.appendChild(row);
-  }
-}
-
-function renderImpactGroups(groups) {
-  const container = document.querySelector("#impactGroups");
-  container.innerHTML = "";
-
-  for (const group of groups) {
-    const panel = document.createElement("article");
-    panel.className = "impact-card";
-    const rows = group.stocks.slice(0, 8).map((stock) => `
-      <div>
-        <span>${escapeHtml(stock.name)}</span>
-        <strong>${formatMoney(stock.price, "INR")} <em class="${changeClass(stock.changePercent)}">${formatPercentValue(stock.changePercent)}</em></strong>
-        <small>${escapeHtml(stock.role)}</small>
-      </div>
-    `).join("");
-
-    panel.innerHTML = `
-      <div class="impact-head">
-        <strong>${escapeHtml(group.reference)}</strong>
-        <span class="${changeClass(group.changePercent)}">${signed(group.changePercent)}%</span>
-      </div>
-      <p>${escapeHtml(group.implication)}</p>
-      <div class="impact-stocks">${rows}</div>
-    `;
-    container.appendChild(panel);
   }
 }
 

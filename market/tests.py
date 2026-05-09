@@ -82,6 +82,24 @@ class GrowthDriverTests(SimpleTestCase):
         self.assertEqual(fii["quarters"][-1]["value"], 0.132)
 
 
+class SearchSuggestionTests(SimpleTestCase):
+    def test_local_suggestions_include_initial_character_matches(self):
+        results = services.local_search_symbols("r")
+        symbols = [item["symbol"] for item in results]
+
+        self.assertIn("RELIANCE.NS", symbols)
+        self.assertIn("RELIANCE.BO", symbols)
+
+    def test_sort_search_results_prefers_nse_then_bse_then_other_exchanges(self):
+        results = services.sort_search_results([
+            {"symbol": "RELIANCE", "name": "Reliance", "exchange": "NYQ", "type": "EQUITY"},
+            {"symbol": "RELIANCE.BO", "name": "Reliance Industries", "exchange": "BSE", "type": "EQUITY"},
+            {"symbol": "RELIANCE.NS", "name": "Reliance Industries", "exchange": "NSE", "type": "EQUITY"},
+        ], "rel")
+
+        self.assertEqual([item["symbol"] for item in results], ["RELIANCE.NS", "RELIANCE.BO", "RELIANCE"])
+
+
 class StockSearchLogTests(TestCase):
     @patch("market.views.services.resolve_symbol_input")
     @patch("market.views.services.analyze_symbol")

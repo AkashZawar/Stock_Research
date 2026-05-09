@@ -815,22 +815,84 @@ def resolve_symbol_input(value):
 
 
 def search_symbols(query):
-    def loader():
-        endpoint = f"https://query2.finance.yahoo.com/v1/finance/search?q={quote(query)}&quotesCount=8&newsCount=0"
-        payload = fetch_json(endpoint)
-        results = [
-            {
-                "symbol": item.get("symbol"),
-                "name": item.get("shortname") or item.get("longname") or item.get("symbol"),
-                "exchange": item.get("exchDisp") or item.get("exchange") or "",
-                "type": item.get("quoteType") or "",
-            }
-            for item in payload.get("quotes", [])
-            if item.get("symbol") and item.get("quoteType") != "CRYPTOCURRENCY"
-        ]
-        return sort_search_results(results, query)[:8]
+    normalized_query = str(query or "").strip()
 
-    return cached(f"search:{query.lower()}", loader, CACHE_TTL_SECONDS)
+    def loader():
+        endpoint = f"https://query2.finance.yahoo.com/v1/finance/search?q={quote(normalized_query)}&quotesCount=24&newsCount=0"
+        local_results = local_search_symbols(normalized_query)
+        try:
+            payload = fetch_json(endpoint)
+            yahoo_results = [
+                {
+                    "symbol": item.get("symbol"),
+                    "name": item.get("shortname") or item.get("longname") or item.get("symbol"),
+                    "exchange": item.get("exchDisp") or item.get("exchange") or "",
+                    "type": item.get("quoteType") or "",
+                }
+                for item in payload.get("quotes", [])
+                if item.get("symbol") and item.get("quoteType") != "CRYPTOCURRENCY"
+            ]
+        except Exception:
+            yahoo_results = []
+        return sort_search_results(merge_search_results(local_results + yahoo_results), normalized_query)[:24]
+
+    return cached(f"search:{normalized_query.lower()}", loader, CACHE_TTL_SECONDS)
+
+
+def local_search_symbols(query):
+    lower_query = str(query or "").strip().lower()
+    compact_query = re.sub(r"[^a-z0-9]", "", lower_query)
+    if not compact_query:
+        return []
+
+    results = []
+    for stock in local_search_universe():
+        symbol = stock["symbol"]
+        base_symbol = symbol.removesuffix(".NS")
+        name = stock["name"]
+        searchable = " ".join([symbol, base_symbol, name, *stock.get("tags", [])]).lower()
+        compact_searchable = re.sub(r"[^a-z0-9]", "", searchable)
+        if lower_query not in searchable and compact_query not in compact_searchable:
+            continue
+
+        results.append({
+            "symbol": symbol,
+            "name": name,
+            "exchange": "NSE",
+            "type": "EQUITY",
+        })
+        if symbol.endswith(".NS"):
+            results.append({
+                "symbol": f"{base_symbol}.BO",
+                "name": name,
+                "exchange": "BSE",
+                "type": "EQUITY",
+            })
+
+    return results
+
+
+def local_search_universe():
+    stocks = {}
+    for stock in [*BREAKOUT_WATCHLIST, *HIGH_ACTIVITY_WATCHLIST]:
+        stocks.setdefault(stock["symbol"], stock)
+    return stocks.values()
+
+
+def merge_search_results(results):
+    merged = {}
+    for item in results:
+        symbol = (item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        existing = merged.get(symbol, {})
+        merged[symbol] = {
+            "symbol": symbol,
+            "name": item.get("name") or existing.get("name") or symbol,
+            "exchange": item.get("exchange") or existing.get("exchange") or exchange_label(symbol),
+            "type": item.get("type") or existing.get("type") or "",
+        }
+    return list(merged.values())
 
 
 def choose_search_result(results, query):
@@ -839,24 +901,48 @@ def choose_search_result(results, query):
 
 
 def sort_search_results(results, query):
-    lower_query = query.lower()
-    prefer_india = any(term in lower_query for term in ["india", "nse", "bse"])
+    lower_query = str(query or "").lower()
     return sorted(
         results,
-        key=lambda item: (-search_score(item, lower_query, prefer_india), item.get("symbol", "")),
+        key=lambda item: (exchange_priority(item), -search_score(item, lower_query), item.get("symbol", "")),
     )
 
 
-def search_score(item, lower_query, prefer_india):
+def exchange_priority(item):
+    symbol = item.get("symbol", "").upper()
+    exchange = item.get("exchange", "").upper()
+    if symbol.endswith(".NS") or exchange in {"NSE", "NSI"}:
+        return 0
+    if symbol.endswith(".BO") or exchange in {"BSE", "BOM"}:
+        return 1
+    return 2
+
+
+def exchange_label(symbol):
+    if symbol.endswith(".NS"):
+        return "NSE"
+    if symbol.endswith(".BO"):
+        return "BSE"
+    return ""
+
+
+def search_score(item, lower_query):
     score = 20 if item.get("type") == "EQUITY" else 0
     symbol = item.get("symbol", "").upper()
+    compact_query = re.sub(r"[^a-z0-9]", "", lower_query)
+    compact_symbol = re.sub(r"[^a-z0-9]", "", symbol.lower())
     name = item.get("name", "").lower()
-    if lower_query in name or lower_query.replace(" ", "") in symbol.lower():
+    compact_name = re.sub(r"[^a-z0-9]", "", name)
+    if compact_query and compact_symbol.startswith(compact_query):
+        score += 35
+    elif compact_query and compact_query in compact_symbol:
+        score += 24
+    if lower_query and name.startswith(lower_query):
+        score += 28
+    elif lower_query and lower_query in name:
+        score += 16
+    if compact_query and compact_query in compact_name:
         score += 10
-    if prefer_india and symbol.endswith(".NS"):
-        score += 30
-    if prefer_india and symbol.endswith(".BO"):
-        score += 20
     return score
 
 

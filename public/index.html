@@ -3,21 +3,39 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Stock Research Desk</title>
+    <title>The Bigh Picture Investment</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <main class="app-shell">
       <section class="workspace">
         <header class="topbar">
-          <div>
-            <p class="eyebrow">Stock Research Desk</p>
-            <h1>One-year stock analysis</h1>
+          <div class="hero-content">
+            <div class="brand-row">
+              <span class="brand-mark" aria-hidden="true">
+                <i></i>
+                <i></i>
+                <i></i>
+              </span>
+              <p class="eyebrow">The Bigh Picture Investment</p>
+            </div>
+            <h1>The Big Picture Investment</h1>
+            <p class="hero-copy">A sharper dashboard for swing setups, ownership trends, catalysts, risk levels, and market context across Indian and global equities.</p>
+            <div class="market-visual" aria-hidden="true">
+              <span style="--bar-height: 44%"></span>
+              <span style="--bar-height: 70%"></span>
+              <span style="--bar-height: 52%"></span>
+              <span style="--bar-height: 82%"></span>
+              <span style="--bar-height: 62%"></span>
+              <span style="--bar-height: 92%"></span>
+              <span style="--bar-height: 74%"></span>
+              <span style="--bar-height: 58%"></span>
+            </div>
           </div>
-          <form class="search-form" id="analysisForm">
-            <label for="symbolInput">Ticker</label>
+          <form class="search-form hero-search" id="analysisForm">
+            <label for="symbolInput">Ticker or stock name</label>
             <div class="search-row">
-              <input id="symbolInput" name="symbol" list="symbolSuggestions" placeholder="AAPL, MSFT, RELIANCE.NS" autocomplete="off" required>
+              <input id="symbolInput" name="symbol" list="symbolSuggestions" placeholder="RELIANCE, TCS, HAL, ABBOT India" autocomplete="off" required>
               <datalist id="symbolSuggestions"></datalist>
               <button type="submit">Analyze</button>
             </div>
@@ -47,7 +65,7 @@
           <section id="errorState" class="error-state is-hidden"></section>
 
           <section id="report" class="report is-hidden">
-          <section class="quote-panel">
+          <section class="quote-panel panel-accent-slate">
             <div>
               <p class="eyebrow" id="exchangeText"></p>
               <h2 id="stockName"></h2>
@@ -88,7 +106,7 @@
           </section>
 
           <section class="main-grid">
-            <article class="chart-panel">
+            <article class="chart-panel panel-accent-blue">
               <div class="section-head">
                 <h3>Chart</h3>
                 <div class="chart-tools">
@@ -115,7 +133,7 @@
               <canvas id="priceChart" aria-label="One-year candlestick price chart" role="button" tabindex="0" title="Open this chart on TradingView"></canvas>
             </article>
 
-            <article class="levels-panel">
+            <article class="levels-panel panel-accent-amber">
               <div class="section-head">
                 <h3>Research Levels</h3>
                 <span id="levelMode" class="pill"></span>
@@ -155,19 +173,19 @@
           </section>
 
           <section class="detail-grid">
-            <article class="analysis-panel">
+            <article class="analysis-panel panel-accent-blue">
               <h3>Technical Analysis</h3>
               <div id="technicalMetrics" class="metric-table"></div>
               <ul id="technicalSignals" class="signal-list"></ul>
             </article>
 
-            <article class="analysis-panel">
+            <article class="analysis-panel panel-accent-teal">
               <h3>Fundamental Analysis</h3>
               <div id="fundamentalMetrics" class="metric-table"></div>
               <ul id="fundamentalSignals" class="signal-list"></ul>
             </article>
 
-            <article class="analysis-panel">
+            <article class="analysis-panel panel-accent-violet">
               <h3>Ownership & Growth Catalysts</h3>
               <p id="growthDriverText" class="outlook-text"></p>
               <div id="growthDriverList" class="growth-driver-list"></div>
@@ -175,19 +193,19 @@
           </section>
 
           <section class="detail-grid">
-            <article class="analysis-panel">
+            <article class="analysis-panel panel-accent-slate">
               <h3>Reliability</h3>
               <p id="qualityText" class="outlook-text"></p>
               <div id="qualityMetrics" class="metric-table"></div>
               <ul id="qualityWarnings" class="signal-list"></ul>
             </article>
 
-            <article class="analysis-panel">
+            <article class="analysis-panel panel-accent-rose">
               <h3>Scenarios</h3>
               <div id="scenarioList" class="scenario-list"></div>
             </article>
 
-            <article class="analysis-panel">
+            <article class="analysis-panel panel-accent-cyan">
               <h3>Cross-check</h3>
               <p class="outlook-text">Use these sources to manually verify chart, results, news, and fundamentals before acting.</p>
               <div id="referenceLinks" class="reference-links"></div>
@@ -200,7 +218,7 @@
           <section class="monitor-header">
             <div>
               <p class="eyebrow">Market Monitor</p>
-              <h2>Commodities, breakouts, and impacted stocks</h2>
+              <h2>Commodities, breakouts, and catalyst watchlists</h2>
               <p class="muted" id="monitorGenerated">Not loaded yet.</p>
             </div>
             <button type="button" id="refreshMonitor">Refresh Monitor</button>
@@ -214,7 +232,7 @@
           <section id="monitorError" class="error-state is-hidden"></section>
 
           <section id="monitorContent" class="monitor-content is-hidden">
-            <article class="analysis-panel">
+            <article class="analysis-panel panel-accent-teal">
               <div class="section-head">
                 <h3>International Commodities</h3>
                 <span class="pill">Live reference</span>
@@ -222,8 +240,8 @@
               <div id="commodityGrid" class="monitor-grid"></div>
             </article>
 
-            <section class="main-grid">
-              <article class="analysis-panel">
+            <section class="wide-grid">
+              <article class="analysis-panel panel-accent-blue">
                 <div class="section-head">
                   <h3>Near Highs & Breakouts</h3>
                   <span id="scanCount" class="pill"></span>
@@ -245,13 +263,6 @@
                 </div>
               </article>
 
-              <article class="analysis-panel">
-                <div class="section-head">
-                  <h3>Commodity Impact</h3>
-                  <span class="pill">Watchlist</span>
-                </div>
-                <div id="impactGroups" class="impact-list"></div>
-              </article>
             </section>
 
             <section class="notice" id="monitorNote"></section>
