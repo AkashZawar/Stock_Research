@@ -1,4 +1,6 @@
 import json
+import logging
+from ipaddress import ip_address
 from decimal import Decimal, InvalidOperation
 
 from django.http import HttpResponseNotAllowed
@@ -7,7 +9,11 @@ from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
 from . import services
+from .models import StockSearchLog
 from .models import TradeReference
+
+
+logger = logging.getLogger(__name__)
 
 
 def index(request):
@@ -27,13 +33,40 @@ def search(request):
 
 def analyze(request):
     raw_input = request.GET.get("symbol", "").strip()
+    symbol = ""
+    status_code = 500
+    error_message = ""
     try:
         symbol = services.resolve_symbol_input(raw_input)
         if not symbol:
-            return JsonResponse({"error": "Enter a valid ticker symbol or stock name."}, status=400)
-        return JsonResponse(services.analyze_symbol(symbol))
+            status_code = 400
+            error_message = "Enter a valid ticker symbol or stock name."
+            return JsonResponse({"error": error_message}, status=status_code)
+        payload = services.analyze_symbol(symbol)
+        status_code = 200
+        return JsonResponse(payload)
     except Exception as error:
-        return JsonResponse({"error": str(error)}, status=500)
+        error_message = str(error)
+        status_code = 500
+        return JsonResponse({"error": error_message}, status=status_code)
+    finally:
+        record_stock_search(request, raw_input, symbol, status_code, error_message)
+
+
+def search_logs(request):
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    try:
+        limit = max(1, min(int(request.GET.get("limit", "100")), 250))
+    except ValueError:
+        limit = 100
+
+    logs = StockSearchLog.objects.all()[:limit]
+    return JsonResponse({
+        "count": StockSearchLog.objects.count(),
+        "results": [item.as_dict() for item in logs],
+    })
 
 
 def market_monitor(request):
@@ -43,6 +76,59 @@ def market_monitor(request):
         return JsonResponse(services.cached("market-monitor", services.build_market_monitor, 10 * 60))
     except Exception as error:
         return JsonResponse({"error": str(error)}, status=500)
+
+
+def record_stock_search(request, raw_input, symbol, status_code, error_message):
+    if not raw_input and not symbol:
+        return
+
+    try:
+        user_agent = request.META.get("HTTP_USER_AGENT", "")
+        device_type, device_label = describe_device(user_agent)
+        StockSearchLog.objects.create(
+            raw_input=raw_input[:160],
+            symbol=(symbol or "").upper()[:32],
+            ip_address=client_ip(request),
+            device_type=device_type,
+            device_label=device_label,
+            user_agent=user_agent[:1000],
+            status_code=status_code,
+            success=200 <= status_code < 400,
+            error_message=(error_message or "")[:280],
+        )
+    except Exception:
+        logger.exception("Could not record stock search log.")
+
+
+def client_ip(request):
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    raw_ip = forwarded_for.split(",", 1)[0].strip() if forwarded_for else request.META.get("REMOTE_ADDR", "").strip()
+    if not raw_ip:
+        return None
+
+    try:
+        return str(ip_address(raw_ip))
+    except ValueError:
+        return None
+
+
+def describe_device(user_agent):
+    agent = (user_agent or "").lower()
+    if not agent:
+        return "unknown", "Unknown device"
+    if any(marker in agent for marker in ["bot", "crawler", "spider", "slurp"]):
+        return "bot", "Bot / crawler"
+    if "ipad" in agent or "tablet" in agent or ("android" in agent and "mobile" not in agent):
+        return "tablet", "Tablet"
+    if any(marker in agent for marker in ["mobi", "iphone", "android", "phone"]):
+        return "mobile", "Mobile"
+    if "windows" in agent:
+        return "desktop", "Windows desktop"
+    if "macintosh" in agent or "mac os x" in agent:
+        return "desktop", "Mac desktop"
+    if "linux" in agent or "x11" in agent:
+        return "desktop", "Linux desktop"
+    return "unknown", "Unknown device"
 
 
 @csrf_exempt

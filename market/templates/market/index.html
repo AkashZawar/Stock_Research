@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Stock Research Desk</title>
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260509-growth-drivers-1">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260509-search-log-1">
   </head>
   <body>
     <main class="app-shell">
@@ -34,6 +34,7 @@
           <button class="tab-button is-active" type="button" id="analysisTab">Stock Analysis</button>
           <button class="tab-button" type="button" id="monitorTab">Market Monitor</button>
           <button class="tab-button" type="button" id="tradeTab">Trade References</button>
+          <button class="tab-button" type="button" id="searchLogTab">Search Logs</button>
         </nav>
 
         <section id="analysisView" class="tab-view">
@@ -115,7 +116,7 @@
                     </div>
                   </div>
                 </div>
-                <canvas id="priceChart" aria-label="One-year candlestick price chart"></canvas>
+                <canvas id="priceChart" aria-label="One-year candlestick price chart" role="button" tabindex="0" title="Open this chart on TradingView"></canvas>
               </article>
 
               <article class="levels-panel">
@@ -396,9 +397,44 @@
             </article>
           </section>
         </section>
+
+        <section id="searchLogView" class="tab-view is-hidden">
+          <section class="monitor-header">
+            <div>
+              <p class="eyebrow">Search Logs</p>
+              <h2>Stock search audit trail</h2>
+              <p class="muted" id="searchLogSummary">Not loaded yet.</p>
+            </div>
+            <button type="button" id="refreshSearchLogs">Refresh Logs</button>
+          </section>
+
+          <section id="searchLogLoading" class="loading-state is-hidden">
+            <div class="spinner"></div>
+            <p>Loading search logs...</p>
+          </section>
+
+          <section id="searchLogError" class="error-state is-hidden"></section>
+
+          <section id="searchLogContent" class="analysis-panel search-log-panel is-hidden">
+            <div class="table-wrap">
+              <table class="monitor-table search-log-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Stock</th>
+                    <th>IP address</th>
+                    <th>Device</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="searchLogRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260509-growth-drivers-1"></script>
+    <script src="{% static 'app.js' %}?v=20260509-search-log-1"></script>
   </body>
 </html>

@@ -9,13 +9,20 @@ const canvas = document.querySelector("#priceChart");
 const analysisTab = document.querySelector("#analysisTab");
 const monitorTab = document.querySelector("#monitorTab");
 const tradeTab = document.querySelector("#tradeTab");
+const searchLogTab = document.querySelector("#searchLogTab");
 const analysisView = document.querySelector("#analysisView");
 const monitorView = document.querySelector("#monitorView");
 const tradeView = document.querySelector("#tradeView");
+const searchLogView = document.querySelector("#searchLogView");
 const refreshMonitor = document.querySelector("#refreshMonitor");
 const monitorLoading = document.querySelector("#monitorLoading");
 const monitorError = document.querySelector("#monitorError");
 const monitorContent = document.querySelector("#monitorContent");
+const refreshSearchLogs = document.querySelector("#refreshSearchLogs");
+const searchLogLoading = document.querySelector("#searchLogLoading");
+const searchLogError = document.querySelector("#searchLogError");
+const searchLogContent = document.querySelector("#searchLogContent");
+const searchLogRows = document.querySelector("#searchLogRows");
 const tradeForm = document.querySelector("#tradeForm");
 const tradeRows = document.querySelector("#tradeRows");
 const tradeLoading = document.querySelector("#tradeLoading");
@@ -27,6 +34,7 @@ const chartResistanceToggle = document.querySelector("#chartResistanceToggle");
 let latestReport = null;
 let latestMonitor = null;
 let latestTradeReferences = null;
+let latestSearchLogs = null;
 let searchTimer = null;
 
 form.addEventListener("submit", async (event) => {
@@ -52,10 +60,25 @@ tradeTab.addEventListener("click", () => {
     loadTradeReferences();
   }
 });
+searchLogTab.addEventListener("click", () => {
+  setActiveTab("logs");
+  if (!latestSearchLogs) {
+    loadSearchLogs();
+  }
+});
 refreshMonitor.addEventListener("click", () => loadMarketMonitor(true));
+refreshSearchLogs.addEventListener("click", loadSearchLogs);
 useCurrentReport.addEventListener("click", prefillTradeFromReport);
 chartSupportToggle.addEventListener("change", redrawChart);
 chartResistanceToggle.addEventListener("change", redrawChart);
+canvas.addEventListener("click", confirmTradingViewRedirect);
+canvas.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  event.preventDefault();
+  confirmTradingViewRedirect();
+});
 
 tradeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -89,13 +112,16 @@ window.addEventListener("resize", () => {
 function setActiveTab(tab) {
   const isMonitor = tab === "monitor";
   const isTrade = tab === "trade";
-  const isAnalysis = !isMonitor && !isTrade;
+  const isLogs = tab === "logs";
+  const isAnalysis = !isMonitor && !isTrade && !isLogs;
   analysisTab.classList.toggle("is-active", isAnalysis);
   monitorTab.classList.toggle("is-active", isMonitor);
   tradeTab.classList.toggle("is-active", isTrade);
+  searchLogTab.classList.toggle("is-active", isLogs);
   analysisView.classList.toggle("is-hidden", !isAnalysis);
   monitorView.classList.toggle("is-hidden", !isMonitor);
   tradeView.classList.toggle("is-hidden", !isTrade);
+  searchLogView.classList.toggle("is-hidden", !isLogs);
   if (isAnalysis && latestReport) {
     redrawChart();
   }
@@ -115,6 +141,8 @@ async function analyze(symbol) {
   } catch (error) {
     errorState.textContent = error.message;
     showState("error");
+  } finally {
+    latestSearchLogs = null;
   }
 }
 
@@ -173,6 +201,28 @@ async function loadTradeReferences() {
     showTradeError(error.message);
   } finally {
     tradeLoading.classList.add("is-hidden");
+  }
+}
+
+async function loadSearchLogs() {
+  searchLogLoading.classList.remove("is-hidden");
+  searchLogError.classList.add("is-hidden");
+  searchLogContent.classList.add("is-hidden");
+
+  try {
+    const response = await fetch("/api/search-logs?limit=100");
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Could not load search logs.");
+    }
+    latestSearchLogs = payload.results || [];
+    renderSearchLogs(latestSearchLogs, payload.count || 0);
+    searchLogContent.classList.remove("is-hidden");
+  } catch (error) {
+    searchLogError.textContent = error.message;
+    searchLogError.classList.remove("is-hidden");
+  } finally {
+    searchLogLoading.classList.add("is-hidden");
   }
 }
 
@@ -267,6 +317,36 @@ function renderTradeReferences(items) {
   }
 }
 
+function renderSearchLogs(items, totalCount) {
+  searchLogRows.innerHTML = "";
+  document.querySelector("#searchLogSummary").textContent = `${items.length} recent searches shown${totalCount > items.length ? ` of ${totalCount}` : ""}.`;
+
+  if (!items.length) {
+    searchLogRows.innerHTML = "<tr><td colspan=\"5\">No stock searches recorded yet.</td></tr>";
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("tr");
+    const status = item.success ? "Success" : `Failed ${item.statusCode || ""}`.trim();
+    row.innerHTML = `
+      <td>${formatDateTime(item.createdAt)}</td>
+      <td><strong>${escapeHtml(item.symbol || item.rawInput || "n/a")}</strong><span>Input: ${escapeHtml(item.rawInput || "n/a")}</span></td>
+      <td>${escapeHtml(item.ipAddress || "n/a")}</td>
+      <td><strong>${escapeHtml(item.deviceLabel || item.deviceType || "Unknown device")}</strong><small>${escapeHtml(shortUserAgent(item.userAgent))}</small></td>
+      <td><span class="status-pill ${item.success ? "status-success" : "status-failed"}">${escapeHtml(status)}</span>${item.errorMessage ? `<small>${escapeHtml(item.errorMessage)}</small>` : ""}</td>
+    `;
+    searchLogRows.appendChild(row);
+  }
+}
+
+function shortUserAgent(userAgent) {
+  if (!userAgent) {
+    return "No user agent";
+  }
+  return userAgent.length > 140 ? `${userAgent.slice(0, 140)}...` : userAgent;
+}
+
 function showTradeError(message) {
   tradeError.textContent = message;
   tradeError.classList.remove("is-hidden");
@@ -310,6 +390,35 @@ function renderReport(report) {
   renderSwingTradePlan(report.swingTradePlan, currency);
   renderReferences(report.references);
   redrawChart();
+}
+
+function confirmTradingViewRedirect() {
+  if (!latestReport) {
+    return;
+  }
+
+  const chartUrl = tradingViewChartUrl(latestReport);
+  if (!chartUrl) {
+    window.alert("TradingView chart is not available for this symbol.");
+    return;
+  }
+
+  const symbol = latestReport.references?.tradingViewSymbol || latestReport.symbol || "this stock";
+  const shouldOpen = window.confirm(`Open the candlestick chart for ${symbol} on TradingView?`);
+  if (shouldOpen) {
+    window.location.href = chartUrl;
+  }
+}
+
+function tradingViewChartUrl(report) {
+  const chartLink = (report.references?.links || []).find((link) => link.label === "TradingView chart");
+  if (chartLink?.url) {
+    return chartLink.url;
+  }
+  if (report.references?.tradingViewSymbol) {
+    return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(report.references.tradingViewSymbol)}`;
+  }
+  return "";
 }
 
 function renderMarketMonitor(data) {
@@ -813,9 +922,9 @@ function drawChart(series, currency, levels = {}, retryCount = 0) {
 
   const width = rect.width;
   const height = rect.height;
-  const padding = { top: 24, right: 112, bottom: 34, left: 14 };
-  const plotWidth = width - padding.left - padding.right;
-  const plotHeight = height - padding.top - padding.bottom;
+  const padding = chartPaddingFor(width);
+  const plotWidth = Math.max(1, width - padding.left - padding.right);
+  const plotHeight = Math.max(1, height - padding.top - padding.bottom);
   const levelFilters = getChartLevelFilters();
   const levelZones = normalizeLevelZones(levels).filter((level) => levelFilters[level.type]);
   const values = series
@@ -874,6 +983,16 @@ function getChartLevelFilters() {
     support: chartSupportToggle.checked,
     resistance: chartResistanceToggle.checked
   };
+}
+
+function chartPaddingFor(width) {
+  if (width <= 420) {
+    return { top: 18, right: 72, bottom: 28, left: 8 };
+  }
+  if (width <= 640) {
+    return { top: 20, right: 84, bottom: 30, left: 10 };
+  }
+  return { top: 24, right: 112, bottom: 34, left: 14 };
 }
 
 function normalizeLevelZones(levels) {

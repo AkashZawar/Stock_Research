@@ -29,6 +29,7 @@ http://127.0.0.1:8000
 
 - `/api/search?q=ABBOT%20india`
 - `/api/analyze?symbol=ABBOTINDIA.NS`
+- `/api/search-logs?limit=100`
 - `/api/market-monitor?refresh=1`
 
 The app uses public Yahoo Finance, SEC, and Screener.in endpoints where available. For production use, replace these providers with a licensed market data API.

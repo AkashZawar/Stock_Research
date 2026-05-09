@@ -50,3 +50,39 @@ class TradeReference(models.Model):
             "createdAt": self.created_at.isoformat(),
             "updatedAt": self.updated_at.isoformat(),
         }
+
+
+class StockSearchLog(models.Model):
+    raw_input = models.CharField(max_length=160, blank=True)
+    symbol = models.CharField(max_length=32, blank=True, db_index=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    device_type = models.CharField(max_length=16, default="unknown")
+    device_label = models.CharField(max_length=48, default="Unknown device")
+    user_agent = models.TextField(blank=True)
+    status_code = models.PositiveSmallIntegerField(default=200)
+    success = models.BooleanField(default=True)
+    error_message = models.CharField(max_length=280, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["symbol", "created_at"]),
+            models.Index(fields=["ip_address", "created_at"]),
+        ]
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "rawInput": self.raw_input,
+            "symbol": self.symbol,
+            "ipAddress": self.ip_address,
+            "deviceType": self.device_type,
+            "deviceLabel": self.device_label,
+            "userAgent": self.user_agent,
+            "statusCode": self.status_code,
+            "success": self.success,
+            "errorMessage": self.error_message,
+            "createdAt": self.created_at.isoformat(),
+        }
