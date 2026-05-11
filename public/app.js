@@ -62,6 +62,7 @@ let latestSearchLogs = null;
 let latestAssetReports = { etf: null, fund: null };
 let searchTimer = null;
 let assetSearchTimers = { etf: null, fund: null };
+let suggestionDialogEl = null;
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -196,6 +197,11 @@ async function analyze(symbol) {
     const response = await fetch(`/api/analyze?symbol=${encodeURIComponent(symbol)}`);
     const payload = await response.json();
     if (!response.ok) {
+      if (payload.suggestions) {
+        showInvalidSearchPopup(payload, symbol);
+        showState(latestReport ? "report" : "empty");
+        return;
+      }
       throw new Error(payload.error || "Could not build report.");
     }
     latestReport = payload;
@@ -215,6 +221,11 @@ async function analyzeAsset(context, symbol) {
     const response = await fetch(`/api/analyze-asset?type=${encodeURIComponent(context.type)}&symbol=${encodeURIComponent(symbol)}`);
     const payload = await response.json();
     if (!response.ok) {
+      if (payload.suggestions) {
+        showInvalidSearchPopup(payload, symbol);
+        showAssetState(context.prefix, latestAssetReports[context.prefix] ? "report" : "empty");
+        return;
+      }
       throw new Error(payload.error || "Could not build fund report.");
     }
     latestAssetReports[context.prefix] = payload;
@@ -258,6 +269,151 @@ async function searchAssets(context, query) {
   } catch {
     context.suggestions.innerHTML = "";
   }
+}
+
+function showInvalidSearchPopup(payload, query) {
+  const dialog = ensureSuggestionDialog();
+  const message = dialog.querySelector("#suggestionDialogMessage");
+  const typed = dialog.querySelector("#suggestionDialogTyped");
+  const list = dialog.querySelector("#suggestionDialogList");
+  const suggestionGroups = normalizeSuggestionGroups(payload.suggestions || {});
+
+  message.textContent = payload.error || "Invalid stock/MF name, do you mean anything from below?";
+  typed.textContent = query ? `Typed: ${query}` : "";
+  list.innerHTML = "";
+
+  if (!suggestionGroups.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No close stock, ETF, or mutual fund matches were found. Try a shorter company, ticker, or scheme name.";
+    list.appendChild(empty);
+  }
+
+  for (const group of suggestionGroups) {
+    const section = document.createElement("section");
+    section.className = "suggestion-group";
+    const title = document.createElement("h4");
+    title.textContent = group.title;
+    section.appendChild(title);
+
+    for (const item of group.items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "suggestion-option";
+      button.dataset.suggestionKind = item.kind;
+      button.dataset.suggestionSymbol = item.symbol;
+      button.innerHTML = `
+        <strong>${escapeHtml(item.symbol || "n/a")}</strong>
+        <span>${escapeHtml(item.name || item.symbol || "n/a")}</span>
+        <em>${escapeHtml([item.exchange, item.type || item.label].filter(Boolean).join(" · "))}</em>
+      `;
+      section.appendChild(button);
+    }
+    list.appendChild(section);
+  }
+
+  dialog.classList.remove("is-hidden");
+  document.body.classList.add("dialog-open");
+  const firstOption = dialog.querySelector(".suggestion-option");
+  (firstOption || dialog.querySelector("#suggestionDialogClose")).focus();
+}
+
+function ensureSuggestionDialog() {
+  if (suggestionDialogEl) {
+    return suggestionDialogEl;
+  }
+
+  suggestionDialogEl = document.createElement("section");
+  suggestionDialogEl.id = "suggestionDialog";
+  suggestionDialogEl.className = "suggestion-dialog is-hidden";
+  suggestionDialogEl.setAttribute("role", "dialog");
+  suggestionDialogEl.setAttribute("aria-modal", "true");
+  suggestionDialogEl.setAttribute("aria-labelledby", "suggestionDialogTitle");
+  suggestionDialogEl.innerHTML = `
+    <article class="suggestion-modal">
+      <div class="suggestion-modal-head">
+        <div>
+          <p class="eyebrow">Search Suggestions</p>
+          <h3 id="suggestionDialogTitle">Invalid stock/MF name</h3>
+        </div>
+        <button type="button" id="suggestionDialogClose" class="suggestion-close" aria-label="Close suggestions">Close</button>
+      </div>
+      <p id="suggestionDialogMessage" class="suggestion-message"></p>
+      <p id="suggestionDialogTyped" class="suggestion-typed"></p>
+      <div id="suggestionDialogList" class="suggestion-list"></div>
+    </article>
+  `;
+  document.body.appendChild(suggestionDialogEl);
+
+  suggestionDialogEl.querySelector("#suggestionDialogClose").addEventListener("click", closeSuggestionDialog);
+  suggestionDialogEl.addEventListener("click", (event) => {
+    if (event.target === suggestionDialogEl) {
+      closeSuggestionDialog();
+      return;
+    }
+
+    const option = event.target.closest("[data-suggestion-symbol]");
+    if (!option) {
+      return;
+    }
+    const symbol = option.dataset.suggestionSymbol || "";
+    const kind = option.dataset.suggestionKind || "stock";
+    closeSuggestionDialog();
+    useSuggestedInstrument(symbol, kind);
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !suggestionDialogEl.classList.contains("is-hidden")) {
+      closeSuggestionDialog();
+    }
+  });
+
+  return suggestionDialogEl;
+}
+
+function closeSuggestionDialog() {
+  if (!suggestionDialogEl) {
+    return;
+  }
+  suggestionDialogEl.classList.add("is-hidden");
+  document.body.classList.remove("dialog-open");
+}
+
+function useSuggestedInstrument(symbol, kind) {
+  if (!symbol) {
+    return;
+  }
+  if (kind === "mutual-fund") {
+    const context = assetContexts.fund;
+    context.input.value = symbol;
+    setActiveTab("fund");
+    analyzeAsset(context, symbol);
+    return;
+  }
+  if (kind === "etf") {
+    const context = assetContexts.etf;
+    context.input.value = symbol;
+    setActiveTab("etf");
+    analyzeAsset(context, symbol);
+    return;
+  }
+  symbolInput.value = symbol;
+  setActiveTab("analysis");
+  analyze(symbol);
+}
+
+function normalizeSuggestionGroups(suggestionsPayload) {
+  const groups = [
+    ["stocks", "Stocks"],
+    ["etfs", "ETFs"],
+    ["mutualFunds", "Mutual Funds"],
+  ];
+  return groups
+    .map(([key, title]) => ({
+      title,
+      items: Array.isArray(suggestionsPayload[key]) ? suggestionsPayload[key] : []
+    }))
+    .filter((group) => group.items.length);
 }
 
 async function loadMarketMonitor(forceRefresh) {
@@ -673,10 +829,304 @@ function renderMarketMonitor(data) {
   document.querySelector("#scanCount").textContent = `${data.scannedCount} scanned`;
   document.querySelector("#highVolumeCount").textContent = `${data.activityScannedCount || 0} scanned`;
   document.querySelector("#catalystCount").textContent = `${(data.orderCatalysts || []).length} found`;
+  renderNseSnapshot(data.nseSnapshot || {});
+  renderMoneycontrolSectorAnalysis(data.moneycontrolSectorAnalysis || {});
   renderCommodities(data.commodities || []);
   renderBreakoutRows(data.breakoutCandidates || []);
   renderHighVolumeRows(data.highVolumeCandidates || []);
   renderOrderCatalystRows(data.orderCatalysts || []);
+  setupMonitorCollapsibles();
+}
+
+function setupMonitorCollapsibles() {
+  document.querySelectorAll("#monitorContent .analysis-panel").forEach((panel, index) => {
+    if (panel.dataset.collapsibleReady === "1") {
+      return;
+    }
+    const header = panel.querySelector(":scope > .section-head");
+    if (!header) {
+      return;
+    }
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "collapse-toggle";
+    button.setAttribute("aria-expanded", "true");
+    button.setAttribute("aria-label", "Collapse section");
+    button.title = "Collapse section";
+    button.textContent = "−";
+    button.addEventListener("click", () => {
+      const collapsed = panel.classList.toggle("is-collapsed");
+      button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      button.setAttribute("aria-label", collapsed ? "Expand section" : "Collapse section");
+      button.title = collapsed ? "Expand section" : "Collapse section";
+      button.textContent = collapsed ? "+" : "−";
+    });
+
+    header.appendChild(button);
+    panel.dataset.collapsibleReady = "1";
+    panel.dataset.collapsibleIndex = String(index);
+  });
+}
+
+function renderNseSnapshot(snapshot) {
+  const statusGrid = document.querySelector("#nseStatusGrid");
+  const breadthGrid = document.querySelector("#nseBreadthGrid");
+  const indexGrid = document.querySelector("#nseIndexGrid");
+  if (!statusGrid || !breadthGrid || !indexGrid) {
+    return;
+  }
+
+  statusGrid.innerHTML = "";
+  breadthGrid.innerHTML = "";
+  indexGrid.innerHTML = "";
+
+  if (!snapshot.available) {
+    setText("#nseSnapshotStatus", "Unavailable");
+    statusGrid.innerHTML = `<article class="market-mini-card"><span>NSE snapshot</span><strong>Unavailable</strong><small>${escapeHtml(snapshot.error || "NSE did not return market data.")}</small></article>`;
+    emptyTable("#nseGainerRows", 5, "NSE gainers are unavailable.");
+    emptyTable("#nseLoserRows", 5, "NSE losers are unavailable.");
+    emptyTable("#nseActiveRows", 5, "NSE most-active data is unavailable.");
+    emptyTable("#nseHighRows", 5, "NSE 52-week high and price-band data is unavailable.");
+    return;
+  }
+
+  const capitalMarket = (snapshot.marketStatus || []).find((item) => item.market === "Capital Market") || {};
+  setText("#nseSnapshotStatus", `${capitalMarket.message || capitalMarket.status || "NSE"}${snapshot.timestamp ? " · " + snapshot.timestamp : ""}`);
+
+  for (const item of (snapshot.marketStatus || []).slice(0, 6)) {
+    const card = document.createElement("article");
+    card.className = "market-mini-card";
+    card.innerHTML = `
+      <span>${escapeHtml(item.market || "Market")}</span>
+      <strong>${escapeHtml(item.status || "n/a")}</strong>
+      <small>${escapeHtml(item.message || item.tradeDate || "")}</small>
+      ${Number.isFinite(item.last) ? `<small>${escapeHtml(item.index || "")} ${formatNumber(item.last)} <em class="${changeClass(item.changePercent)}">${signed(item.changePercent)}%</em></small>` : ""}
+    `;
+    statusGrid.appendChild(card);
+  }
+
+  const breadth = snapshot.breadth || {};
+  const marketCap = snapshot.marketCap || {};
+  const gift = snapshot.giftNifty || {};
+  const breadthCards = [
+    ["Advances", formatNumber(breadth.advances), `${formatPercentValue(breadth.advancePercent)} of NSE universe`],
+    ["Declines", formatNumber(breadth.declines), `${formatPercentValue(breadth.declinePercent)} of NSE universe`],
+    ["A/D Ratio", formatNumber(breadth.advanceDeclineRatio), `${formatNumber(breadth.total)} securities tracked`],
+    ["Market Cap", marketCap.lakhCroreRupees ? `${formatNumber(marketCap.lakhCroreRupees)} lakh cr` : "n/a", marketCap.timestamp || ""],
+    ["GIFT Nifty", formatNumber(gift.last), `${signed(gift.change)} (${signed(gift.changePercent)}%)`],
+  ];
+  for (const [label, value, detail] of breadthCards) {
+    const card = document.createElement("article");
+    card.className = "market-mini-card";
+    card.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small>`;
+    breadthGrid.appendChild(card);
+  }
+
+  for (const item of snapshot.indices || []) {
+    const card = document.createElement("article");
+    card.className = "nse-index-card";
+    card.innerHTML = `
+      <div>
+        <span>${escapeHtml(item.name || "Index")}</span>
+        <strong>${formatNumber(item.last)}</strong>
+      </div>
+      <em class="${changeClass(item.changePercent)}">${signed(item.changePercent)}%</em>
+      <small>H/L ${formatNumber(item.high)} / ${formatNumber(item.low)} · PE ${formatNumber(item.pe)} · A/D ${formatNumber(item.advances)}/${formatNumber(item.declines)}</small>
+    `;
+    indexGrid.appendChild(card);
+  }
+
+  setText("#nseGainerCount", `${(snapshot.topGainers || []).length} shown`);
+  setText("#nseLoserCount", `${(snapshot.topLosers || []).length} shown`);
+  setText("#nseActiveCount", `${(snapshot.mostActive || []).length} shown`);
+  renderNseMoverRows("#nseGainerRows", snapshot.topGainers || [], "No NSE gainers were returned.");
+  renderNseMoverRows("#nseLoserRows", snapshot.topLosers || [], "No NSE losers were returned.");
+  renderNseActiveRows(snapshot.mostActive || []);
+  renderNseHighAndBandRows(snapshot.weekHighs || [], snapshot.priceBands || {});
+}
+
+function renderMoneycontrolSectorAnalysis(snapshot) {
+  const summary = document.querySelector("#moneycontrolSectorSummary");
+  if (!summary) {
+    return;
+  }
+  summary.innerHTML = "";
+
+  if (!snapshot.available) {
+    setText("#moneycontrolSectorStatus", "Unavailable");
+    summary.innerHTML = `<article class="market-mini-card"><span>Moneycontrol</span><strong>Unavailable</strong><small>${escapeHtml(snapshot.error || "Sector analysis could not be loaded.")}</small></article>`;
+    emptyTable("#moneycontrolSectorRows", 8, "Moneycontrol sector analysis is unavailable.");
+    emptyTable("#moneycontrolIndexRows", 4, "Moneycontrol sectoral indices are unavailable.");
+    return;
+  }
+
+  const sectors = summarizedMoneycontrolSectors(snapshot);
+  const indices = snapshot.sectorIndices || [];
+  const breadth = snapshot.breadth || {};
+  setText("#moneycontrolSectorStatus", `${sectors.length} signals`);
+  setText("#moneycontrolIndexStatus", `${indices.length} indices`);
+
+  const summaryCards = [
+    ["Stocks", formatNumber(breadth.stocks), "Moneycontrol sector universe"],
+    ["Sector Breadth", `${formatNumber(breadth.advance)}/${formatNumber(breadth.decline)}`, `A/D ${formatNumber(breadth.advanceDeclineRatio)}`],
+    ["Bullish Sectors", formatNumber(breadth.bullishSectors), `${formatNumber(breadth.bearishSectors)} bearish`],
+    ["Source", "Moneycontrol", snapshot.url || ""],
+  ];
+  for (const [label, value, detail] of summaryCards) {
+    const card = document.createElement("article");
+    card.className = "market-mini-card";
+    card.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small>`;
+    summary.appendChild(card);
+  }
+
+  const sectorRows = document.querySelector("#moneycontrolSectorRows");
+  sectorRows.innerHTML = "";
+  if (!sectors.length) {
+    emptyTable("#moneycontrolSectorRows", 8, "No sector rows were returned by Moneycontrol.");
+  } else {
+    for (const item of sectors) {
+      const row = document.createElement("tr");
+      const title = item.url
+        ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.sector)}</a>`
+        : escapeHtml(item.sector);
+      row.innerHTML = `
+        <td><span class="sector-signal ${item.signalType === "weak" ? "is-weak" : "is-strong"}">${escapeHtml(item.signal || "Tracked")}</span></td>
+        <td><strong>${title}</strong><span>${formatNumber(item.stocks)} stocks · ${formatNumber(item.industries)} industries</span></td>
+        <td>${escapeHtml(item.trend || "n/a")}<span>${escapeHtml(item.summary || "")}</span></td>
+        <td class="${changeClass(item.marketCapChangePercent)}">${signed(item.marketCapChangePercent)}%<span>${formatLarge(item.marketCapCrore, "")} cr</span></td>
+        <td>${formatNumber(item.advance)} / ${formatNumber(item.decline)}<span>${formatPercentValue(item.advancePercent)} advancing</span></td>
+        <td>${formatNumber(item.sectorPe)}</td>
+        <td class="${changeClass(item.earningsYoyChange)}">${signed(item.earningsYoyChange)}%<span>${formatLarge(item.earningsYoyCrore, "")} cr</span></td>
+        <td><strong>${scoreText(item.score || 0)}</strong></td>
+      `;
+      sectorRows.appendChild(row);
+    }
+  }
+
+  const indexRows = document.querySelector("#moneycontrolIndexRows");
+  indexRows.innerHTML = "";
+  if (!indices.length) {
+    emptyTable("#moneycontrolIndexRows", 4, "No sectoral index rows were returned by Moneycontrol.");
+  } else {
+    for (const item of indices) {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td><strong>${escapeHtml(item.name || "Index")}</strong><span>${escapeHtml(item.lastUpdated || "")}</span></td>
+        <td>${formatNumber(item.price)}</td>
+        <td class="${changeClass(item.changePercent)}">${signed(item.change)}<span>${signed(item.changePercent)}%</span></td>
+        <td>${formatNumber(item.advance)} / ${formatNumber(item.decline)}</td>
+      `;
+      indexRows.appendChild(row);
+    }
+  }
+}
+
+function summarizedMoneycontrolSectors(snapshot) {
+  const rows = [];
+  const seen = new Set();
+  const addRows = (items, signal, signalType) => {
+    for (const item of items || []) {
+      if (!item.sector || seen.has(item.sector)) {
+        continue;
+      }
+      seen.add(item.sector);
+      rows.push({ ...item, signal, signalType });
+    }
+  };
+
+  addRows(snapshot.topPerforming || [], "Leader", "strong");
+  addRows(snapshot.underPerforming || [], "Weak", "weak");
+  if (!rows.length) {
+    addRows((snapshot.sectors || []).slice(0, 10), "Tracked", "neutral");
+  }
+  return rows.slice(0, 12);
+}
+
+function renderNseMoverRows(selector, items, emptyMessage) {
+  const body = document.querySelector(selector);
+  body.innerHTML = "";
+  if (!items.length) {
+    emptyTable(selector, 5, emptyMessage);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong>${escapeHtml(item.symbol)}</strong><span>${escapeHtml(item.series || "")}</span></td>
+      <td>${formatMoney(item.price, "INR")}</td>
+      <td class="${changeClass(item.changePercent)}">${signed(item.change)}<span>${signed(item.changePercent)}%</span></td>
+      <td>${formatLarge(item.volume, "")}<span>${formatNumber(item.turnoverLakhs)} lakh turnover</span></td>
+      <td>${formatMoney(item.low, "INR")} - ${formatMoney(item.high, "INR")}${item.corporateAction ? `<span>${escapeHtml(item.corporateAction)}</span>` : ""}</td>
+    `;
+    body.appendChild(row);
+  }
+}
+
+function renderNseActiveRows(items) {
+  const body = document.querySelector("#nseActiveRows");
+  body.innerHTML = "";
+  if (!items.length) {
+    emptyTable("#nseActiveRows", 5, "No NSE most-active rows were returned.");
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong>${escapeHtml(item.symbol)}</strong><span>${escapeHtml(item.lastUpdateTime || "")}</span></td>
+      <td>${formatMoney(item.price, "INR")}<span class="${changeClass(item.changePercent)}">${signed(item.changePercent)}%</span></td>
+      <td>${formatLarge(item.volume, "")}</td>
+      <td>${formatLarge(item.value, "INR")}</td>
+      <td>${formatMoney(item.yearLow, "INR")} - ${formatMoney(item.yearHigh, "INR")}</td>
+    `;
+    body.appendChild(row);
+  }
+}
+
+function renderNseHighAndBandRows(highs, priceBands) {
+  const body = document.querySelector("#nseHighRows");
+  body.innerHTML = "";
+  const bands = (priceBands && priceBands.rows) || [];
+  const countText = ((priceBands && priceBands.count) || [])
+    .map((item) => `${item.label} ${item.value}`)
+    .join(" · ");
+  setText("#nsePriceBandCount", countText || `${highs.length + bands.length} shown`);
+
+  const rows = [
+    ...highs.map((item) => ({ ...item, type: "52W high" })),
+    ...bands.map((item) => ({ ...item, type: "Price band" })),
+  ].slice(0, 12);
+
+  if (!rows.length) {
+    emptyTable("#nseHighRows", 5, "No NSE 52-week high or price-band rows were returned.");
+    return;
+  }
+
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong>${escapeHtml(item.symbol)}</strong><span>${escapeHtml(item.name || item.type || "")}</span></td>
+      <td>${formatMoney(item.price, "INR")}</td>
+      <td>${formatMoney(item.newHigh || item.yearHigh, "INR")}<span>${item.previousHighDate ? `Prev ${formatMoney(item.previousHigh, "INR")} on ${escapeHtml(item.previousHighDate)}` : ""}</span></td>
+      <td class="${changeClass(item.changePercent)}">${signed(item.change)}<span>${signed(item.changePercent)}%</span></td>
+      <td>${Number.isFinite(item.priceBand) ? `${formatNumber(item.priceBand)}%` : escapeHtml(item.priceBucket || "")}<span>${Number.isFinite(item.volume) ? `${formatLarge(item.volume, "")} shares` : ""}</span></td>
+    `;
+    body.appendChild(row);
+  }
+}
+
+function emptyTable(selector, colspan, message) {
+  const body = document.querySelector(selector);
+  if (body) {
+    body.innerHTML = `<tr><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
+  }
+}
+
+function setText(selector, value) {
+  const element = document.querySelector(selector);
+  if (element) {
+    element.textContent = value;
+  }
 }
 
 function renderCommodities(items) {
@@ -1000,6 +1450,32 @@ function renderGrowthDrivers(data, currency) {
     card.innerHTML = `
       <h4>Orders / Policy Headlines</h4>
       <div class="catalyst-list">${items}</div>
+    `;
+    container.appendChild(card);
+  }
+
+  const sectorAnalysis = data.sectorAnalysis || {};
+  if (sectorAnalysis.available && sectorAnalysis.matchedSector) {
+    const sector = sectorAnalysis.matchedSector;
+    const card = document.createElement("article");
+    card.className = "growth-card";
+    const title = sectorAnalysis.url
+      ? `<a href="${escapeHtml(sectorAnalysis.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sector.sector)}</a>`
+      : escapeHtml(sector.sector);
+    card.innerHTML = `
+      <h4>Moneycontrol Sector Analysis</h4>
+      <div class="sector-analysis-card">
+        <strong>${title}</strong>
+        <p>${escapeHtml(sectorAnalysis.summary || sector.summary || "")}</p>
+        <div class="sector-analysis-metrics">
+          <span>Trend <em>${escapeHtml(sector.trend || "n/a")}</em></span>
+          <span>Mcap <em class="${changeClass(sector.marketCapChangePercent)}">${signed(sector.marketCapChangePercent)}%</em></span>
+          <span>A/D <em>${formatNumber(sector.advance)} / ${formatNumber(sector.decline)}</em></span>
+          <span>PE <em>${formatNumber(sector.sectorPe)}</em></span>
+          <span>NP YoY <em class="${changeClass(sector.earningsYoyChange)}">${signed(sector.earningsYoyChange)}%</em></span>
+          <span>Rank <em>${sectorAnalysis.rank ? `#${sectorAnalysis.rank}` : "n/a"}</em></span>
+        </div>
+      </div>
     `;
     container.appendChild(card);
   }

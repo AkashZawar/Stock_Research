@@ -7,6 +7,7 @@ import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -18,6 +19,7 @@ CACHE_TTL_SECONDS = 5 * 60
 SEC_CACHE_TTL_SECONDS = 24 * 60 * 60
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
+INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
 _cache = {}
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
@@ -41,6 +43,74 @@ COMMODITIES = [
     {"symbol": "SI=F", "name": "Silver", "category": "Precious Metals", "unit": "USD/oz"},
     {"symbol": "HG=F", "name": "Copper", "category": "Industrial Metals", "unit": "USD/lb"},
 ]
+
+NSE_BASE_URL = "https://www.nseindia.com"
+NSE_HEADERS = {
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
+    "User-Agent": "Mozilla/5.0 StockResearchDesk/0.1",
+}
+NSE_KEY_INDICES = (
+    "NIFTY 50",
+    "NIFTY NEXT 50",
+    "NIFTY BANK",
+    "NIFTY FINANCIAL SERVICES",
+    "NIFTY MIDCAP 100",
+    "NIFTY SMALLCAP 100",
+    "INDIA VIX",
+)
+NSE_SECTOR_INDICES = (
+    "NIFTY AUTO",
+    "NIFTY IT",
+    "NIFTY FMCG",
+    "NIFTY PHARMA",
+    "NIFTY METAL",
+    "NIFTY REALTY",
+    "NIFTY PSU BANK",
+    "NIFTY PRIVATE BANK",
+    "NIFTY OIL & GAS",
+    "NIFTY HEALTHCARE INDEX",
+    "NIFTY CONSUMER DURABLES",
+)
+NSE_SNAPSHOT_ENDPOINTS = {
+    "marketStatus": "/api/marketStatus",
+    "allIndices": "/api/allIndices",
+    "gainers": "/api/live-analysis-variations?index=gainers",
+    "losers": "/api/live-analysis-variations?index=loosers",
+    "mostActive": "/api/live-analysis-most-active-securities?index=volume",
+    "weekHighs": "/api/live-analysis-52Week?index=high",
+    "priceBands": "/api/live-analysis-price-band-hitter?index=upper",
+}
+MONEYCONTROL_SECTOR_URL = "https://www.moneycontrol.com/markets/sector-analysis/"
+SECTOR_ALIASES = {
+    "Technology": "Software & IT Services",
+    "Information Technology": "Software & IT Services",
+    "Software": "Software & IT Services",
+    "Financial Services": "Finance",
+    "Financials": "Finance",
+    "Banks": "Banks",
+    "Banking": "Banks",
+    "Consumer Defensive": "FMCG",
+    "Consumer Staples": "FMCG",
+    "Healthcare": "Healthcare",
+    "Health Care": "Healthcare",
+    "Industrials": "Capital Goods",
+    "Capital Goods": "Capital Goods",
+    "Basic Materials": "Metals & Mining",
+    "Materials": "Metals & Mining",
+    "Energy": "Oil & Gas",
+    "Oil": "Oil & Gas",
+    "Oil & Gas": "Oil & Gas",
+    "Utilities": "Power",
+    "Power": "Power",
+    "Real Estate": "Real Estate",
+    "Communication Services": "Telecom",
+    "Telecom": "Telecom",
+    "Consumer Cyclical": "Automobile & Ancillaries",
+    "Auto": "Automobile & Ancillaries",
+    "Automobile": "Automobile & Ancillaries",
+}
 
 BREAKOUT_WATCHLIST = [
     ("RELIANCE.NS", "Reliance Industries", ["Oil", "Petrochemicals"]),
@@ -338,7 +408,651 @@ def _analyze_asset(symbol, asset_type):
     return build_asset_report(symbol, asset_type, chart.get("meta", {}), candles, quote_data, summary)
 
 
+def build_nse_market_snapshot():
+    payloads = {}
+    endpoint_errors = {}
+    with ThreadPoolExecutor(max_workers=min(6, len(NSE_SNAPSHOT_ENDPOINTS))) as executor:
+        futures = {
+            executor.submit(fetch_nse_json, path): key
+            for key, path in NSE_SNAPSHOT_ENDPOINTS.items()
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                payloads[key] = future.result()
+            except Exception as error:
+                endpoint_errors[key] = str(error)
+
+    if not payloads:
+        raise RuntimeError("NSE India market snapshot is temporarily unavailable.")
+
+    snapshot = build_nse_market_snapshot_from_payloads(payloads)
+    snapshot["endpointErrors"] = endpoint_errors
+    if endpoint_errors:
+        snapshot["note"] = "Some NSE snapshot blocks could not be refreshed; visible data uses the endpoints that responded."
+    return snapshot
+
+
+def safe_nse_market_snapshot():
+    try:
+        return build_nse_market_snapshot()
+    except Exception as error:
+        return {
+            "available": False,
+            "source": "NSE India public market APIs",
+            "generatedAt": iso_now(),
+            "error": str(error),
+            "marketStatus": [],
+            "indices": [],
+            "sectorIndices": [],
+            "topGainers": [],
+            "topLosers": [],
+            "mostActive": [],
+            "weekHighs": [],
+            "priceBands": {"rows": [], "count": []},
+        }
+
+
+def build_nse_market_snapshot_from_payloads(payloads):
+    market_status_payload = payloads.get("marketStatus") or {}
+    all_indices_payload = payloads.get("allIndices") or {}
+    market_status = normalize_nse_market_status(market_status_payload)
+    market_cap = normalize_nse_market_cap(market_status_payload)
+    gift_nifty = normalize_nse_gift_nifty(market_status_payload)
+    breadth = normalize_nse_breadth(all_indices_payload)
+    indices = normalize_nse_indices(all_indices_payload, NSE_KEY_INDICES)
+    sector_indices = normalize_nse_sector_indices(all_indices_payload)
+
+    return {
+        "available": True,
+        "source": "NSE India public market APIs",
+        "generatedAt": iso_now(),
+        "timestamp": nse_text(all_indices_payload.get("timestamp"))
+            or nse_first_timestamp(market_status),
+        "marketStatus": market_status,
+        "marketCap": market_cap,
+        "giftNifty": gift_nifty,
+        "breadth": breadth,
+        "indices": indices,
+        "sectorIndices": sector_indices,
+        "topGainers": normalize_nse_variation(payloads.get("gainers"), limit=8),
+        "topLosers": normalize_nse_variation(payloads.get("losers"), limit=8),
+        "mostActive": normalize_nse_most_active(payloads.get("mostActive"), limit=8),
+        "weekHighs": normalize_nse_52_week_highs(payloads.get("weekHighs"), limit=8),
+        "priceBands": normalize_nse_price_bands(payloads.get("priceBands"), limit=8),
+        "note": "Live snapshot pulled from NSE India public website endpoints.",
+    }
+
+
+def normalize_nse_market_status(payload):
+    rows = []
+    for item in (payload.get("marketState") or []):
+        market = nse_text(item.get("market"))
+        if not market:
+            continue
+        rows.append({
+            "market": market,
+            "status": nse_text(item.get("marketStatus")),
+            "message": nse_text(item.get("marketStatusMessage")),
+            "tradeDate": nse_text(item.get("tradeDateFormatted"))
+                or nse_text(item.get("updated_time"))
+                or nse_text(item.get("tradeDate")),
+            "index": nse_text(item.get("index")) or nse_text(item.get("underlying")),
+            "last": nse_round(item.get("last")),
+            "change": nse_round(item.get("variation")),
+            "changePercent": nse_round(item.get("percentChange")),
+            "expiryDate": nse_text(item.get("expiryDate")),
+        })
+    return rows
+
+
+def normalize_nse_market_cap(payload):
+    market_cap = payload.get("marketcap") or {}
+    return {
+        "timestamp": nse_text(market_cap.get("timeStamp")),
+        "trillionDollars": nse_round(market_cap.get("marketCapinTRDollars")),
+        "lakhCroreRupees": nse_round(market_cap.get("marketCapinLACCRRupees")),
+        "croreRupees": nse_round(market_cap.get("marketCapinCRRupees")),
+        "croreRupeesFormatted": nse_text(market_cap.get("marketCapinCRRupeesFormatted")),
+    }
+
+
+def normalize_nse_gift_nifty(payload):
+    gift = payload.get("giftnifty") or {}
+    return {
+        "symbol": nse_text(gift.get("SYMBOL")),
+        "expiryDate": nse_text(gift.get("EXPIRYDATE")),
+        "last": nse_round(gift.get("LASTPRICE")),
+        "change": nse_round(gift.get("DAYCHANGE")),
+        "changePercent": nse_round(gift.get("PERCHANGE")),
+        "contractsTraded": nse_int(gift.get("CONTRACTSTRADED")),
+        "timestamp": nse_text(gift.get("TIMESTMP")),
+    }
+
+
+def normalize_nse_breadth(payload):
+    advances = nse_int(payload.get("advances")) or 0
+    declines = nse_int(payload.get("declines")) or 0
+    unchanged = nse_int(payload.get("unchanged")) or 0
+    total = advances + declines + unchanged
+    return {
+        "advances": advances,
+        "declines": declines,
+        "unchanged": unchanged,
+        "total": total,
+        "advanceDeclineRatio": round(advances / declines, 2) if declines else None,
+        "advancePercent": round(advances / total * 100, 2) if total else None,
+        "declinePercent": round(declines / total * 100, 2) if total else None,
+    }
+
+
+def normalize_nse_indices(payload, preferred_names):
+    rows = payload.get("data") or []
+    by_name = {
+        nse_text(item.get("index")).upper(): item
+        for item in rows
+        if nse_text(item.get("index"))
+    }
+    normalized = []
+    for name in preferred_names:
+        item = by_name.get(name.upper())
+        if item:
+            normalized.append(normalize_nse_index(item))
+    return normalized
+
+
+def normalize_nse_sector_indices(payload):
+    preferred = normalize_nse_indices(payload, NSE_SECTOR_INDICES)
+    if preferred:
+        return preferred
+    sector_rows = [
+        normalize_nse_index(item)
+        for item in payload.get("data", [])
+        if nse_text(item.get("key")).upper() == "SECTORAL INDICES"
+    ]
+    return [item for item in sector_rows if item.get("name")][:12]
+
+
+def normalize_nse_index(item):
+    return {
+        "name": nse_text(item.get("index")),
+        "symbol": nse_text(item.get("indexSymbol")),
+        "group": nse_text(item.get("key")),
+        "last": nse_round(item.get("last")),
+        "change": nse_round(item.get("variation")),
+        "changePercent": nse_round(item.get("percentChange")),
+        "open": nse_round(item.get("open")),
+        "high": nse_round(item.get("high")),
+        "low": nse_round(item.get("low")),
+        "previousClose": nse_round(item.get("previousClose")),
+        "yearHigh": nse_round(item.get("yearHigh")),
+        "yearLow": nse_round(item.get("yearLow")),
+        "pe": nse_round(item.get("pe")),
+        "pb": nse_round(item.get("pb")),
+        "dividendYield": nse_round(item.get("dy")),
+        "advances": nse_int(item.get("advances")),
+        "declines": nse_int(item.get("declines")),
+        "unchanged": nse_int(item.get("unchanged")),
+        "oneMonthChange": nse_round(item.get("perChange30d")),
+        "oneYearChange": nse_round(item.get("perChange365d")),
+    }
+
+
+def normalize_nse_variation(payload, limit=8):
+    rows = nse_group_data(payload, "allSec")
+    normalized = []
+    for item in rows[:limit]:
+        symbol = nse_text(item.get("symbol"))
+        if not symbol:
+            continue
+        corporate_action = nse_text(item.get("ca_purpose"))
+        normalized.append({
+            "symbol": symbol,
+            "series": nse_text(item.get("series")),
+            "price": nse_round(item.get("ltp")),
+            "change": nse_round(item.get("net_price")),
+            "changePercent": nse_round(item.get("perChange")),
+            "open": nse_round(item.get("open_price")),
+            "high": nse_round(item.get("high_price")),
+            "low": nse_round(item.get("low_price")),
+            "previousClose": nse_round(item.get("prev_price")),
+            "volume": nse_int(item.get("trade_quantity")),
+            "turnoverLakhs": nse_round(item.get("turnover")),
+            "corporateAction": "" if corporate_action in {"-", "--"} else corporate_action,
+        })
+    return normalized
+
+
+def normalize_nse_most_active(payload, limit=8):
+    normalized = []
+    for item in (payload or {}).get("data", [])[:limit]:
+        symbol = nse_text(item.get("symbol"))
+        if not symbol:
+            continue
+        normalized.append({
+            "symbol": symbol,
+            "price": nse_round(item.get("lastPrice")),
+            "change": nse_round(item.get("change")),
+            "changePercent": nse_round(item.get("pChange")),
+            "volume": nse_int(item.get("totalTradedVolume")) or nse_int(item.get("quantityTraded")),
+            "value": nse_round(item.get("totalTradedValue")),
+            "open": nse_round(item.get("open")),
+            "high": nse_round(item.get("dayHigh")),
+            "low": nse_round(item.get("dayLow")),
+            "previousClose": nse_round(item.get("previousClose")),
+            "yearHigh": nse_round(item.get("yearHigh")),
+            "yearLow": nse_round(item.get("yearLow")),
+            "lastUpdateTime": nse_text(item.get("lastUpdateTime")),
+        })
+    return normalized
+
+
+def normalize_nse_52_week_highs(payload, limit=8):
+    rows = []
+    for bucket, label in (
+        ("dataLtpGreater20", "LTP above Rs 20"),
+        ("dataLtpLess20", "LTP below Rs 20"),
+    ):
+        for item in (payload or {}).get(bucket, []):
+            symbol = nse_text(item.get("symbol"))
+            if not symbol:
+                continue
+            rows.append({
+                "symbol": symbol,
+                "name": nse_text(item.get("comapnyName")) or nse_text(item.get("companyName")),
+                "priceBucket": label,
+                "newHigh": nse_round(item.get("new52WHL")),
+                "previousHigh": nse_round(item.get("prev52WHL")),
+                "previousHighDate": nse_text(item.get("prevHLDate")),
+                "price": nse_round(item.get("ltp")),
+                "previousClose": nse_round(item.get("prevClose")),
+                "change": nse_round(item.get("change")),
+                "changePercent": nse_round(item.get("pChange")),
+            })
+    return rows[:limit]
+
+
+def normalize_nse_price_bands(payload, limit=8):
+    group = nse_group(payload, "AllSec")
+    rows = []
+    for item in group.get("data", [])[:limit]:
+        symbol = nse_text(item.get("symbol"))
+        if not symbol:
+            continue
+        rows.append({
+            "symbol": symbol,
+            "series": nse_text(item.get("series")),
+            "price": nse_round(item.get("ltp")),
+            "change": nse_round(item.get("change")),
+            "changePercent": nse_round(item.get("pChange")),
+            "priceBand": nse_round(item.get("priceBand")),
+            "high": nse_round(item.get("highPrice")),
+            "low": nse_round(item.get("lowPrice")),
+            "yearHigh": nse_round(item.get("yearHigh")),
+            "yearLow": nse_round(item.get("yearLow")),
+            "volume": nse_int(item.get("totalTradedVol")),
+            "turnover": nse_round(item.get("turnover")),
+        })
+    return {"count": normalize_nse_price_band_count(group.get("count")), "rows": rows}
+
+
+def normalize_nse_price_band_count(counts):
+    normalized = []
+    for item in counts or []:
+        label = nse_text(item.get("key") if isinstance(item, dict) else "")
+        if label:
+            normalized.append({"label": label.title(), "value": nse_int(item.get("value"))})
+    return normalized
+
+
+def nse_group(payload, preferred_key):
+    if not isinstance(payload, dict):
+        return {}
+    for key in (preferred_key, preferred_key.lower(), preferred_key.upper(), preferred_key.capitalize()):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    preferred_lower = preferred_key.lower()
+    for key, value in payload.items():
+        if key.lower() == preferred_lower and isinstance(value, dict):
+            return value
+    return {}
+
+
+def nse_group_data(payload, preferred_key):
+    group = nse_group(payload, preferred_key)
+    if isinstance(group.get("data"), list):
+        return group["data"]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        return payload["data"]
+    return []
+
+
+def nse_first_timestamp(rows):
+    for row in rows:
+        if row.get("tradeDate"):
+            return row["tradeDate"]
+    return ""
+
+
+def nse_number(value):
+    if value in (None, "", "-", "--", "NA", "N/A"):
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    text = str(value).strip().replace(",", "")
+    if not text or text in {"-", "--"}:
+        return None
+    if text.endswith("%"):
+        text = text[:-1]
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def nse_round(value, digits=2):
+    number = nse_number(value)
+    return round(number, digits) if number is not None else None
+
+
+def nse_int(value):
+    number = nse_number(value)
+    return int(round(number)) if number is not None else None
+
+
+def nse_text(value):
+    text = str(value or "").strip()
+    return "" if text in {"-", "--", "None", "null"} else text
+
+
+def safe_moneycontrol_sector_snapshot():
+    try:
+        return get_moneycontrol_sector_snapshot()
+    except Exception as error:
+        return {
+            "available": False,
+            "source": "Moneycontrol sector analysis",
+            "url": MONEYCONTROL_SECTOR_URL,
+            "generatedAt": iso_now(),
+            "error": str(error),
+            "sectors": [],
+            "topPerforming": [],
+            "underPerforming": [],
+            "sectorIndices": [],
+        }
+
+
+def get_moneycontrol_sector_snapshot():
+    return cached(
+        "moneycontrol-sector-analysis",
+        fetch_moneycontrol_sector_snapshot,
+        15 * 60,
+    )
+
+
+def fetch_moneycontrol_sector_snapshot():
+    page = fetch_text(MONEYCONTROL_SECTOR_URL)
+    payload = extract_moneycontrol_sector_payload(page)
+    return build_moneycontrol_sector_snapshot_from_payload(payload)
+
+
+def build_moneycontrol_sector_snapshot_from_payload(payload):
+    sectors = [
+        row for row in (
+            normalize_moneycontrol_sector(item)
+            for item in payload.get("allSectors") or []
+        )
+        if row.get("sector")
+    ]
+    sector_indices = [
+        row for row in (
+            normalize_moneycontrol_sector_index(item)
+            for item in payload.get("sectorIndices") or []
+        )
+        if row.get("name")
+    ]
+    sorted_by_move = sorted(
+        sectors,
+        key=lambda row: row.get("marketCapChangePercent")
+            if is_finite(row.get("marketCapChangePercent"))
+            else -999,
+        reverse=True,
+    )
+    sorted_by_weakness = sorted(
+        sectors,
+        key=lambda row: row.get("marketCapChangePercent")
+            if is_finite(row.get("marketCapChangePercent"))
+            else 999,
+    )
+    breadth = summarize_moneycontrol_sector_breadth(sectors)
+
+    return {
+        "available": True,
+        "source": "Moneycontrol sector analysis",
+        "url": MONEYCONTROL_SECTOR_URL,
+        "generatedAt": iso_now(),
+        "sectors": sectors,
+        "topPerforming": sorted_by_move[:8],
+        "underPerforming": sorted_by_weakness[:8],
+        "sectorIndices": sector_indices[:16],
+        "breadth": breadth,
+        "note": "Sector classification, trend, market-cap move, advance/decline, PE, and earnings YoY are parsed from Moneycontrol sector analysis.",
+    }
+
+
+def extract_moneycontrol_sector_payload(page):
+    script = match_first(
+        page,
+        r"<script[^>]+id=[\"']__NEXT_DATA__[\"'][^>]*>([\s\S]*?)</script>",
+    )
+    if not script:
+        raise RuntimeError("Moneycontrol sector payload was not found.")
+    try:
+        data = json.loads(html.unescape(script))
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Moneycontrol sector payload could not be parsed.") from error
+    return {
+        "allSectors": find_nested_key(data, "allSectors") or [],
+        "sectorIndices": find_nested_key(data, "sectorIndices") or [],
+    }
+
+
+def find_nested_key(value, target_key):
+    if isinstance(value, dict):
+        if target_key in value:
+            return value[target_key]
+        for child in value.values():
+            found = find_nested_key(child, target_key)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = find_nested_key(child, target_key)
+            if found is not None:
+                return found
+    return None
+
+
+def normalize_moneycontrol_sector(item):
+    advance = nse_int(item.get("advance")) or 0
+    decline = nse_int(item.get("decline")) or 0
+    total = advance + decline
+    sector = nse_text(item.get("sector"))
+    trend = nse_text(item.get("trend"))
+    market_cap_change_percent = nse_round(item.get("mCapPerChange"))
+    earnings_yoy_change = nse_round(item.get("sectorNpYoyChange"))
+    row = {
+        "sector": sector,
+        "trend": trend,
+        "slug": nse_text(item.get("slug")),
+        "stocks": nse_int(item.get("stockCnt")),
+        "industries": nse_int(item.get("industryCnt")),
+        "advance": advance,
+        "decline": decline,
+        "advanceDeclineRatio": round(advance / decline, 2) if decline else None,
+        "advancePercent": round(advance / total * 100, 2) if total else None,
+        "marketCapCrore": nse_round(item.get("currentMcap")),
+        "marketCapChangeCrore": nse_round(item.get("mCapChange")),
+        "marketCapChangePercent": market_cap_change_percent,
+        "sectorPe": nse_round(item.get("sectorPe")),
+        "earningsYoyCrore": nse_round(item.get("sectorNpYoy")),
+        "earningsYoyChange": earnings_yoy_change,
+        "url": f"{MONEYCONTROL_SECTOR_URL}{nse_text(item.get('slug'))}/" if nse_text(item.get("slug")) else MONEYCONTROL_SECTOR_URL,
+    }
+    row["score"] = score_moneycontrol_sector(row)
+    row["summary"] = summarize_moneycontrol_sector(row)
+    return row
+
+
+def normalize_moneycontrol_sector_index(item):
+    return {
+        "name": nse_text(item.get("indexName")),
+        "price": nse_round(item.get("ltp")),
+        "change": nse_round(item.get("change")),
+        "changePercent": nse_round(item.get("changePer")),
+        "advance": nse_int(item.get("advance")),
+        "decline": nse_int(item.get("decline")),
+        "lastUpdated": moneycontrol_timestamp(item.get("lastUpdated")),
+    }
+
+
+def summarize_moneycontrol_sector_breadth(sectors):
+    advance = sum(row.get("advance") or 0 for row in sectors)
+    decline = sum(row.get("decline") or 0 for row in sectors)
+    stocks = sum(row.get("stocks") or 0 for row in sectors)
+    bullish = len([row for row in sectors if "BULLISH" in row.get("trend", "").upper()])
+    bearish = len([row for row in sectors if "BEARISH" in row.get("trend", "").upper()])
+    total = advance + decline
+    return {
+        "advance": advance,
+        "decline": decline,
+        "stocks": stocks,
+        "bullishSectors": bullish,
+        "bearishSectors": bearish,
+        "advanceDeclineRatio": round(advance / decline, 2) if decline else None,
+        "advancePercent": round(advance / total * 100, 2) if total else None,
+    }
+
+
+def score_moneycontrol_sector(row):
+    trend_score = {
+        "VERY BULLISH": 80,
+        "BULLISH": 65,
+        "NEUTRAL": 50,
+        "BEARISH": 35,
+        "VERY BEARISH": 20,
+    }.get(row.get("trend", "").upper(), 45)
+    market_move = row.get("marketCapChangePercent")
+    earnings = row.get("earningsYoyChange")
+    advance_percent = row.get("advancePercent")
+    score = trend_score
+    if is_finite(market_move):
+        score += clamp(market_move, -4, 4) * 4
+    if is_finite(earnings):
+        score += clamp(earnings / 10, -5, 5) * 2
+    if is_finite(advance_percent):
+        score += (advance_percent - 50) * 0.18
+    return round(clamp(score, 0, 100))
+
+
+def summarize_moneycontrol_sector(row):
+    parts = []
+    if row.get("trend"):
+        parts.append(f"{row['trend']} trend")
+    if is_finite(row.get("marketCapChangePercent")):
+        direction = "up" if row["marketCapChangePercent"] >= 0 else "down"
+        parts.append(f"market cap {direction} {abs(row['marketCapChangePercent']):.2f}%")
+    if row.get("advance") is not None and row.get("decline") is not None:
+        parts.append(f"A/D {row['advance']}/{row['decline']}")
+    if is_finite(row.get("earningsYoyChange")):
+        parts.append(f"earnings YoY {row['earningsYoyChange']:.2f}%")
+    return ", ".join(parts) + "." if parts else "Sector data available from Moneycontrol."
+
+
+def moneycontrol_timestamp(value):
+    text = nse_text(value)
+    if re.fullmatch(r"\d{14}", text):
+        return f"{text[6:8]}-{text[4:6]}-{text[:4]} {text[8:10]}:{text[10:12]} IST"
+    return text
+
+
+def stock_sector_analysis(fundamentals):
+    snapshot = safe_moneycontrol_sector_snapshot()
+    if not snapshot.get("available"):
+        return {
+            "available": False,
+            "source": snapshot.get("source") or "Moneycontrol sector analysis",
+            "url": MONEYCONTROL_SECTOR_URL,
+            "error": snapshot.get("error") or "Moneycontrol sector data unavailable.",
+        }
+    match = match_moneycontrol_sector(fundamentals, snapshot.get("sectors") or [])
+    if not match:
+        return {
+            "available": False,
+            "source": snapshot.get("source"),
+            "url": snapshot.get("url") or MONEYCONTROL_SECTOR_URL,
+            "error": "No Moneycontrol sector match was found for this stock sector.",
+        }
+    return {
+        "available": True,
+        "source": snapshot.get("source"),
+        "url": match.get("url") or snapshot.get("url") or MONEYCONTROL_SECTOR_URL,
+        "stockSector": fundamentals.get("sector") or "",
+        "stockIndustry": fundamentals.get("industry") or "",
+        "matchedSector": match,
+        "breadth": snapshot.get("breadth") or {},
+        "rank": sector_rank(match, snapshot.get("sectors") or []),
+        "summary": f"Matched {match['sector']} from Moneycontrol: {match.get('summary')}",
+    }
+
+
+def match_moneycontrol_sector(fundamentals, sectors):
+    candidates = [
+        fundamentals.get("sector") or "",
+        fundamentals.get("industry") or "",
+    ]
+    aliases = [
+        SECTOR_ALIASES.get(candidate)
+        for candidate in candidates
+        if SECTOR_ALIASES.get(candidate)
+    ]
+    keys = [sector_match_key(value) for value in [*aliases, *candidates] if value]
+    for row in sectors:
+        sector_key = sector_match_key(row.get("sector"))
+        if sector_key in keys:
+            return row
+    for key in keys:
+        for row in sectors:
+            sector_key = sector_match_key(row.get("sector"))
+            if key and (key in sector_key or sector_key in key):
+                return row
+    return None
+
+
+def sector_match_key(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def sector_rank(match, sectors):
+    ranked = sorted(
+        sectors,
+        key=lambda row: row.get("score") if is_finite(row.get("score")) else -1,
+        reverse=True,
+    )
+    for index, row in enumerate(ranked, start=1):
+        if row.get("sector") == match.get("sector"):
+            return index
+    return None
+
+
 def build_market_monitor():
+    nse_snapshot = safe_nse_market_snapshot()
+    moneycontrol_sectors = safe_moneycontrol_sector_snapshot()
     breakout_universe = market_activity_universe()
     commodity_results = settle_map(COMMODITIES, get_commodity_snapshot, concurrency=3)
     scan_results = settle_map(breakout_universe, scan_watchlist_stock, concurrency=4)
@@ -378,8 +1092,10 @@ def build_market_monitor():
 
     return {
         "generatedAt": iso_now(),
-        "source": "Yahoo Finance public endpoints and headline scan",
-        "note": "52-week and 2-year scan highs use the recent daily history returned by the provider. NR4/NR7 breakout means price is breaking above a tight prior 4-day or 7-day range near the 52-week high. Confirm liquidity, headlines, and levels on your broker or exchange feed before acting.",
+        "source": "NSE India public market APIs, Moneycontrol sector analysis, Yahoo Finance public endpoints, and headline scan",
+        "note": "NSE snapshot uses public NSE website endpoints; sector analysis uses Moneycontrol's sector-analysis page. 52-week and 2-year scan highs use the recent daily history returned by the provider. NR4/NR7 breakout means price is breaking above a tight prior 4-day or 7-day range near the 52-week high. Confirm liquidity, headlines, and levels on your broker or exchange feed before acting.",
+        "nseSnapshot": nse_snapshot,
+        "moneycontrolSectorAnalysis": moneycontrol_sectors,
         "commodities": commodity_snapshots,
         "breakoutCandidates": candidates,
         "highVolumeCandidates": high_volume_candidates,
@@ -911,13 +1627,74 @@ def search_symbols(query):
                     "type": item.get("quoteType") or "",
                 }
                 for item in payload.get("quotes", [])
-                if item.get("symbol") and item.get("quoteType") != "CRYPTOCURRENCY"
+                if item.get("symbol") and normalized_quote_type(item.get("quoteType")) == "EQUITY"
             ]
         except Exception:
             yahoo_results = []
         return sort_search_results(merge_search_results(local_results + yahoo_results), normalized_query)[:24]
 
     return cached(f"search:{normalized_query.lower()}", loader, CACHE_TTL_SECONDS)
+
+
+def instrument_suggestions(query):
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return {"stocks": [], "etfs": [], "mutualFunds": []}
+
+    return {
+        "stocks": annotate_suggestions(safe_search_symbols(normalized_query), "stock", "Stock")[:8],
+        "etfs": annotate_suggestions(safe_search_assets(normalized_query, "etf"), "etf", "ETF")[:6],
+        "mutualFunds": annotate_suggestions(safe_search_assets(normalized_query, "mutual-fund"), "mutual-fund", "Mutual Fund")[:6],
+    }
+
+
+def invalid_instrument_payload(query):
+    return {
+        "error": INVALID_INSTRUMENT_MESSAGE,
+        "invalidInput": str(query or "").strip(),
+        "suggestions": instrument_suggestions(query),
+    }
+
+
+def is_invalid_instrument_error(message):
+    text = str(message or "").lower()
+    return any(pattern in text for pattern in [
+        "data provider returned 404",
+        "no data found",
+        "symbol may be delisted",
+        "chart data was not available",
+    ])
+
+
+def safe_search_symbols(query):
+    try:
+        return search_symbols(query)
+    except Exception:
+        return sort_search_results(local_search_symbols(query), query)[:24]
+
+
+def safe_search_assets(query, asset_type):
+    try:
+        return search_assets(query, asset_type)
+    except Exception:
+        return sort_asset_search_results(local_asset_search_symbols(query, asset_type), query, asset_type)[:24]
+
+
+def annotate_suggestions(results, kind, label):
+    annotated = []
+    for item in results:
+        symbol = item.get("symbol")
+        if not symbol:
+            continue
+        annotated.append({
+            "symbol": symbol,
+            "name": item.get("name") or symbol,
+            "exchange": item.get("exchange") or exchange_label(symbol),
+            "type": item.get("type") or label,
+            "kind": kind,
+            "label": label,
+        })
+    return annotated
 
 
 def resolve_asset_input(value, asset_type):
@@ -972,7 +1749,12 @@ def local_asset_search_symbols(query, asset_type):
     for symbol, name, exchange, tags in ASSET_TYPE_CONFIG[asset_type]["universe"]:
         searchable = " ".join([symbol, name, exchange, *tags]).lower()
         compact_searchable = re.sub(r"[^a-z0-9]", "", searchable)
-        if lower_query not in searchable and compact_query not in compact_searchable:
+        fuzzy_score = fuzzy_candidate_score(compact_query, [symbol, name, exchange, *tags])
+        if (
+            lower_query not in searchable
+            and compact_query not in compact_searchable
+            and fuzzy_score < 62
+        ):
             continue
         results.append({
             "symbol": symbol,
@@ -1036,7 +1818,12 @@ def local_search_symbols(query):
         name = stock["name"]
         searchable = " ".join([symbol, base_symbol, name, *stock.get("tags", [])]).lower()
         compact_searchable = re.sub(r"[^a-z0-9]", "", searchable)
-        if lower_query not in searchable and compact_query not in compact_searchable:
+        fuzzy_score = fuzzy_candidate_score(compact_query, [symbol, base_symbol, name, *stock.get("tags", [])])
+        if (
+            lower_query not in searchable
+            and compact_query not in compact_searchable
+            and fuzzy_score < 62
+        ):
             continue
 
         results.append({
@@ -1127,7 +1914,39 @@ def search_score(item, lower_query):
         score += 16
     if compact_query and compact_query in compact_name:
         score += 10
+    fuzzy_score = fuzzy_candidate_score(compact_query, [symbol, name])
+    if fuzzy_score >= 82:
+        score += 26
+    elif fuzzy_score >= 70:
+        score += 18
+    elif fuzzy_score >= 62:
+        score += 10
     return score
+
+
+def fuzzy_candidate_score(compact_query, values):
+    if not compact_query or len(compact_query) < 2:
+        return 0
+
+    best = 0
+    for value in values:
+        compact_value = re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+        if not compact_value:
+            continue
+        if compact_value.startswith(compact_query):
+            best = max(best, 96)
+            continue
+        if compact_query in compact_value:
+            best = max(best, 88)
+            continue
+        prefix_length = min(len(compact_value), max(len(compact_query) + 4, 5))
+        prefix_value = compact_value[:prefix_length]
+        best = max(
+            best,
+            int(SequenceMatcher(None, compact_query, prefix_value).ratio() * 100),
+            int(SequenceMatcher(None, compact_query, compact_value).ratio() * 100),
+        )
+    return best
 
 
 def get_chart(symbol):
@@ -1325,7 +2144,8 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
     support_resistance = find_levels(candles, current, last(atr14))
     fundamentals = extract_fundamentals(summary, quote_data, meta, sec, screener, current)
     events = extract_events(summary, screener)
-    growth_drivers = build_growth_drivers(symbol, long_name, fundamentals, screener)
+    sector_analysis = stock_sector_analysis(fundamentals)
+    growth_drivers = build_growth_drivers(symbol, long_name, fundamentals, screener, sector_analysis)
     relative_strength = build_relative_strength(candles, benchmark)
     technical = score_technical({
         "current": current,
@@ -2391,10 +3211,11 @@ def extract_events(summary, screener):
     return sorted(items, key=lambda item: item.get("date") or "9999-12-31")
 
 
-def build_growth_drivers(symbol, long_name, fundamentals, screener):
+def build_growth_drivers(symbol, long_name, fundamentals, screener, sector_analysis=None):
     ownership = build_ownership_trend(screener.get("shareholding"), fundamentals)
     catalysts = safe_growth_catalyst_headlines(symbol, long_name)
     budget_impacts = build_budget_impacts(symbol, long_name, fundamentals)
+    sector_analysis = sector_analysis or stock_sector_analysis(fundamentals)
     data_notes = []
 
     if not ownership["rows"]:
@@ -2406,10 +3227,11 @@ def build_growth_drivers(symbol, long_name, fundamentals, screener):
 
     return {
         "lookback": "Last 3-4 quarters / about 12 months where source data is available",
-        "summary": summarize_growth_drivers(ownership, catalysts, budget_impacts),
+        "summary": summarize_growth_drivers(ownership, catalysts, budget_impacts, sector_analysis),
         "ownership": ownership,
         "catalysts": catalysts,
         "budgetImpacts": budget_impacts,
+        "sectorAnalysis": sector_analysis,
         "dataNotes": data_notes,
     }
 
@@ -2736,7 +3558,7 @@ def watchlist_tags(symbol):
     return list(dict.fromkeys(tags))
 
 
-def summarize_growth_drivers(ownership, catalysts, budget_impacts):
+def summarize_growth_drivers(ownership, catalysts, budget_impacts, sector_analysis=None):
     positive_holding = [
         row["name"]
         for row in ownership.get("rows", [])
@@ -2756,6 +3578,9 @@ def summarize_growth_drivers(ownership, catalysts, budget_impacts):
         parts.append(f"{len(catalysts)} recent order/policy catalyst headline(s) matched the scan.")
     if budget_impacts:
         parts.append(f"{len(budget_impacts)} budget/sector theme(s) may affect growth visibility.")
+    if sector_analysis and sector_analysis.get("available"):
+        matched = sector_analysis.get("matchedSector") or {}
+        parts.append(f"Moneycontrol sector context: {matched.get('sector')} is {matched.get('trend', 'tracked')} with score {matched.get('score', 'n/a')}/100.")
     return " ".join(parts) or "Limited ownership or catalyst data was available; use manual filings and exchange announcements for confirmation."
 
 
@@ -3974,6 +4799,28 @@ def fetch_json(endpoint, sec=False):
         return json.loads(text)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"Data provider did not return JSON: {text[:80]}") from error
+
+
+def fetch_nse_json(path):
+    endpoint = path if str(path).startswith("http") else f"{NSE_BASE_URL}{path}"
+    request = Request(endpoint, headers=NSE_HEADERS)
+    last_error = None
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=20, context=SSL_CONTEXT) as response:
+                text = response.read().decode("utf-8", errors="replace")
+            return json.loads(text)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"NSE India did not return JSON: {text[:80]}") from error
+        except HTTPError as error:
+            if error.code not in {429, 500, 502, 503, 504}:
+                raise RuntimeError(f"NSE India returned {error.code}.") from error
+            last_error = error
+        except (TimeoutError, URLError, OSError) as error:
+            last_error = error
+        if attempt < 2:
+            time.sleep(0.4 * (attempt + 1))
+    raise RuntimeError("NSE India is temporarily unavailable. Please retry in a moment.") from last_error
 
 
 def fetch_text(endpoint, json_request=False, sec=False):

@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260510-assets-1">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260511-search-popup-collapse-1">
   </head>
   <body>
     <main class="app-shell">
@@ -446,7 +446,7 @@
           <section class="monitor-header">
             <div>
               <p class="eyebrow">Market Monitor</p>
-              <h2>Commodities, breakouts, and catalyst watchlists</h2>
+              <h2>NSE snapshot, sector analysis, breakouts, and catalyst watchlists</h2>
               <p class="muted" id="monitorGenerated">Not loaded yet.</p>
             </div>
             <button type="button" id="refreshMonitor">Refresh Monitor</button>
@@ -467,6 +467,151 @@
               </div>
               <div id="commodityGrid" class="monitor-grid"></div>
             </article>
+
+            <article class="analysis-panel nse-snapshot-panel panel-accent-blue">
+              <div class="section-head">
+                <h3>NSE Market Snapshot</h3>
+                <span id="nseSnapshotStatus" class="pill">NSE</span>
+              </div>
+              <div id="nseStatusGrid" class="monitor-grid nse-status-grid"></div>
+              <div id="nseBreadthGrid" class="monitor-grid nse-breadth-grid"></div>
+              <div id="nseIndexGrid" class="nse-index-grid"></div>
+            </article>
+
+            <section class="market-signal-grid nse-data-grid">
+              <article class="analysis-panel panel-accent-violet">
+                <div class="section-head">
+                  <h3>Moneycontrol Sector Analysis</h3>
+                  <span id="moneycontrolSectorStatus" class="pill">Sector scan</span>
+                </div>
+                <div id="moneycontrolSectorSummary" class="sector-summary-grid"></div>
+                <div class="table-wrap">
+                  <table class="monitor-table sector-table">
+                    <thead>
+                      <tr>
+                        <th>Signal</th>
+                        <th>Sector</th>
+                        <th>Trend</th>
+                        <th>Mcap Chg</th>
+                        <th>A/D</th>
+                        <th>PE</th>
+                        <th>Earnings YoY</th>
+                        <th>Score</th>
+                      </tr>
+                    </thead>
+                    <tbody id="moneycontrolSectorRows"></tbody>
+                  </table>
+                </div>
+              </article>
+
+              <article class="analysis-panel panel-accent-cyan">
+                <div class="section-head">
+                  <h3>Sectoral Indices</h3>
+                  <span id="moneycontrolIndexStatus" class="pill">Moneycontrol</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="monitor-table sector-index-table">
+                    <thead>
+                      <tr>
+                        <th>Index</th>
+                        <th>Price</th>
+                        <th>Change</th>
+                        <th>A/D</th>
+                      </tr>
+                    </thead>
+                    <tbody id="moneycontrolIndexRows"></tbody>
+                  </table>
+                </div>
+              </article>
+            </section>
+
+            <section class="market-signal-grid nse-data-grid">
+              <article class="analysis-panel panel-accent-emerald">
+                <div class="section-head">
+                  <h3>NSE Top Gainers</h3>
+                  <span id="nseGainerCount" class="pill">Live</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="monitor-table nse-mover-table">
+                    <thead>
+                      <tr>
+                        <th>Stock</th>
+                        <th>Price</th>
+                        <th>Move</th>
+                        <th>Volume</th>
+                        <th>Day Range</th>
+                      </tr>
+                    </thead>
+                    <tbody id="nseGainerRows"></tbody>
+                  </table>
+                </div>
+              </article>
+
+              <article class="analysis-panel panel-accent-rose">
+                <div class="section-head">
+                  <h3>NSE Top Losers</h3>
+                  <span id="nseLoserCount" class="pill">Live</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="monitor-table nse-mover-table">
+                    <thead>
+                      <tr>
+                        <th>Stock</th>
+                        <th>Price</th>
+                        <th>Move</th>
+                        <th>Volume</th>
+                        <th>Day Range</th>
+                      </tr>
+                    </thead>
+                    <tbody id="nseLoserRows"></tbody>
+                  </table>
+                </div>
+              </article>
+            </section>
+
+            <section class="market-signal-grid nse-data-grid">
+              <article class="analysis-panel panel-accent-slate">
+                <div class="section-head">
+                  <h3>NSE Most Active</h3>
+                  <span id="nseActiveCount" class="pill">By volume</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="monitor-table nse-active-table">
+                    <thead>
+                      <tr>
+                        <th>Stock</th>
+                        <th>Price</th>
+                        <th>Volume</th>
+                        <th>Value</th>
+                        <th>52W Range</th>
+                      </tr>
+                    </thead>
+                    <tbody id="nseActiveRows"></tbody>
+                  </table>
+                </div>
+              </article>
+
+              <article class="analysis-panel panel-accent-amber">
+                <div class="section-head">
+                  <h3>52W Highs / Price Bands</h3>
+                  <span id="nsePriceBandCount" class="pill">NSE</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="monitor-table nse-high-table">
+                    <thead>
+                      <tr>
+                        <th>Stock</th>
+                        <th>Price</th>
+                        <th>52W High</th>
+                        <th>Move</th>
+                        <th>Price Band</th>
+                      </tr>
+                    </thead>
+                    <tbody id="nseHighRows"></tbody>
+                  </table>
+                </div>
+              </article>
+            </section>
 
             <section class="wide-grid">
               <article class="analysis-panel panel-accent-blue">
@@ -661,6 +806,6 @@
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260510-assets-1"></script>
+    <script src="{% static 'app.js' %}?v=20260511-search-popup-collapse-1"></script>
   </body>
 </html>

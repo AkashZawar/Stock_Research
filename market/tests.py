@@ -182,6 +182,109 @@ class RelativeStrengthTests(SimpleTestCase):
         self.assertEqual(len(result["rows"]), 4)
 
 
+class MarketSnapshotTests(SimpleTestCase):
+    def test_build_nse_market_snapshot_from_payloads_normalizes_exchange_data(self):
+        payloads = {
+            "marketStatus": {
+                "marketState": [
+                    {
+                        "market": "Capital Market",
+                        "marketStatus": "Open",
+                        "tradeDate": "11-May-2026 10:25",
+                        "index": "NIFTY 50",
+                        "last": 23869.45,
+                        "variation": -306.7,
+                        "percentChange": -1.27,
+                    }
+                ],
+                "marketcap": {"timeStamp": "08-May-2026", "marketCapinLACCRRupees": 473.63},
+                "giftnifty": {"LASTPRICE": 23845.5, "DAYCHANGE": -414, "PERCHANGE": -1.71},
+            },
+            "allIndices": {
+                "timestamp": "11-May-2026 10:24",
+                "advances": 200,
+                "declines": 100,
+                "unchanged": 10,
+                "data": [
+                    {
+                        "key": "BROAD MARKET INDICES",
+                        "index": "NIFTY 50",
+                        "last": "23,869.45",
+                        "variation": "-306.70",
+                        "percentChange": "-1.27",
+                        "advances": 10,
+                        "declines": 40,
+                        "pe": "22.5",
+                    },
+                    {
+                        "key": "SECTORAL INDICES",
+                        "index": "NIFTY IT",
+                        "last": "29,318.00",
+                        "variation": "-76.20",
+                        "percentChange": "-0.26",
+                    },
+                ],
+            },
+            "gainers": {"allSec": {"data": [{"symbol": "TEST", "ltp": 100, "net_price": 5, "perChange": 5, "trade_quantity": 1000}]}},
+            "losers": {"allSec": {"data": [{"symbol": "FAIL", "ltp": 50, "net_price": -2, "perChange": -4, "trade_quantity": 900}]}},
+            "mostActive": {"data": [{"symbol": "ACTIVE", "lastPrice": 99, "pChange": 1.2, "totalTradedVolume": 5000}]},
+            "weekHighs": {"dataLtpGreater20": [{"symbol": "HIGH", "new52WHL": 120, "ltp": 119, "pChange": 2.1}]},
+            "priceBands": {"AllSec": {"count": [{"key": "TOTAL", "value": 3}], "data": [{"symbol": "BAND", "ltp": 10, "priceBand": 5}]}},
+        }
+
+        snapshot = services.build_nse_market_snapshot_from_payloads(payloads)
+
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(snapshot["breadth"]["advanceDeclineRatio"], 2.0)
+        self.assertEqual(snapshot["indices"][0]["name"], "NIFTY 50")
+        self.assertEqual(snapshot["sectorIndices"][0]["name"], "NIFTY IT")
+        self.assertEqual(snapshot["topGainers"][0]["symbol"], "TEST")
+        self.assertEqual(snapshot["priceBands"]["count"][0]["label"], "Total")
+
+    def test_moneycontrol_sector_snapshot_maps_stock_sector(self):
+        payload = {
+            "allSectors": [
+                {
+                    "sector": "Software & IT Services",
+                    "trend": "Neutral",
+                    "stockCnt": 261,
+                    "industryCnt": 6,
+                    "advance": 75,
+                    "decline": 168,
+                    "currentMcap": "3,396,480",
+                    "mCapPerChange": -0.47,
+                    "mCapChange": "-16,122",
+                    "sectorPe": "34.87",
+                    "sectorNpYoy": "37,403",
+                    "sectorNpYoyChange": 16.06,
+                    "slug": "software-it-services",
+                },
+                {
+                    "sector": "Capital Goods",
+                    "trend": "Bullish",
+                    "stockCnt": 300,
+                    "industryCnt": 9,
+                    "advance": 85,
+                    "decline": 204,
+                    "currentMcap": "2,148,058",
+                    "mCapPerChange": -2.03,
+                    "sectorPe": "127.03",
+                    "sectorNpYoyChange": 42.31,
+                    "slug": "capital-goods",
+                },
+            ],
+            "sectorIndices": [{"indexName": "NIFTY IT", "ltp": "29,318.00", "changePer": "-0.26", "advance": 3, "decline": 7}],
+        }
+
+        snapshot = services.build_moneycontrol_sector_snapshot_from_payload(payload)
+        match = services.match_moneycontrol_sector({"sector": "Technology", "industry": "Software"}, snapshot["sectors"])
+
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(snapshot["breadth"]["stocks"], 561)
+        self.assertEqual(match["sector"], "Software & IT Services")
+        self.assertEqual(snapshot["sectorIndices"][0]["name"], "NIFTY IT")
+
+
 class AssetAnalysisTests(SimpleTestCase):
     def test_local_asset_search_prefers_matching_etfs(self):
         results = services.local_asset_search_symbols("nifty", "etf")
@@ -234,6 +337,12 @@ class SearchSuggestionTests(SimpleTestCase):
         self.assertIn("RELIANCE.NS", symbols)
         self.assertIn("RELIANCE.BO", symbols)
 
+    def test_local_suggestions_include_fuzzy_stock_matches(self):
+        results = services.local_search_symbols("relaince")
+        symbols = [item["symbol"] for item in results]
+
+        self.assertIn("RELIANCE.NS", symbols)
+
     def test_sort_search_results_prefers_nse_then_bse_then_other_exchanges(self):
         results = services.sort_search_results([
             {"symbol": "RELIANCE", "name": "Reliance", "exchange": "NYQ", "type": "EQUITY"},
@@ -266,9 +375,11 @@ class StockSearchLogTests(TestCase):
         self.assertEqual(log.device_type, "mobile")
         self.assertTrue(log.success)
 
+    @patch("market.views.services.instrument_suggestions")
     @patch("market.views.services.resolve_symbol_input")
-    def test_analyze_records_failed_search(self, resolve_symbol):
+    def test_analyze_records_failed_search(self, resolve_symbol, instrument_suggestions):
         resolve_symbol.return_value = ""
+        instrument_suggestions.return_value = {"stocks": [], "etfs": [], "mutualFunds": []}
 
         response = self.client.get(
             "/api/analyze",
@@ -278,12 +389,32 @@ class StockSearchLogTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], services.INVALID_INSTRUMENT_MESSAGE)
         log = StockSearchLog.objects.get()
         self.assertEqual(log.raw_input, "??")
         self.assertEqual(log.ip_address, "198.51.100.7")
         self.assertEqual(log.device_label, "Windows desktop")
         self.assertFalse(log.success)
         self.assertEqual(log.status_code, 400)
+
+    @patch("market.views.services.instrument_suggestions")
+    @patch("market.views.services.analyze_symbol")
+    @patch("market.views.services.resolve_symbol_input")
+    def test_analyze_404_returns_invalid_name_suggestions(self, resolve_symbol, analyze_symbol, instrument_suggestions):
+        resolve_symbol.return_value = "RELANCE.NS"
+        analyze_symbol.side_effect = RuntimeError("Data provider returned 404.")
+        instrument_suggestions.return_value = {
+            "stocks": [{"symbol": "RELIANCE.NS", "name": "Reliance Industries", "kind": "stock"}],
+            "etfs": [],
+            "mutualFunds": [],
+        }
+
+        response = self.client.get("/api/analyze", {"symbol": "relance"})
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["error"], services.INVALID_INSTRUMENT_MESSAGE)
+        self.assertEqual(payload["suggestions"]["stocks"][0]["symbol"], "RELIANCE.NS")
 
     def test_search_logs_endpoint_returns_recent_logs(self):
         StockSearchLog.objects.create(
