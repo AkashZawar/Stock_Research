@@ -1,4 +1,6 @@
+from datetime import datetime
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.test import SimpleTestCase
 from django.test import TestCase
@@ -180,6 +182,66 @@ class RelativeStrengthTests(SimpleTestCase):
         self.assertEqual(result["benchmarkName"], "Nifty 50")
         self.assertGreater(result["averageSpread"], 0)
         self.assertEqual(len(result["rows"]), 4)
+
+
+class CandlestickPatternTests(SimpleTestCase):
+    def test_latest_candle_detects_bullish_marubozu(self):
+        result = services.analyze_latest_candle([
+            {"date": "2026-05-08", "open": 96.0, "high": 100.0, "low": 94.0, "close": 95.0},
+            {"date": "2026-05-11", "open": 100.0, "high": 112.0, "low": 99.8, "close": 111.6},
+        ])
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["pattern"], "Bullish Marubozu")
+        self.assertIn("continue upward", result["nextCandleExpectation"])
+        self.assertEqual(result["confirmationLevel"], 112.0)
+
+    def test_latest_candle_detects_shooting_star(self):
+        result = services.analyze_latest_candle([
+            {"date": "2026-05-08", "open": 100.0, "high": 104.0, "low": 99.0, "close": 103.0},
+            {"date": "2026-05-11", "open": 104.0, "high": 116.0, "low": 102.8, "close": 103.2},
+        ])
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["pattern"], "Shooting Star")
+        self.assertIn("close below", result["nextCandleExpectation"])
+        self.assertEqual(result["invalidationLevel"], 116.0)
+
+
+class MarketClockTests(SimpleTestCase):
+    def test_market_clock_marks_indian_regular_session_open(self):
+        now = datetime(2026, 5, 12, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+        clock = services.build_market_clock(
+            "RELIANCE.NS",
+            {"marketState": "REGULAR", "exchange": "NSI"},
+            {},
+            now=now,
+            market_status={},
+        )
+
+        self.assertEqual(clock["market"], "india")
+        self.assertTrue(clock["isOpen"])
+        self.assertEqual(clock["status"], "open")
+        self.assertEqual(clock["timezone"], "Asia/Kolkata")
+        self.assertTrue(clock["sessionCloseAt"].startswith("2026-05-12T10:00:00"))
+
+    def test_market_clock_marks_nse_holiday(self):
+        now = datetime(2026, 5, 28, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+        clock = services.build_market_clock(
+            "RELIANCE.NS",
+            {"exchange": "NSI"},
+            {},
+            now=now,
+            market_status={},
+        )
+
+        self.assertFalse(clock["isOpen"])
+        self.assertTrue(clock["isHoliday"])
+        self.assertEqual(clock["status"], "holiday")
+        self.assertIn("Bakri Id", clock["holidayName"])
+        self.assertTrue(clock["nextOpenAt"].startswith("2026-05-29T03:45:00"))
 
 
 class MarketSnapshotTests(SimpleTestCase):

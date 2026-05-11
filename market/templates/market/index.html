@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260511-search-popup-collapse-1">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260512-market-clock-1">
   </head>
   <body>
     <main class="app-shell">
@@ -86,6 +86,14 @@
                 <h2 id="stockName"></h2>
                 <p class="muted" id="generatedText"></p>
               </div>
+              <div id="marketClock" class="market-clock is-closed" aria-live="polite">
+                <span class="market-clock-icon" aria-hidden="true"></span>
+                <div>
+                  <span id="marketClockTime">--:--</span>
+                  <strong id="marketClockStatus">Market status</strong>
+                  <small id="marketClockDetail">Search a stock to load exchange session time.</small>
+                </div>
+              </div>
               <div class="price-block">
                 <span id="currentPrice"></span>
                 <strong id="priceChange"></strong>
@@ -134,6 +142,7 @@
                 <div class="section-head">
                   <h3>Chart</h3>
                   <div class="chart-tools">
+                    <button type="button" id="expandChart" class="chart-action">Enlarge</button>
                     <div class="level-toggles" aria-label="Chart level filters">
                       <label class="level-toggle">
                         <input id="chartSupportToggle" type="checkbox" checked>
@@ -155,6 +164,7 @@
                   </div>
                 </div>
                 <canvas id="priceChart" aria-label="One-year candlestick price chart" role="button" tabindex="0" title="Open this chart on TradingView"></canvas>
+                <section id="latestCandleReadout" class="candle-readout"></section>
               </article>
 
               <article class="levels-panel panel-accent-amber">
@@ -806,6 +816,6 @@
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260511-search-popup-collapse-1"></script>
+    <script src="{% static 'app.js' %}?v=20260512-market-clock-1"></script>
   </body>
 </html>

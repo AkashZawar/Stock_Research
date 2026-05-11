@@ -6,11 +6,12 @@ import re
 import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from difflib import SequenceMatcher
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import certifi
 
@@ -110,6 +111,80 @@ SECTOR_ALIASES = {
     "Consumer Cyclical": "Automobile & Ancillaries",
     "Auto": "Automobile & Ancillaries",
     "Automobile": "Automobile & Ancillaries",
+}
+
+INDIA_TRADING_HOLIDAYS_2026 = {
+    date(2026, 1, 26): "Republic Day",
+    date(2026, 3, 3): "Holi",
+    date(2026, 3, 26): "Shri Ram Navami",
+    date(2026, 3, 31): "Shri Mahavir Jayanti",
+    date(2026, 4, 3): "Good Friday",
+    date(2026, 4, 14): "Dr. Baba Saheb Ambedkar Jayanti",
+    date(2026, 5, 1): "Maharashtra Day",
+    date(2026, 5, 28): "Bakri Id",
+    date(2026, 6, 26): "Muharram",
+    date(2026, 9, 14): "Ganesh Chaturthi",
+    date(2026, 10, 2): "Mahatma Gandhi Jayanti",
+    date(2026, 10, 20): "Dussehra",
+    date(2026, 11, 8): "Diwali Laxmi Pujan",
+    date(2026, 11, 10): "Diwali-Balipratipada",
+    date(2026, 11, 24): "Prakash Gurpurb Sri Guru Nanak Dev",
+    date(2026, 12, 25): "Christmas",
+}
+
+US_TRADING_HOLIDAYS_2026 = {
+    date(2026, 1, 1): "New Year's Day",
+    date(2026, 1, 19): "Martin Luther King Jr. Day",
+    date(2026, 2, 16): "Washington's Birthday",
+    date(2026, 4, 3): "Good Friday",
+    date(2026, 5, 25): "Memorial Day",
+    date(2026, 6, 19): "Juneteenth National Independence Day",
+    date(2026, 7, 3): "Independence Day observed",
+    date(2026, 9, 7): "Labor Day",
+    date(2026, 11, 26): "Thanksgiving Day",
+    date(2026, 12, 25): "Christmas Day",
+}
+
+MARKET_CLOCK_CONFIGS = {
+    "india": {
+        "market": "india",
+        "label": "NSE/BSE India",
+        "timezone": "Asia/Kolkata",
+        "timezoneLabel": "IST",
+        "regularOpen": datetime_time(9, 15),
+        "regularClose": datetime_time(15, 30),
+        "weekdays": {0, 1, 2, 3, 4},
+        "holidays": INDIA_TRADING_HOLIDAYS_2026,
+        "earlyCloses": {},
+        "source": "NSE India cash-market calendar and live market status",
+    },
+    "us": {
+        "market": "us",
+        "label": "US equities",
+        "timezone": "America/New_York",
+        "timezoneLabel": "ET",
+        "regularOpen": datetime_time(9, 30),
+        "regularClose": datetime_time(16, 0),
+        "weekdays": {0, 1, 2, 3, 4},
+        "holidays": US_TRADING_HOLIDAYS_2026,
+        "earlyCloses": {
+            date(2026, 11, 27): datetime_time(13, 0),
+            date(2026, 12, 24): datetime_time(13, 0),
+        },
+        "source": "NYSE/Nasdaq regular-session calendar",
+    },
+    "generic": {
+        "market": "generic",
+        "label": "Exchange session",
+        "timezone": "UTC",
+        "timezoneLabel": "UTC",
+        "regularOpen": datetime_time(9, 30),
+        "regularClose": datetime_time(16, 0),
+        "weekdays": {0, 1, 2, 3, 4},
+        "holidays": {},
+        "earlyCloses": {},
+        "source": "Quote-provider exchange timezone with regular-session fallback",
+    },
 }
 
 BREAKOUT_WATCHLIST = [
@@ -768,6 +843,189 @@ def nse_int(value):
 def nse_text(value):
     text = str(value or "").strip()
     return "" if text in {"-", "--", "None", "null"} else text
+
+
+def build_market_clock(symbol, quote_data=None, meta=None, now=None, market_status=None):
+    quote_data = quote_data or {}
+    meta = meta or {}
+    config = market_clock_config(symbol, quote_data, meta)
+    exchange_tz = ZoneInfo(config["timezone"])
+    local_now = now.astimezone(exchange_tz) if now else datetime.now(exchange_tz)
+    day_status = market_day_status(config, local_now.date())
+    session_open_at, session_close_at = market_session_window(config, local_now.date())
+    next_open_at = next_market_open(config, local_now)
+
+    if market_status is None and config["market"] == "india" and now is None:
+        market_status = safe_india_capital_market_status()
+
+    provider_state = str(
+        quote_data.get("marketState")
+        or meta.get("marketState")
+        or ""
+    ).upper()
+    schedule_open = (
+        day_status["tradingDay"]
+        and session_open_at
+        and session_close_at
+        and session_open_at <= local_now < session_close_at
+    )
+    live_status = nse_text((market_status or {}).get("status"))
+    live_message = nse_text((market_status or {}).get("message"))
+    live_status_key = live_status.lower()
+    live_open = live_status_key in {"open", "regular"}
+
+    is_holiday = day_status["isHoliday"]
+    holiday_name = day_status.get("holidayName") or ""
+    special_closure = False
+    if (
+        config["market"] == "india"
+        and market_status
+        and schedule_open
+        and not live_open
+    ):
+        special_closure = True
+        is_holiday = True
+        holiday_name = live_message or live_status or "Exchange closure"
+
+    if config["market"] == "india" and market_status and live_open:
+        is_holiday = False
+        holiday_name = ""
+        status = "open"
+        status_label = "Market Open"
+        message = live_message or "NSE reports the capital market is open."
+    elif is_holiday:
+        status = "holiday"
+        status_label = "Market Holiday"
+        message = f"Closed for {holiday_name}" if holiday_name else "Market holiday"
+    elif schedule_open and (not live_status or live_open or config["market"] != "india"):
+        status = "open"
+        status_label = "Market Open"
+        message = live_message or "Regular trading session is open."
+    elif day_status["isWeekend"]:
+        status = "closed"
+        status_label = "Market Closed"
+        message = "Weekend closure"
+    elif session_open_at and local_now < session_open_at:
+        status = "closed"
+        status_label = "Market Closed"
+        message = "Pre-open; regular trading has not started."
+    elif provider_state in {"PRE", "PREPRE"}:
+        status = "closed"
+        status_label = "Market Closed"
+        message = "Pre-market; regular trading has not started."
+    else:
+        status = "closed"
+        status_label = "Market Closed"
+        message = live_message or "Regular trading session is closed."
+
+    return {
+        "exchange": config["label"],
+        "market": config["market"],
+        "timezone": config["timezone"],
+        "timezoneLabel": config["timezoneLabel"],
+        "source": config["source"],
+        "generatedAt": iso_now(),
+        "localDate": local_now.date().isoformat(),
+        "regularOpenTime": config["regularOpen"].strftime("%H:%M"),
+        "regularCloseTime": config["regularClose"].strftime("%H:%M"),
+        "sessionOpenAt": iso_from_datetime(session_open_at),
+        "sessionCloseAt": iso_from_datetime(session_close_at),
+        "nextOpenAt": iso_from_datetime(next_open_at),
+        "status": status,
+        "statusLabel": status_label,
+        "isOpen": status == "open",
+        "isHoliday": is_holiday,
+        "isWeekend": day_status["isWeekend"],
+        "holidayName": holiday_name,
+        "specialClosure": special_closure,
+        "providerState": provider_state,
+        "liveStatus": live_status,
+        "message": message,
+    }
+
+
+def market_clock_config(symbol, quote_data, meta):
+    normalized_symbol = str(symbol or "").upper()
+    exchange_text = " ".join([
+        str(quote_data.get("exchange") or ""),
+        str(quote_data.get("fullExchangeName") or ""),
+        str(meta.get("exchangeName") or ""),
+        str(meta.get("fullExchangeName") or ""),
+    ]).upper()
+
+    if (
+        normalized_symbol.endswith((".NS", ".BO"))
+        or any(token in exchange_text for token in ("NSI", "NSE", "BSE", "BOMBAY", "INDIA"))
+    ):
+        return MARKET_CLOCK_CONFIGS["india"]
+    if (
+        any(token in exchange_text for token in ("NMS", "NGM", "NCM", "NYQ", "NYSE", "NASDAQ", "AMEX", "ASE", "PCX", "ARCA"))
+        or re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", normalized_symbol or "")
+    ):
+        return MARKET_CLOCK_CONFIGS["us"]
+
+    timezone_name = meta.get("exchangeTimezoneName") or quote_data.get("exchangeTimezoneName")
+    config = dict(MARKET_CLOCK_CONFIGS["generic"])
+    if timezone_name:
+        try:
+            ZoneInfo(timezone_name)
+            config["timezone"] = timezone_name
+            config["timezoneLabel"] = timezone_name.split("/")[-1].replace("_", " ")
+        except Exception:
+            pass
+    exchange_label = (
+        quote_data.get("fullExchangeName")
+        or quote_data.get("exchange")
+        or meta.get("exchangeName")
+        or config["label"]
+    )
+    config["label"] = exchange_label
+    return config
+
+
+def market_day_status(config, local_date):
+    is_weekend = local_date.weekday() not in config["weekdays"]
+    holiday_name = config["holidays"].get(local_date, "")
+    return {
+        "tradingDay": not is_weekend and not holiday_name,
+        "isWeekend": is_weekend,
+        "isHoliday": bool(holiday_name),
+        "holidayName": holiday_name,
+    }
+
+
+def market_session_window(config, local_date):
+    day_status = market_day_status(config, local_date)
+    if not day_status["tradingDay"]:
+        return None, None
+    close_time = config["earlyCloses"].get(local_date, config["regularClose"])
+    session_open_at = datetime.combine(local_date, config["regularOpen"], tzinfo=ZoneInfo(config["timezone"]))
+    session_close_at = datetime.combine(local_date, close_time, tzinfo=ZoneInfo(config["timezone"]))
+    return session_open_at, session_close_at
+
+
+def next_market_open(config, local_now):
+    for offset in range(0, 370):
+        candidate_date = local_now.date() + timedelta(days=offset)
+        open_at, close_at = market_session_window(config, candidate_date)
+        if not open_at or not close_at:
+            continue
+        if candidate_date == local_now.date() and local_now >= close_at:
+            continue
+        return open_at
+    return None
+
+
+def safe_india_capital_market_status():
+    try:
+        payload = cached("nse-market-status-clock", lambda: fetch_nse_json("/api/marketStatus"), 60)
+        for row in normalize_nse_market_status(payload):
+            market = (row.get("market") or "").lower()
+            if "capital" in market or "equities" in market:
+                return row
+    except Exception:
+        return {}
+    return {}
 
 
 def safe_moneycontrol_sector_snapshot():
@@ -2147,6 +2405,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
     sector_analysis = stock_sector_analysis(fundamentals)
     growth_drivers = build_growth_drivers(symbol, long_name, fundamentals, screener, sector_analysis)
     relative_strength = build_relative_strength(candles, benchmark)
+    latest_candle = analyze_latest_candle(candles)
     technical = score_technical({
         "current": current,
         "yearHigh": year_high,
@@ -2179,6 +2438,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
     ])
     outlook = build_outlook(overall_score, technical["score"], fundamental["score"], event_risk)
     source = build_source_label(sec, screener)
+    market_clock = build_market_clock(symbol, quote_data, meta)
     quality = build_quality_report({
         "candles": candles,
         "quote": quote_data,
@@ -2248,6 +2508,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
         "currency": currency,
         "source": source,
         "generatedAt": iso_now(),
+        "marketClock": market_clock,
         "quote": {
             "price": round2(current),
             "previousClose": round2(previous),
@@ -2302,6 +2563,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
             },
             "relativeStrength": relative_strength,
             "levels": support_resistance,
+            "latestCandle": latest_candle,
         },
         "fundamentals": {
             "score": fundamental["score"],
@@ -3735,6 +3997,154 @@ def to_iso_date(value):
             return None
 
 
+def analyze_latest_candle(candles):
+    if not candles:
+        return {
+            "available": False,
+            "pattern": "Unavailable",
+            "summary": "Latest daily candle could not be analysed.",
+        }
+
+    current = candles[-1]
+    previous = candles[-2] if len(candles) > 1 else None
+    open_price = current.get("open")
+    high = current.get("high")
+    low = current.get("low")
+    close = current.get("close")
+    if not all(is_finite(value) for value in [open_price, high, low, close]) or high <= low:
+        return {
+            "available": False,
+            "pattern": "Unavailable",
+            "summary": "Latest daily candle has incomplete OHLC data.",
+        }
+
+    candle_range = high - low
+    body = abs(close - open_price)
+    upper_wick = high - max(open_price, close)
+    lower_wick = min(open_price, close) - low
+    body_percent = safe_divide(body, candle_range) * 100
+    upper_percent = safe_divide(upper_wick, candle_range) * 100
+    lower_percent = safe_divide(lower_wick, candle_range) * 100
+    close_position = safe_divide(close - low, candle_range) * 100
+    midpoint = (open_price + close) / 2
+    direction = "bullish" if close > open_price else "bearish" if close < open_price else "neutral"
+    previous_open = previous.get("open") if previous else None
+    previous_close = previous.get("close") if previous else None
+
+    pattern = "Standard candle"
+    meaning = "The latest daily candle is balanced; wait for a break of its high or low before reading direction."
+    expectation = "Next candle should prove direction by closing beyond the latest candle high or low."
+    confirmation = high if direction != "bearish" else low
+    invalidation = low if direction != "bearish" else high
+    bias = "Neutral"
+
+    if body_percent <= 10 and upper_percent < 55 and lower_percent < 55:
+        pattern = "Doji"
+        bias = "Indecision"
+        meaning = "The candle shows indecision because open and close are very close."
+        expectation = "The next candle should break and close outside the doji range to confirm direction."
+        confirmation = high
+        invalidation = low
+    elif (
+        previous
+        and all(is_finite(value) for value in [previous_open, previous_close])
+        and close > open_price
+        and previous_close < previous_open
+        and open_price <= previous_close
+        and close >= previous_open
+    ):
+        pattern = "Bullish Engulfing"
+        bias = "Bullish reversal"
+        meaning = "Buyers fully absorbed the prior bearish body, which can mark a reversal attempt."
+        expectation = "The next candle should hold above the engulfing midpoint and ideally close above the latest high."
+        confirmation = high
+        invalidation = midpoint
+    elif (
+        previous
+        and all(is_finite(value) for value in [previous_open, previous_close])
+        and close < open_price
+        and previous_close > previous_open
+        and open_price >= previous_close
+        and close <= previous_open
+    ):
+        pattern = "Bearish Engulfing"
+        bias = "Bearish reversal"
+        meaning = "Sellers fully absorbed the prior bullish body, which can warn of a downside reversal."
+        expectation = "The next candle should stay below the engulfing midpoint and ideally close below the latest low."
+        confirmation = low
+        invalidation = midpoint
+    elif body_percent >= 80 and upper_percent <= 10 and lower_percent <= 10:
+        pattern = "Bullish Marubozu" if direction == "bullish" else "Bearish Marubozu"
+        bias = "Bullish continuation" if direction == "bullish" else "Bearish continuation"
+        meaning = "The candle has a dominant real body with very small wicks, showing one-sided control."
+        expectation = (
+            "The next candle should continue upward or at least hold above the marubozu midpoint."
+            if direction == "bullish"
+            else "The next candle should continue downward or at least stay below the marubozu midpoint."
+        )
+        confirmation = high if direction == "bullish" else low
+        invalidation = midpoint
+    elif lower_wick >= body * 2 and upper_wick <= max(body * 0.7, candle_range * 0.08) and close_position >= 55:
+        pattern = "Hammer"
+        bias = "Bullish reversal watch"
+        meaning = "Lower rejection shows buyers defended the low after intraday selling."
+        expectation = "The next candle should close above the hammer high to confirm bullish reversal."
+        confirmation = high
+        invalidation = low
+    elif upper_wick >= body * 2 and lower_wick <= max(body * 0.7, candle_range * 0.08) and close_position <= 45:
+        pattern = "Shooting Star"
+        bias = "Bearish reversal watch"
+        meaning = "Upper rejection shows sellers pushed back after intraday buying."
+        expectation = "The next candle should close below the shooting-star low to confirm bearish reversal."
+        confirmation = low
+        invalidation = high
+    elif previous and high < previous.get("high", high) and low > previous.get("low", low):
+        pattern = "Inside Bar"
+        bias = "Compression"
+        meaning = "The candle is fully inside the prior day's range, showing temporary compression."
+        expectation = "The next candle should break the inside-bar high or low; avoid assuming direction before the break."
+        confirmation = high
+        invalidation = low
+    elif body_percent >= 55 and close_position >= 70:
+        pattern = "Strong Bullish Candle"
+        bias = "Bullish continuation watch"
+        meaning = "The candle closed near its high with a broad body, showing demand into the close."
+        expectation = "The next candle should hold above the latest midpoint and attempt a high breakout."
+        confirmation = high
+        invalidation = midpoint
+    elif body_percent >= 55 and close_position <= 30:
+        pattern = "Strong Bearish Candle"
+        bias = "Bearish continuation watch"
+        meaning = "The candle closed near its low with a broad body, showing supply into the close."
+        expectation = "The next candle should stay below the latest midpoint and attempt a low breakdown."
+        confirmation = low
+        invalidation = midpoint
+
+    return {
+        "available": True,
+        "date": current.get("date"),
+        "timeframe": "Daily",
+        "pattern": pattern,
+        "direction": direction.title(),
+        "bias": bias,
+        "summary": f"{pattern} on the latest daily candle: {meaning}",
+        "meaning": meaning,
+        "nextCandleExpectation": expectation,
+        "confirmationLevel": round_or_none(confirmation),
+        "invalidationLevel": round_or_none(invalidation),
+        "open": round_or_none(open_price),
+        "high": round_or_none(high),
+        "low": round_or_none(low),
+        "close": round_or_none(close),
+        "midpoint": round_or_none(midpoint),
+        "bodyPercent": round_or_none(body_percent),
+        "upperWickPercent": round_or_none(upper_percent),
+        "lowerWickPercent": round_or_none(lower_percent),
+        "closePositionPercent": round_or_none(close_position),
+        "changePercent": round_or_none(safe_divide(close - open_price, open_price) * 100),
+    }
+
+
 def score_technical(data):
     score = 50
     signals = []
@@ -4946,6 +5356,12 @@ def is_finite(value):
 
 def iso_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def iso_from_datetime(value):
+    if not value:
+        return None
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def iso_from_epoch(epoch_seconds):

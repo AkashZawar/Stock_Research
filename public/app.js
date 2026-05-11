@@ -34,6 +34,11 @@ const tradeError = document.querySelector("#tradeError");
 const useCurrentReport = document.querySelector("#useCurrentReport");
 const chartSupportToggle = document.querySelector("#chartSupportToggle");
 const chartResistanceToggle = document.querySelector("#chartResistanceToggle");
+const expandChartButton = document.querySelector("#expandChart");
+const marketClockEl = document.querySelector("#marketClock");
+const marketClockTime = document.querySelector("#marketClockTime");
+const marketClockStatus = document.querySelector("#marketClockStatus");
+const marketClockDetail = document.querySelector("#marketClockDetail");
 const assetContexts = {
   etf: {
     tab: etfTab,
@@ -63,6 +68,9 @@ let latestAssetReports = { etf: null, fund: null };
 let searchTimer = null;
 let assetSearchTimers = { etf: null, fund: null };
 let suggestionDialogEl = null;
+let chartDialogEl = null;
+let expandedChartCanvas = null;
+let marketClockTimer = null;
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -100,6 +108,7 @@ refreshSearchLogs.addEventListener("click", loadSearchLogs);
 useCurrentReport.addEventListener("click", prefillTradeFromReport);
 chartSupportToggle.addEventListener("change", redrawChart);
 chartResistanceToggle.addEventListener("change", redrawChart);
+expandChartButton.addEventListener("click", openExpandedChart);
 canvas.addEventListener("click", confirmTradingViewRedirect);
 canvas.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") {
@@ -619,6 +628,7 @@ function renderReport(report) {
   document.querySelector("#stockName").textContent = report.longName;
   document.querySelector("#generatedText").textContent = `Generated ${formatDateTime(report.generatedAt)} from ${report.source}`;
   document.querySelector("#currentPrice").textContent = formatMoney(report.quote.price, currency);
+  renderMarketClock(report.marketClock);
 
   const change = document.querySelector("#priceChange");
   change.textContent = `${signed(report.quote.change)} (${signed(report.quote.changePercent)}%)`;
@@ -637,6 +647,7 @@ function renderReport(report) {
 
   renderOwnershipSnapshot(report.growthDrivers, report.fundamentals.metrics);
   renderLevels(report.researchLevels, currency, report.technical.levels);
+  renderLatestCandle(report.technical.latestCandle, currency);
   renderTechnical(report.technical, currency);
   renderFundamentals(report.fundamentals.metrics, report.fundamentals.signals, currency);
   renderGrowthDrivers(report.growthDrivers, currency);
@@ -645,6 +656,249 @@ function renderReport(report) {
   renderSwingTradePlan(report.swingTradePlan, currency);
   renderReferences(report.references);
   redrawChart();
+}
+
+function renderMarketClock(clock) {
+  if (!marketClockEl || !marketClockTime || !marketClockStatus || !marketClockDetail) {
+    return;
+  }
+  if (marketClockTimer) {
+    clearInterval(marketClockTimer);
+    marketClockTimer = null;
+  }
+  if (!clock) {
+    marketClockTime.textContent = "--:--";
+    marketClockStatus.textContent = "Market status";
+    marketClockDetail.textContent = "Session timing is not available for this stock.";
+    setMarketClockClass("closed");
+    return;
+  }
+
+  const tick = () => updateMarketClock(clock);
+  tick();
+  marketClockTimer = setInterval(tick, 1000);
+}
+
+function updateMarketClock(clock) {
+  const now = new Date();
+  const state = resolveMarketClockState(clock, now);
+  marketClockTime.textContent = formatZonedClock(now, clock.timezone, true);
+  marketClockStatus.textContent = state.label;
+  marketClockDetail.textContent = state.detail;
+  setMarketClockClass(state.className);
+}
+
+function resolveMarketClockState(clock, now) {
+  const openAt = parseClockDate(clock.sessionOpenAt);
+  const closeAt = parseClockDate(clock.sessionCloseAt);
+  const nextOpenAt = parseClockDate(clock.nextOpenAt);
+  const exchangeLabel = clock.exchange || "market";
+  const holidayName = clock.holidayName || clock.message || "market holiday";
+
+  if (openAt && closeAt && now >= openAt && now < closeAt && !clock.isHoliday) {
+    return {
+      className: "open",
+      label: "Market Open",
+      detail: `Closes in ${formatClockDuration(closeAt - now)} at ${formatZonedClock(closeAt, clock.timezone)} (${exchangeLabel})`
+    };
+  }
+
+  if (clock.status === "open" && !closeAt) {
+    return {
+      className: "open",
+      label: clock.statusLabel || "Market Open",
+      detail: clock.message || `${exchangeLabel} reports the market is open; session close time is unavailable.`
+    };
+  }
+
+  if (clock.isHoliday && (!nextOpenAt || now < nextOpenAt)) {
+    const nextDetail = nextOpenAt
+      ? `Next open ${formatZonedDateTime(nextOpenAt, clock.timezone)}`
+      : "Next open will update when the exchange calendar refreshes.";
+    return {
+      className: "holiday",
+      label: "Market Holiday",
+      detail: `${holidayName}. ${nextDetail}`
+    };
+  }
+
+  if (nextOpenAt && now < nextOpenAt) {
+    return {
+      className: "closed",
+      label: "Market Closed",
+      detail: `Opens in ${formatClockDuration(nextOpenAt - now)} at ${formatZonedDateTime(nextOpenAt, clock.timezone)}`
+    };
+  }
+
+  if (clock.status === "open" && closeAt && now < closeAt) {
+    return {
+      className: "open",
+      label: clock.statusLabel || "Market Open",
+      detail: `Closes in ${formatClockDuration(closeAt - now)} at ${formatZonedClock(closeAt, clock.timezone)}`
+    };
+  }
+
+  return {
+    className: "closed",
+    label: clock.statusLabel || "Market Closed",
+    detail: clock.message || "Regular trading session is closed."
+  };
+}
+
+function setMarketClockClass(status) {
+  marketClockEl.classList.remove("is-open", "is-closed", "is-holiday");
+  marketClockEl.classList.add(`is-${status}`);
+}
+
+function parseClockDate(value) {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatZonedClock(date, timezone, includeSeconds = false) {
+  if (!timezone) {
+    return includeSeconds ? date.toLocaleTimeString() : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: includeSeconds ? "2-digit" : undefined,
+    hour12: true,
+    timeZoneName: includeSeconds ? "short" : undefined
+  }).format(date);
+}
+
+function formatZonedDateTime(date, timezone) {
+  if (!timezone) {
+    return date.toLocaleString();
+  }
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: timezone,
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short"
+  }).format(date);
+}
+
+function formatClockDuration(milliseconds) {
+  const totalMinutes = Math.max(0, Math.ceil(milliseconds / 60000));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  const parts = [];
+  if (days) {
+    parts.push(`${days}d`);
+  }
+  if (hours || days) {
+    parts.push(`${hours}h`);
+  }
+  parts.push(`${minutes}m`);
+  return parts.join(" ");
+}
+
+function renderLatestCandle(candle, currency) {
+  const container = document.querySelector("#latestCandleReadout");
+  if (!container) {
+    return;
+  }
+
+  if (!candle || !candle.available) {
+    container.innerHTML = "<p class=\"muted\">Latest daily candle pattern is not available.</p>";
+    return;
+  }
+
+  const directionClass = candle.direction === "Bullish" ? "positive" : candle.direction === "Bearish" ? "negative" : "muted";
+  container.innerHTML = `
+    <article class="candle-pattern-card">
+      <div>
+        <span>${escapeHtml(candle.timeframe || "Daily")} candle · ${escapeHtml(candle.date || "latest")}</span>
+        <strong>${escapeHtml(candle.pattern || "Candle")}</strong>
+      </div>
+      <em class="${directionClass}">${escapeHtml(candle.bias || candle.direction || "Neutral")}</em>
+      <p>${escapeHtml(candle.meaning || candle.summary || "")}</p>
+      <div class="candle-next-grid">
+        <span>Next candle read <strong>${escapeHtml(candle.nextCandleExpectation || "Wait for confirmation.")}</strong></span>
+        <span>Confirmation <strong>${formatMoney(candle.confirmationLevel, currency)}</strong></span>
+        <span>Invalidation <strong>${formatMoney(candle.invalidationLevel, currency)}</strong></span>
+        <span>Body / wicks <strong>${formatPercentValue(candle.bodyPercent)} body · U ${formatPercentValue(candle.upperWickPercent)} · L ${formatPercentValue(candle.lowerWickPercent)}</strong></span>
+      </div>
+    </article>
+  `;
+}
+
+function openExpandedChart() {
+  if (!latestReport) {
+    return;
+  }
+  const dialog = ensureChartDialog();
+  dialog.classList.remove("is-hidden");
+  document.body.classList.add("dialog-open");
+  requestAnimationFrame(() => {
+    drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels, 0, expandedChartCanvas);
+    expandedChartCanvas.focus();
+  });
+}
+
+function ensureChartDialog() {
+  if (chartDialogEl) {
+    return chartDialogEl;
+  }
+
+  chartDialogEl = document.createElement("section");
+  chartDialogEl.id = "chartDialog";
+  chartDialogEl.className = "chart-dialog is-hidden";
+  chartDialogEl.setAttribute("role", "dialog");
+  chartDialogEl.setAttribute("aria-modal", "true");
+  chartDialogEl.setAttribute("aria-labelledby", "chartDialogTitle");
+  chartDialogEl.innerHTML = `
+    <article class="chart-modal">
+      <div class="chart-modal-head">
+        <div>
+          <p class="eyebrow">One-year candlestick chart</p>
+          <h3 id="chartDialogTitle">Expanded Chart</h3>
+        </div>
+        <button type="button" id="chartDialogClose" class="suggestion-close">Close</button>
+      </div>
+      <canvas id="expandedPriceChart" aria-label="Expanded one-year candlestick price chart" tabindex="0"></canvas>
+    </article>
+  `;
+  document.body.appendChild(chartDialogEl);
+  expandedChartCanvas = chartDialogEl.querySelector("#expandedPriceChart");
+  chartDialogEl.querySelector("#chartDialogClose").addEventListener("click", closeExpandedChart);
+  chartDialogEl.addEventListener("click", (event) => {
+    if (event.target === chartDialogEl) {
+      closeExpandedChart();
+    }
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !chartDialogEl.classList.contains("is-hidden")) {
+      closeExpandedChart();
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (latestReport && chartDialogEl && !chartDialogEl.classList.contains("is-hidden")) {
+      drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels, 0, expandedChartCanvas);
+    }
+  });
+  return chartDialogEl;
+}
+
+function closeExpandedChart() {
+  if (!chartDialogEl) {
+    return;
+  }
+  chartDialogEl.classList.add("is-hidden");
+  if (!suggestionDialogEl || suggestionDialogEl.classList.contains("is-hidden")) {
+    document.body.classList.remove("dialog-open");
+  }
 }
 
 function renderAssetReport(prefix, report) {
@@ -1707,22 +1961,28 @@ function redrawChart() {
   if (!latestReport) {
     return;
   }
-  requestAnimationFrame(() => drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels));
+  requestAnimationFrame(() => {
+    drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels, 0, canvas);
+    if (expandedChartCanvas && chartDialogEl && !chartDialogEl.classList.contains("is-hidden")) {
+      drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels, 0, expandedChartCanvas);
+    }
+  });
 }
 
-function drawChart(series, currency, levels = {}, retryCount = 0) {
-  const context = canvas.getContext("2d");
-  const rect = canvas.getBoundingClientRect();
+function drawChart(series, currency, levels = {}, retryCount = 0, targetCanvas = canvas) {
+  const context = targetCanvas.getContext("2d");
+  const rect = targetCanvas.getBoundingClientRect();
   if (rect.width < 20 || rect.height < 20) {
     if (retryCount < 5) {
-      requestAnimationFrame(() => drawChart(series, currency, levels, retryCount + 1));
+      requestAnimationFrame(() => drawChart(series, currency, levels, retryCount + 1, targetCanvas));
     }
     return;
   }
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-  canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+  targetCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  targetCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.imageSmoothingEnabled = false;
 
   const width = rect.width;
   const height = rect.height;
@@ -1764,6 +2024,8 @@ function drawChart(series, currency, levels = {}, retryCount = 0) {
     context.fillText(formatCompactMoney(value, currency), width - padding.right + 10, y + 4);
   }
 
+  drawMonthlyMarkers(context, series, padding, plotWidth, plotHeight, width, height);
+
   drawLevelZones(context, levelZones.filter((level) => level.type === "support"), "S", "#127348", currency, padding, plotWidth, plotHeight, min, range);
   drawLevelZones(context, levelZones.filter((level) => level.type === "resistance"), "R", "#b42318", currency, padding, plotWidth, plotHeight, min, range);
 
@@ -1771,13 +2033,11 @@ function drawChart(series, currency, levels = {}, retryCount = 0) {
   plotLine(context, series, "sma50", "#2563eb", 1.6, padding, plotWidth, plotHeight, min, range);
   plotLine(context, series, "sma200", "#b45309", 1.6, padding, plotWidth, plotHeight, min, range);
 
-  drawLevelLabels(context, levelZones.filter((level) => level.type === "support"), "S", "#127348", currency, padding, plotHeight, min, range);
-  drawLevelLabels(context, levelZones.filter((level) => level.type === "resistance"), "R", "#b42318", currency, padding, plotHeight, min, range);
+  drawLevelLabels(context, levelZones.filter((level) => level.type === "support"), "S", "#127348", currency, padding, plotWidth, plotHeight, min, range);
+  drawLevelLabels(context, levelZones.filter((level) => level.type === "resistance"), "R", "#b42318", currency, padding, plotWidth, plotHeight, min, range);
 
   context.fillStyle = "#667078";
-  const firstDate = series[0] && series[0].date;
   const lastDate = series[series.length - 1] && series[series.length - 1].date;
-  context.fillText(firstDate || "", padding.left, height - 12);
   const lastTextWidth = context.measureText(lastDate || "").width;
   context.fillText(lastDate || "", width - padding.right - lastTextWidth, height - 12);
 }
@@ -1791,12 +2051,12 @@ function getChartLevelFilters() {
 
 function chartPaddingFor(width) {
   if (width <= 420) {
-    return { top: 18, right: 72, bottom: 28, left: 8 };
+    return { top: 18, right: 88, bottom: 42, left: 8 };
   }
   if (width <= 640) {
-    return { top: 20, right: 84, bottom: 30, left: 10 };
+    return { top: 20, right: 96, bottom: 44, left: 10 };
   }
-  return { top: 24, right: 112, bottom: 34, left: 14 };
+  return { top: 24, right: 126, bottom: 48, left: 14 };
 }
 
 function normalizeLevelZones(levels) {
@@ -1813,6 +2073,43 @@ function normalizeLevelZones(levels) {
   ].filter((level) => Number.isFinite(level.price));
 }
 
+function drawMonthlyMarkers(context, series, padding, plotWidth, plotHeight, width, height) {
+  const markers = [];
+  let previousMonth = "";
+  series.forEach((item, index) => {
+    if (!item.date) {
+      return;
+    }
+    const month = item.date.slice(0, 7);
+    if (month && month !== previousMonth) {
+      markers.push({ index, date: item.date });
+      previousMonth = month;
+    }
+  });
+
+  context.save();
+  context.font = "700 10px system-ui, sans-serif";
+  context.strokeStyle = "rgba(100, 116, 139, 0.22)";
+  context.fillStyle = "#64748b";
+  context.lineWidth = 1;
+
+  markers.forEach((marker, markerIndex) => {
+    const x = padding.left + (marker.index / Math.max(1, series.length - 1)) * plotWidth;
+    context.beginPath();
+    context.moveTo(x, padding.top);
+    context.lineTo(x, padding.top + plotHeight);
+    context.stroke();
+
+    const date = new Date(`${marker.date}T00:00:00Z`);
+    const label = date.toLocaleString("en-US", { month: "short" });
+    const labelWidth = context.measureText(label).width;
+    const labelX = Math.min(width - padding.right - labelWidth, Math.max(padding.left, x - labelWidth / 2));
+    const labelY = height - 25 + (markerIndex % 2) * 12;
+    context.fillText(label, labelX, labelY);
+  });
+  context.restore();
+}
+
 function drawLevelZones(context, levels, prefix, color, currency, padding, plotWidth, plotHeight, min, range) {
   for (const level of levels) {
     const zoneLow = Number.isFinite(level.zoneLow) ? level.zoneLow : level.price;
@@ -1822,22 +2119,31 @@ function drawLevelZones(context, levels, prefix, color, currency, padding, plotW
     const mid = yForValue(level.price, padding, plotHeight, min, range);
 
     context.save();
-    context.fillStyle = colorToRgba(color, 0.08);
+    context.fillStyle = colorToRgba(color, 0.045);
     context.fillRect(padding.left, top, plotWidth, Math.max(2, bottom - top));
-    context.strokeStyle = colorToRgba(color, 0.78);
-    context.setLineDash([7, 5]);
-    context.lineWidth = 1.2;
+    context.strokeStyle = colorToRgba(color, 0.94);
+    context.setLineDash([]);
+    context.lineWidth = 1.4;
     context.beginPath();
     context.moveTo(padding.left, mid);
     context.lineTo(padding.left + plotWidth, mid);
+    context.stroke();
+    context.strokeStyle = colorToRgba(color, 0.24);
+    context.setLineDash([3, 4]);
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(padding.left, top);
+    context.lineTo(padding.left + plotWidth, top);
+    context.moveTo(padding.left, bottom);
+    context.lineTo(padding.left + plotWidth, bottom);
     context.stroke();
     context.restore();
   }
 }
 
-function drawLevelLabels(context, levels, prefix, color, currency, padding, plotHeight, min, range) {
+function drawLevelLabels(context, levels, prefix, color, currency, padding, plotWidth, plotHeight, min, range) {
   const placed = [];
-  const labelX = padding.left + (canvas.getBoundingClientRect().width - padding.left - padding.right) + 6;
+  const labelX = padding.left + plotWidth + 6;
 
   levels.forEach((level) => {
     let y = yForValue(level.price, padding, plotHeight, min, range);
@@ -1850,16 +2156,21 @@ function drawLevelLabels(context, levels, prefix, color, currency, padding, plot
 
     const label = `${prefix}${level.index} ${formatCompactMoney(level.price, currency)}`;
     context.save();
-    context.font = "700 11px system-ui, sans-serif";
+    context.font = "800 11px system-ui, sans-serif";
     const labelWidth = context.measureText(label).width + 10;
-    context.fillStyle = colorToRgba(color, 0.12);
-    context.strokeStyle = colorToRgba(color, 0.35);
+    context.fillStyle = colorToRgba(color, 0.14);
+    context.strokeStyle = colorToRgba(color, 0.55);
     context.lineWidth = 1;
     roundedRect(context, labelX, y - 10, labelWidth, 20, 5);
     context.fill();
     context.stroke();
     context.fillStyle = color;
     context.fillText(label, labelX + 5, y + 4);
+    context.strokeStyle = colorToRgba(color, 0.4);
+    context.beginPath();
+    context.moveTo(padding.left + plotWidth - 10, y);
+    context.lineTo(labelX, y);
+    context.stroke();
     context.restore();
   });
 }
