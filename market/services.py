@@ -8,9 +8,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from difflib import SequenceMatcher
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener, urlopen
 from zoneinfo import ZoneInfo
 
 import certifi
@@ -74,6 +75,30 @@ NSE_SECTOR_INDICES = (
     "NIFTY HEALTHCARE INDEX",
     "NIFTY CONSUMER DURABLES",
 )
+NSE_OI_SECTOR_INDICES = (
+    "NIFTY BANK",
+    "NIFTY FINANCIAL SERVICES",
+    "NIFTY FINANCIAL SERVICES EX-BANK",
+    "NIFTY MIDSMALL FINANCIAL SERVICES",
+    "NIFTY AUTO",
+    "NIFTY IT",
+    "NIFTY MIDSMALL IT & TELECOM",
+    "NIFTY FMCG",
+    "NIFTY PHARMA",
+    "NIFTY METAL",
+    "NIFTY REALTY",
+    "NIFTY PSU BANK",
+    "NIFTY PRIVATE BANK",
+    "NIFTY OIL & GAS",
+    "NIFTY HEALTHCARE INDEX",
+    "NIFTY MIDSMALL HEALTHCARE",
+    "NIFTY CONSUMER DURABLES",
+    "NIFTY CHEMICALS",
+    "NIFTY CEMENT",
+    "NIFTY MEDIA",
+    "NIFTY ENERGY",
+    "NIFTY INFRASTRUCTURE",
+)
 NSE_SNAPSHOT_ENDPOINTS = {
     "marketStatus": "/api/marketStatus",
     "allIndices": "/api/allIndices",
@@ -111,6 +136,29 @@ SECTOR_ALIASES = {
     "Consumer Cyclical": "Automobile & Ancillaries",
     "Auto": "Automobile & Ancillaries",
     "Automobile": "Automobile & Ancillaries",
+}
+MONEYCONTROL_NSE_SECTOR_MAP = {
+    "Automobile & Ancillaries": "NIFTY AUTO",
+    "Auto": "NIFTY AUTO",
+    "Banks": "NIFTY BANK",
+    "Banking": "NIFTY BANK",
+    "Capital Goods": "NIFTY INFRASTRUCTURE",
+    "Cement": "NIFTY CEMENT",
+    "Chemicals": "NIFTY CHEMICALS",
+    "Consumer Durables": "NIFTY CONSUMER DURABLES",
+    "Finance": "NIFTY FINANCIAL SERVICES",
+    "Financial Services": "NIFTY FINANCIAL SERVICES",
+    "FMCG": "NIFTY FMCG",
+    "Healthcare": "NIFTY HEALTHCARE INDEX",
+    "Media": "NIFTY MEDIA",
+    "Metals & Mining": "NIFTY METAL",
+    "Oil & Gas": "NIFTY OIL & GAS",
+    "Power": "NIFTY ENERGY",
+    "Real Estate": "NIFTY REALTY",
+    "Realty": "NIFTY REALTY",
+    "Software & IT Services": "NIFTY IT",
+    "Technology": "NIFTY IT",
+    "Telecom": "NIFTY MIDSMALL IT & TELECOM",
 }
 
 INDIA_TRADING_HOLIDAYS_2026 = {
@@ -424,6 +472,7 @@ def _analyze_symbol(symbol):
         "summary": lambda: get_summary(symbol),
         "sec": lambda: get_sec_fundamentals(symbol),
         "screener": lambda: get_screener_fundamentals(symbol),
+        "openInterest": lambda: get_stock_open_interest(symbol),
     }
     if benchmark_symbol:
         loaders["benchmark"] = lambda: get_benchmark_chart(benchmark_symbol)
@@ -451,7 +500,12 @@ def _analyze_symbol(symbol):
     sec = results.get("sec", (False, {}))[1] if results.get("sec", (False,))[0] else {}
     screener = results.get("screener", (False, {}))[1] if results.get("screener", (False,))[0] else {}
     benchmark = results.get("benchmark", (False, {}))[1] if results.get("benchmark", (False,))[0] else {}
-    return build_report(symbol, chart.get("meta", {}), candles, quote_data, summary, sec, screener, benchmark)
+    open_interest = (
+        results.get("openInterest", (False, {}))[1]
+        if results.get("openInterest", (False,))[0]
+        else open_interest_unavailable(symbol, str(results.get("openInterest", (False, ""))[1]))
+    )
+    return build_report(symbol, chart.get("meta", {}), candles, quote_data, summary, sec, screener, benchmark, open_interest)
 
 
 def _analyze_asset(symbol, asset_type):
@@ -550,8 +604,8 @@ def build_nse_market_snapshot_from_payloads(payloads):
         "breadth": breadth,
         "indices": indices,
         "sectorIndices": sector_indices,
-        "topGainers": normalize_nse_variation(payloads.get("gainers"), limit=8),
-        "topLosers": normalize_nse_variation(payloads.get("losers"), limit=8),
+        "topGainers": normalize_nse_variation(payloads.get("gainers"), limit=10),
+        "topLosers": normalize_nse_variation(payloads.get("losers"), limit=10),
         "mostActive": normalize_nse_most_active(payloads.get("mostActive"), limit=8),
         "weekHighs": normalize_nse_52_week_highs(payloads.get("weekHighs"), limit=8),
         "priceBands": normalize_nse_price_bands(payloads.get("priceBands"), limit=8),
@@ -1028,6 +1082,464 @@ def safe_india_capital_market_status():
     return {}
 
 
+def get_stock_open_interest(symbol):
+    nse_symbol = nse_derivative_symbol(symbol)
+    if not nse_symbol:
+        return open_interest_unavailable(
+            symbol,
+            "Open interest is available here for NSE/BSE symbols that map to NSE F&O contracts.",
+        )
+
+    try:
+        payload = get_nse_option_chain_payload(nse_symbol)
+        option_chain_report = build_open_interest_report(nse_symbol, payload)
+    except Exception as error:
+        option_chain_report = open_interest_unavailable(nse_symbol, str(error))
+    if option_chain_report.get("available"):
+        return option_chain_report
+    try:
+        oi_spurt_report = get_oi_spurt_open_interest(nse_symbol)
+    except Exception:
+        oi_spurt_report = open_interest_unavailable(nse_symbol, option_chain_report.get("summary"))
+    if oi_spurt_report.get("available"):
+        oi_spurt_report["note"] = option_chain_report.get("summary")
+        return oi_spurt_report
+    return option_chain_report
+
+
+def get_nse_option_chain_payload(nse_symbol):
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    contract_info = cached(
+        f"nse-option-chain-contract-info:{nse_symbol}",
+        lambda: fetch_nse_json_with_session(f"/api/option-chain-contract-info?symbol={quote(nse_symbol)}"),
+        60,
+    )
+    expiry_texts = [nse_text(value) for value in contract_info.get("expiryDates") or []]
+    expiry_texts = [value for value in expiry_texts if value]
+    selected_expiries = []
+    for expiry_text in expiry_texts:
+        expiry_date = parse_nse_expiry_date(expiry_text)
+        if expiry_date and expiry_date >= today and (expiry_date - today).days <= 92:
+            selected_expiries.append(expiry_text)
+    if not selected_expiries and expiry_texts:
+        selected_expiries = expiry_texts[:1]
+    selected_expiries = selected_expiries[:4]
+    if not selected_expiries:
+        return {"records": {"timestamp": "", "underlyingValue": None, "expiryDates": [], "data": []}}
+
+    records = {
+        "timestamp": "",
+        "underlyingValue": None,
+        "expiryDates": expiry_texts,
+        "data": [],
+    }
+    for expiry_text in selected_expiries:
+        payload = cached(
+            f"nse-option-chain-v3:{nse_symbol}:{expiry_text}",
+            lambda expiry_text=expiry_text: fetch_nse_json_with_session(
+                f"/api/option-chain-v3?type=Equity&symbol={quote(nse_symbol)}&expiry={quote(expiry_text)}"
+            ),
+            60,
+        )
+        expiry_records = (payload or {}).get("records") or {}
+        if expiry_records.get("timestamp"):
+            records["timestamp"] = expiry_records.get("timestamp")
+        if expiry_records.get("underlyingValue") is not None:
+            records["underlyingValue"] = expiry_records.get("underlyingValue")
+        records["data"].extend(expiry_records.get("data") or [])
+    return {"records": records}
+
+
+def nse_derivative_symbol(symbol):
+    root = str(symbol or "").upper().split(".")[0].strip()
+    if re.fullmatch(r"[A-Z0-9&-]{1,30}", root):
+        return root
+    return ""
+
+
+def open_interest_unavailable(symbol, reason="NSE option-chain open interest is not available for this stock."):
+    return {
+        "available": False,
+        "symbol": str(symbol or ""),
+        "source": "NSE India option-chain equities",
+        "generatedAt": iso_now(),
+        "summary": reason,
+        "periods": {},
+        "expiryDates": [],
+    }
+
+
+def get_oi_spurt_open_interest(nse_symbol):
+    payload = cached(
+        "nse-oi-spurts-underlyings",
+        lambda: fetch_nse_json("/api/live-analysis-oi-spurts-underlyings"),
+        60,
+    )
+    match = None
+    for row in payload.get("data") or []:
+        if nse_text(row.get("symbol")).upper() == nse_symbol:
+            match = row
+            break
+    if not match:
+        return open_interest_unavailable(
+            nse_symbol,
+            "NSE option-chain OI was unavailable and the stock was not present in NSE Change in Open Interest.",
+        )
+
+    latest_oi = nse_int(match.get("latestOI")) or 0
+    previous_oi = nse_int(match.get("prevOI")) or 0
+    change_oi = nse_int(match.get("changeInOI")) or 0
+    change_percent = nse_round(match.get("avgInOI"))
+    bias = "OI increasing" if change_oi > 0 else "OI reducing" if change_oi < 0 else "OI stable"
+    volume = nse_int(match.get("volume"))
+    day_period = {
+        "available": True,
+        "aggregateOnly": True,
+        "label": "Day",
+        "summary": (
+            f"Day OI from NSE Change in Open Interest: latest OI {latest_oi:,}, "
+            f"change {change_oi:+,} ({change_percent if change_percent is not None else 'n/a'}%). "
+            "NSE aggregate feed does not split call volume versus put volume."
+        ),
+        "volumeSummary": (
+            f"NSE reports aggregate derivative volume of {volume:,} contracts, but not call/put split."
+            if volume is not None
+            else "NSE aggregate feed did not return call/put volume split."
+        ),
+        "callPutVolumeSplitAvailable": False,
+        "expiryDates": [],
+        "totalOi": latest_oi,
+        "previousOi": previous_oi,
+        "changeOi": change_oi,
+        "changePercent": change_percent,
+        "volume": volume,
+        "futuresValue": nse_round(match.get("futValue")),
+        "optionsValue": nse_round(match.get("optValue")),
+        "premiumValue": nse_round(match.get("premValue")),
+        "underlyingValue": nse_round(match.get("underlyingValue")),
+        "bias": bias,
+        "rows": [],
+    }
+
+    unavailable_periods = {
+        key: {
+            "available": False,
+            "label": label,
+            "summary": f"{label} OI requires full NSE option-chain data, which was not returned.",
+            "rows": [],
+        }
+        for key, label in (("week", "Week"), ("month", "Month"), ("quarter", "Quarter"))
+    }
+    return {
+        "available": True,
+        "symbol": nse_symbol,
+        "source": "NSE India Change in Open Interest",
+        "generatedAt": iso_now(),
+        "timestamp": nse_text(payload.get("timestamp")),
+        "underlyingValue": day_period["underlyingValue"],
+        "summary": day_period["summary"],
+        "periods": {"day": day_period, **unavailable_periods},
+        "expiryDates": [],
+    }
+
+
+def build_open_interest_report(nse_symbol, payload, today=None):
+    records = (payload or {}).get("records") or {}
+    raw_rows = records.get("data") or []
+    today = today or datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    expiry_map = {}
+    for value in records.get("expiryDates") or []:
+        expiry_date = parse_nse_expiry_date(value)
+        if expiry_date:
+            expiry_map[expiry_date] = nse_text(value)
+    for item in raw_rows:
+        expiry_date = parse_option_row_expiry_date(item)
+        if expiry_date and expiry_date not in expiry_map:
+            expiry_map[expiry_date] = option_row_expiry_label(item, expiry_date)
+
+    expiry_dates = sorted(expiry_map)
+    if not raw_rows or not expiry_dates:
+        return open_interest_unavailable(
+            nse_symbol,
+            "NSE did not return option-chain open interest rows for this stock.",
+        )
+
+    periods = {}
+    for key, label, max_days in (
+        ("day", "Day", 0),
+        ("week", "Week", 7),
+        ("month", "Month", 31),
+        ("quarter", "Quarter", 92),
+    ):
+        selected_expiries = select_oi_expiries(expiry_dates, today, max_days)
+        periods[key] = summarize_open_interest_period(
+            raw_rows,
+            selected_expiries,
+            expiry_map,
+            label,
+            records.get("underlyingValue"),
+        )
+
+    available_periods = [period for period in periods.values() if period.get("available")]
+    if not available_periods:
+        return open_interest_unavailable(
+            nse_symbol,
+            "NSE option-chain rows were returned, but OI values were not usable.",
+        )
+
+    nearest = periods.get("day") or available_periods[0]
+    return {
+        "available": True,
+        "symbol": nse_symbol,
+        "source": "NSE India option-chain equities",
+        "generatedAt": iso_now(),
+        "timestamp": nse_text(records.get("timestamp")),
+        "underlyingValue": nse_round(records.get("underlyingValue")),
+        "expiryDates": [
+            {"date": expiry_date.isoformat(), "label": expiry_map[expiry_date]}
+            for expiry_date in expiry_dates
+        ],
+        "summary": nearest.get("summary") or "Open interest summary is available.",
+        "periods": periods,
+    }
+
+
+def parse_nse_expiry_date(value):
+    text = nse_text(value)
+    if not text:
+        return None
+    for fmt in ("%d-%b-%Y", "%d-%b-%y", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text.title(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_option_row_expiry_date(item):
+    return parse_nse_expiry_date(
+        item.get("expiryDate")
+        or item.get("expiryDates")
+        or (item.get("CE") or {}).get("expiryDate")
+        or (item.get("PE") or {}).get("expiryDate")
+    )
+
+
+def option_row_expiry_label(item, expiry_date):
+    return (
+        nse_text(item.get("expiryDates"))
+        or nse_text(item.get("expiryDate"))
+        or nse_text((item.get("CE") or {}).get("expiryDate"))
+        or nse_text((item.get("PE") or {}).get("expiryDate"))
+        or expiry_date.isoformat()
+    )
+
+
+def select_oi_expiries(expiry_dates, today, max_days):
+    future_expiries = [expiry for expiry in expiry_dates if expiry >= today]
+    if not future_expiries:
+        future_expiries = expiry_dates[:]
+    if not future_expiries:
+        return []
+    nearest = future_expiries[0]
+    if max_days == 0:
+        return [nearest]
+    selected = [
+        expiry
+        for expiry in future_expiries
+        if 0 <= (expiry - today).days <= max_days
+    ]
+    return selected or [nearest]
+
+
+def summarize_open_interest_period(raw_rows, selected_expiries, expiry_map, label, underlying_value):
+    selected_set = set(selected_expiries)
+    rows_by_strike = {}
+    for item in raw_rows:
+        expiry_date = parse_option_row_expiry_date(item)
+        if expiry_date not in selected_set:
+            continue
+        strike = nse_round(item.get("strikePrice"))
+        if strike is None:
+            continue
+        row = rows_by_strike.setdefault(strike, {
+            "strike": strike,
+            "callOi": 0,
+            "putOi": 0,
+            "callChangeOi": 0,
+            "putChangeOi": 0,
+            "callVolume": 0,
+            "putVolume": 0,
+            "callIv": None,
+            "putIv": None,
+        })
+        merge_option_side(row, item.get("CE") or {}, "call")
+        merge_option_side(row, item.get("PE") or {}, "put")
+
+    rows = list(rows_by_strike.values())
+    if not rows:
+        return {
+            "available": False,
+            "label": label,
+            "summary": f"No OI contracts found for {label.lower()} view.",
+            "expiryDates": [],
+            "rows": [],
+        }
+
+    for row in rows:
+        row["totalOi"] = row["callOi"] + row["putOi"]
+        row["netChangeOi"] = row["putChangeOi"] - row["callChangeOi"]
+        row["totalVolume"] = row["callVolume"] + row["putVolume"]
+        row["volumePcrAtStrike"] = round_or_none(row["putVolume"] / row["callVolume"]) if row["callVolume"] else None
+        row["pcrAtStrike"] = round_or_none(row["putOi"] / row["callOi"]) if row["callOi"] else None
+        row["bias"] = open_interest_row_bias(row)
+        row["volumeBias"] = open_interest_volume_bias(row["callVolume"], row["putVolume"])
+
+    total_call_oi = sum(row["callOi"] for row in rows)
+    total_put_oi = sum(row["putOi"] for row in rows)
+    total_call_change = sum(row["callChangeOi"] for row in rows)
+    total_put_change = sum(row["putChangeOi"] for row in rows)
+    total_call_volume = sum(row["callVolume"] for row in rows)
+    total_put_volume = sum(row["putVolume"] for row in rows)
+    total_volume = total_call_volume + total_put_volume
+    max_call = max(rows, key=lambda row: row["callOi"]) if total_call_oi else None
+    max_put = max(rows, key=lambda row: row["putOi"]) if total_put_oi else None
+    max_pain = calculate_max_pain(rows)
+    pcr = round_or_none(total_put_oi / total_call_oi) if total_call_oi else None
+    volume_pcr = round_or_none(total_put_volume / total_call_volume) if total_call_volume else None
+    bias = open_interest_period_bias(pcr, total_call_change, total_put_change)
+    volume_bias = open_interest_volume_bias(total_call_volume, total_put_volume)
+    volume_summary = open_interest_volume_summary(
+        total_call_volume,
+        total_put_volume,
+        total_call_oi,
+        total_put_oi,
+    )
+    top_rows = sorted(
+        rows,
+        key=lambda row: (
+            row["totalOi"],
+            row["totalVolume"],
+            abs(row["callChangeOi"]) + abs(row["putChangeOi"]),
+        ),
+        reverse=True,
+    )[:12]
+
+    expiry_labels = [expiry_map.get(expiry, expiry.isoformat()) for expiry in selected_expiries]
+    summary = (
+        f"{label} OI across {', '.join(expiry_labels)}: PCR {pcr if pcr is not None else 'n/a'}, "
+        f"{bias.lower()}. {volume_summary}"
+    )
+    return {
+        "available": True,
+        "label": label,
+        "summary": summary,
+        "volumeSummary": volume_summary,
+        "callPutVolumeSplitAvailable": True,
+        "expiryDates": [
+            {"date": expiry.isoformat(), "label": expiry_map.get(expiry, expiry.isoformat())}
+            for expiry in selected_expiries
+        ],
+        "totalCallOi": total_call_oi,
+        "totalPutOi": total_put_oi,
+        "totalCallChangeOi": total_call_change,
+        "totalPutChangeOi": total_put_change,
+        "totalCallVolume": total_call_volume,
+        "totalPutVolume": total_put_volume,
+        "totalVolume": total_volume,
+        "pcr": pcr,
+        "volumePcr": volume_pcr,
+        "maxCallOiStrike": max_call["strike"] if max_call else None,
+        "maxPutOiStrike": max_put["strike"] if max_put else None,
+        "maxPain": max_pain,
+        "underlyingValue": nse_round(underlying_value),
+        "bias": bias,
+        "volumeBias": volume_bias,
+        "rows": top_rows,
+    }
+
+
+def merge_option_side(row, option_data, side):
+    prefix = "call" if side == "call" else "put"
+    row[f"{prefix}Oi"] += nse_int(option_data.get("openInterest")) or 0
+    row[f"{prefix}ChangeOi"] += nse_int(option_data.get("changeinOpenInterest")) or 0
+    row[f"{prefix}Volume"] += nse_int(option_data.get("totalTradedVolume")) or 0
+    iv = nse_round(option_data.get("impliedVolatility"))
+    if iv is not None:
+        row[f"{prefix}Iv"] = iv
+
+
+def calculate_max_pain(rows):
+    best_strike = None
+    best_pain = None
+    for candidate in [row["strike"] for row in rows]:
+        pain = sum(
+            row["callOi"] * max(0, candidate - row["strike"])
+            + row["putOi"] * max(0, row["strike"] - candidate)
+            for row in rows
+        )
+        if best_pain is None or pain < best_pain:
+            best_pain = pain
+            best_strike = candidate
+    return best_strike
+
+
+def open_interest_period_bias(pcr, call_change, put_change):
+    if is_finite(pcr) and pcr >= 1.1 and put_change >= call_change:
+        return "Bullish put-writing support"
+    if is_finite(pcr) and pcr <= 0.85 and call_change >= put_change:
+        return "Bearish call-writing pressure"
+    if put_change > call_change:
+        return "Put OI building faster"
+    if call_change > put_change:
+        return "Call OI building faster"
+    return "Balanced OI"
+
+
+def open_interest_volume_bias(call_volume, put_volume):
+    call_volume = call_volume or 0
+    put_volume = put_volume or 0
+    total = call_volume + put_volume
+    if not total:
+        return "Volume split unavailable"
+    call_share = call_volume / total
+    put_share = put_volume / total
+    if put_share >= 0.55:
+        return "Put volume dominates"
+    if call_share >= 0.55:
+        return "Call volume dominates"
+    return "Balanced call/put volume"
+
+
+def open_interest_volume_summary(call_volume, put_volume, call_oi, put_oi):
+    call_volume = call_volume or 0
+    put_volume = put_volume or 0
+    total_volume = call_volume + put_volume
+    if not total_volume:
+        return "Call/put volume split was not available."
+
+    call_share = call_volume / total_volume * 100
+    put_share = put_volume / total_volume * 100
+    volume_side = "put" if put_volume > call_volume else "call" if call_volume > put_volume else "call and put"
+    oi_side = "put OI" if put_oi > call_oi else "call OI" if call_oi > put_oi else "balanced OI"
+    return (
+        f"Volume-led view: {volume_side} positions are more active "
+        f"(calls {call_share:.1f}%, puts {put_share:.1f}%); {oi_side} is higher by open interest."
+    )
+
+
+def open_interest_row_bias(row):
+    if row["putChangeOi"] > row["callChangeOi"] and row["putOi"] >= row["callOi"]:
+        return "Put support"
+    if row["callChangeOi"] > row["putChangeOi"] and row["callOi"] >= row["putOi"]:
+        return "Call resistance"
+    if row["putOi"] > row["callOi"]:
+        return "Put-heavy"
+    if row["callOi"] > row["putOi"]:
+        return "Call-heavy"
+    return "Balanced"
+
+
 def safe_moneycontrol_sector_snapshot():
     try:
         return get_moneycontrol_sector_snapshot()
@@ -1043,6 +1555,258 @@ def safe_moneycontrol_sector_snapshot():
             "underPerforming": [],
             "sectorIndices": [],
         }
+
+
+def safe_sector_open_interest():
+    try:
+        return get_sector_open_interest()
+    except Exception as error:
+        return {
+            "available": False,
+            "source": "NSE India Change in Open Interest + sectoral indices",
+            "generatedAt": iso_now(),
+            "error": str(error),
+            "summary": "Sector-wise open interest could not be loaded.",
+            "rows": [],
+            "totals": {},
+            "coverage": {},
+        }
+
+
+def get_sector_open_interest():
+    return cached(
+        "nse-sector-open-interest",
+        build_sector_open_interest,
+        60,
+    )
+
+
+def build_sector_open_interest():
+    oi_payload = cached(
+        "nse-oi-spurts-underlyings",
+        lambda: fetch_nse_json("/api/live-analysis-oi-spurts-underlyings"),
+        60,
+    )
+    sector_map = get_nse_sector_constituent_map()
+    return build_sector_open_interest_from_payloads(oi_payload, sector_map)
+
+
+def get_nse_sector_constituent_map():
+    return cached(
+        "nse-sector-constituent-map",
+        build_nse_sector_constituent_map,
+        15 * 60,
+    )
+
+
+def build_nse_sector_constituent_map():
+    results = settle_map(NSE_OI_SECTOR_INDICES, fetch_nse_sector_constituents, concurrency=4)
+    symbol_to_sector = {}
+    sector_counts = {}
+    stock_movers = {}
+    errors = {}
+    for ok, value in results:
+        if not ok:
+            errors[str(value)] = "NSE sector constituent request failed."
+            continue
+        sector = value.get("sector")
+        symbols = value.get("symbols") or []
+        sector_counts[sector] = len(symbols)
+        stock_movers[sector] = value.get("topStocks") or []
+        for symbol in symbols:
+            symbol_to_sector.setdefault(symbol, sector)
+    if not symbol_to_sector:
+        raise RuntimeError("NSE sector constituents were unavailable.")
+    return {
+        "symbols": symbol_to_sector,
+        "sectors": sector_counts,
+        "stockMovers": stock_movers,
+        "errors": errors,
+        "sourceIndices": list(NSE_OI_SECTOR_INDICES),
+    }
+
+
+def fetch_nse_sector_constituents(index_name):
+    payload = fetch_nse_json(f"/api/equity-stockIndices?index={quote(index_name)}")
+    symbols = []
+    stocks = []
+    index_key = sector_match_key(index_name)
+    for item in payload.get("data") or []:
+        symbol = nse_text(item.get("symbol")).upper()
+        if not symbol or sector_match_key(symbol) == index_key:
+            continue
+        symbols.append(symbol)
+        stocks.append({
+            "symbol": symbol,
+            "name": nse_text((item.get("meta") or {}).get("companyName")),
+            "price": nse_round(item.get("lastPrice")),
+            "change": nse_round(item.get("change")),
+            "changePercent": nse_round(item.get("pChange")),
+            "volume": nse_int(item.get("totalTradedVolume")),
+        })
+    return {
+        "sector": index_name,
+        "symbols": list(dict.fromkeys(symbols)),
+        "topStocks": sorted(
+            stocks,
+            key=lambda stock: abs(stock.get("changePercent") or 0),
+            reverse=True,
+        )[:5],
+        "timestamp": nse_text(payload.get("timestamp"))
+            or nse_text((payload.get("metadata") or {}).get("timeVal")),
+    }
+
+
+def build_sector_open_interest_from_payloads(oi_payload, sector_map):
+    symbol_to_sector = (sector_map or {}).get("symbols") or {}
+    sector_stock_movers = (sector_map or {}).get("stockMovers") or {}
+    buckets = {}
+    mapped_count = 0
+    unmapped_count = 0
+    source_rows = oi_payload.get("data") or []
+    for item in source_rows:
+        symbol = nse_text(item.get("symbol")).upper()
+        if not symbol:
+            continue
+        sector = symbol_to_sector.get(symbol)
+        if not sector:
+            unmapped_count += 1
+            continue
+        mapped_count += 1
+        latest_oi = nse_int(item.get("latestOI")) or 0
+        previous_oi = nse_int(item.get("prevOI")) or 0
+        change_oi = nse_int(item.get("changeInOI")) or 0
+        volume = nse_int(item.get("volume")) or 0
+        bucket = buckets.setdefault(sector, {
+            "sector": sector,
+            "latestOi": 0,
+            "previousOi": 0,
+            "changeOi": 0,
+            "volume": 0,
+            "optionsValue": 0,
+            "futuresValue": 0,
+            "premiumValue": 0,
+            "underlyingValue": 0,
+            "stockCount": 0,
+            "stocks": [],
+        })
+        bucket["latestOi"] += latest_oi
+        bucket["previousOi"] += previous_oi
+        bucket["changeOi"] += change_oi
+        bucket["volume"] += volume
+        bucket["optionsValue"] += nse_round(item.get("optValue")) or 0
+        bucket["futuresValue"] += nse_round(item.get("futValue")) or 0
+        bucket["premiumValue"] += nse_round(item.get("premValue")) or 0
+        bucket["underlyingValue"] += nse_round(item.get("underlyingValue")) or 0
+        bucket["stockCount"] += 1
+        bucket["stocks"].append({
+            "symbol": symbol,
+            "latestOi": latest_oi,
+            "previousOi": previous_oi,
+            "changeOi": change_oi,
+            "changePercent": round_or_none(change_oi / previous_oi * 100) if previous_oi else None,
+            "volume": volume,
+            "underlyingValue": nse_round(item.get("underlyingValue")),
+        })
+
+    rows = []
+    for bucket in buckets.values():
+        change_percent = (
+            round_or_none(bucket["changeOi"] / bucket["previousOi"] * 100)
+            if bucket["previousOi"]
+            else None
+        )
+        top_stocks = sorted(
+            bucket["stocks"],
+            key=lambda stock: (stock.get("latestOi") or 0, abs(stock.get("changeOi") or 0)),
+            reverse=True,
+        )[:4]
+        bucket["changePercent"] = change_percent
+        bucket["volumeToOi"] = round_or_none(bucket["volume"] / bucket["latestOi"]) if bucket["latestOi"] else None
+        bucket["bias"] = sector_open_interest_bias(bucket["changeOi"], change_percent)
+        bucket["topStocks"] = top_stocks
+        bucket["topMovingStocks"] = sector_stock_movers.get(bucket["sector"], [])
+        bucket["summary"] = summarize_sector_open_interest_row(bucket)
+        del bucket["stocks"]
+        rows.append(bucket)
+
+    rows = sorted(rows, key=lambda row: row.get("latestOi") or 0, reverse=True)
+    if not rows:
+        return {
+            "available": False,
+            "source": "NSE India Change in Open Interest + sectoral indices",
+            "generatedAt": iso_now(),
+            "timestamp": nse_text(oi_payload.get("timestamp")),
+            "summary": "No NSE OI symbols could be mapped to sectoral indices.",
+            "rows": [],
+            "totals": {},
+            "coverage": {
+                "sourceRows": len(source_rows),
+                "mappedStocks": mapped_count,
+                "unmappedStocks": unmapped_count,
+            },
+        }
+
+    total_latest = sum(row["latestOi"] for row in rows)
+    total_previous = sum(row["previousOi"] for row in rows)
+    total_change = sum(row["changeOi"] for row in rows)
+    total_volume = sum(row["volume"] for row in rows)
+    top_build_up = max(rows, key=lambda row: row.get("changePercent") if is_finite(row.get("changePercent")) else -999)
+    highest_oi = rows[0]
+    summary = (
+        f"Sector OI maps {mapped_count} F&O stocks from NSE Change in OI into {len(rows)} sectoral buckets. "
+        f"Highest OI: {highest_oi['sector']}; strongest OI build-up: {top_build_up['sector']}."
+    )
+    return {
+        "available": True,
+        "source": "NSE India Change in Open Interest + sectoral indices",
+        "generatedAt": iso_now(),
+        "timestamp": nse_text(oi_payload.get("timestamp")),
+        "summary": summary,
+        "rows": rows[:14],
+        "totals": {
+            "latestOi": total_latest,
+            "previousOi": total_previous,
+            "changeOi": total_change,
+            "changePercent": round_or_none(total_change / total_previous * 100) if total_previous else None,
+            "volume": total_volume,
+        },
+        "highestOi": highest_oi,
+        "topBuildUp": top_build_up,
+        "stockMoversBySector": sector_stock_movers,
+        "coverage": {
+            "sourceRows": len(source_rows),
+            "mappedStocks": mapped_count,
+            "unmappedStocks": unmapped_count,
+            "sectorIndices": len((sector_map or {}).get("sectors") or {}),
+        },
+        "note": "A symbol is mapped to the first matching NSE sectoral index in the configured priority list, so overlapping sector indices are not double-counted.",
+    }
+
+
+def sector_open_interest_bias(change_oi, change_percent):
+    if change_oi > 0 and is_finite(change_percent) and change_percent >= 5:
+        return "Strong OI build-up"
+    if change_oi > 0:
+        return "OI build-up"
+    if change_oi < 0 and is_finite(change_percent) and change_percent <= -5:
+        return "Strong OI unwinding"
+    if change_oi < 0:
+        return "OI unwinding"
+    return "OI stable"
+
+
+def summarize_sector_open_interest_row(row):
+    top_symbols = ", ".join(stock["symbol"] for stock in row.get("topStocks") or [] if stock.get("symbol"))
+    change_text = (
+        f"{row['changePercent']:+.2f}%"
+        if is_finite(row.get("changePercent"))
+        else "n/a"
+    )
+    return (
+        f"{row.get('sector')} has {row.get('stockCount', 0)} mapped F&O stocks, "
+        f"OI change {change_text}; top OI names: {top_symbols or 'n/a'}."
+    )
 
 
 def get_moneycontrol_sector_snapshot():
@@ -1095,8 +1859,8 @@ def build_moneycontrol_sector_snapshot_from_payload(payload):
         "url": MONEYCONTROL_SECTOR_URL,
         "generatedAt": iso_now(),
         "sectors": sectors,
-        "topPerforming": sorted_by_move[:8],
-        "underPerforming": sorted_by_weakness[:8],
+        "topPerforming": sorted_by_move[:5],
+        "underPerforming": sorted_by_weakness[:3],
         "sectorIndices": sector_indices[:16],
         "breadth": breadth,
         "note": "Sector classification, trend, market-cap move, advance/decline, PE, and earnings YoY are parsed from Moneycontrol sector analysis.",
@@ -1311,31 +2075,29 @@ def sector_rank(match, sectors):
 def build_market_monitor():
     nse_snapshot = safe_nse_market_snapshot()
     moneycontrol_sectors = safe_moneycontrol_sector_snapshot()
-    breakout_universe = market_activity_universe()
+    sector_open_interest = safe_sector_open_interest()
+    moneycontrol_sectors = attach_sector_top_stocks(
+        moneycontrol_sectors,
+        sector_open_interest.get("stockMoversBySector") or {},
+    )
+    moneycontrol_sectors = {
+        **moneycontrol_sectors,
+        "sectorOpenInterest": sector_open_interest,
+    }
+    breakout_universe = market_activity_universe(nse_snapshot)
+    usd_inr = safe_usd_inr_snapshot()
     commodity_results = settle_map(COMMODITIES, get_commodity_snapshot, concurrency=3)
-    scan_results = settle_map(breakout_universe, scan_watchlist_stock, concurrency=4)
+    scan_results = settle_map(breakout_universe, scan_watchlist_stock, concurrency=6)
     activity_results = settle_map(market_activity_universe(), scan_high_activity_stock, concurrency=4)
     catalyst_results = settle_map(ORDER_CATALYST_WATCHLIST, scan_order_catalyst_stock, concurrency=2)
-    commodity_snapshots = [value for ok, value in commodity_results if ok]
+    commodity_snapshots = [
+        commodity_with_inr(value, usd_inr)
+        for ok, value in commodity_results
+        if ok
+    ]
     scanned_stocks = [value for ok, value in scan_results if ok]
     activity_stocks = [value for ok, value in activity_results if ok]
-    candidates = sorted(
-        [
-            stock for stock in scanned_stocks
-            if (
-                stock["nearAvailableHigh"]
-                or stock["near52WeekHigh"]
-                or stock["breakout"]
-                or stock["breakoutWatch"]
-                or stock["narrowRange4Breakout"]
-                or stock["narrowRange7Breakout"]
-                or stock["narrowRange4Watch"]
-                or stock["narrowRange7Watch"]
-            )
-        ],
-        key=lambda item: item["score"],
-        reverse=True,
-    )[:18]
+    candidates = primary_opportunity_candidates(scanned_stocks)
     high_volume_candidates = sorted(
         [stock for stock in activity_stocks if is_high_volume_candidate(stock)],
         key=lambda item: item["score"],
@@ -1351,10 +2113,11 @@ def build_market_monitor():
     return {
         "generatedAt": iso_now(),
         "source": "NSE India public market APIs, Moneycontrol sector analysis, Yahoo Finance public endpoints, and headline scan",
-        "note": "NSE snapshot uses public NSE website endpoints; sector analysis uses Moneycontrol's sector-analysis page. 52-week and 2-year scan highs use the recent daily history returned by the provider. NR4/NR7 breakout means price is breaking above a tight prior 4-day or 7-day range near the 52-week high. Confirm liquidity, headlines, and levels on your broker or exchange feed before acting.",
+        "note": "NSE snapshot uses public NSE website endpoints; sector analysis uses Moneycontrol's sector-analysis page, and sector-wise OI maps NSE Change in OI symbols into NSE sectoral indices. 52-week and 2-year scan highs use the recent daily history returned by the provider. NR4/NR7 breakout means price is breaking above a tight prior 4-day or 7-day range near the 52-week high. Confirm liquidity, headlines, and levels on your broker or exchange feed before acting.",
         "nseSnapshot": nse_snapshot,
         "moneycontrolSectorAnalysis": moneycontrol_sectors,
         "commodities": commodity_snapshots,
+        "usdInr": usd_inr,
         "breakoutCandidates": candidates,
         "highVolumeCandidates": high_volume_candidates,
         "orderCatalysts": order_catalysts,
@@ -1365,8 +2128,162 @@ def build_market_monitor():
     }
 
 
-def market_activity_universe():
-    return merge_watchlists(BREAKOUT_WATCHLIST, HIGH_ACTIVITY_WATCHLIST, ORDER_CATALYST_WATCHLIST)
+def safe_usd_inr_snapshot():
+    try:
+        return get_usd_inr_snapshot()
+    except Exception as error:
+        return {
+            "available": False,
+            "symbol": "USDINR=X",
+            "price": None,
+            "change": None,
+            "changePercent": None,
+            "generatedAt": iso_now(),
+            "error": str(error),
+        }
+
+
+def get_usd_inr_snapshot():
+    chart = get_chart_range("USDINR=X", "1mo", "1d")
+    candles = chart["candles"]
+    latest = candles[-1]
+    previous = candles[-2] if len(candles) > 1 else latest
+    change = latest["close"] - previous["close"]
+    return {
+        "available": True,
+        "symbol": "USDINR=X",
+        "price": round2(latest["close"]),
+        "change": round2(change),
+        "changePercent": round2(safe_divide(change, previous["close"]) * 100),
+        "lastDate": latest.get("date"),
+        "generatedAt": iso_now(),
+    }
+
+
+def commodity_with_inr(commodity, usd_inr):
+    rate = usd_inr.get("price") if usd_inr and usd_inr.get("available") else None
+    if not is_finite(rate) or not is_finite(commodity.get("price")):
+        return commodity
+    return {
+        **commodity,
+        "usdInr": rate,
+        "inrPrice": round2(commodity["price"] * rate),
+    }
+
+
+def attach_sector_top_stocks(snapshot, stock_movers_by_sector):
+    if not snapshot.get("available"):
+        return snapshot
+
+    sectors = [
+        attach_moneycontrol_sector_top_stocks(row, stock_movers_by_sector)
+        for row in snapshot.get("sectors") or []
+    ]
+    by_sector = {row.get("sector"): row for row in sectors}
+
+    def replace_rows(rows):
+        return [
+            by_sector.get(row.get("sector"), attach_moneycontrol_sector_top_stocks(row, stock_movers_by_sector))
+            for row in rows or []
+        ]
+
+    return {
+        **snapshot,
+        "sectors": sectors,
+        "topPerforming": replace_rows(snapshot.get("topPerforming"))[:5],
+        "underPerforming": replace_rows(snapshot.get("underPerforming"))[:3],
+    }
+
+
+def attach_moneycontrol_sector_top_stocks(row, stock_movers_by_sector):
+    nse_sector = nse_sector_for_moneycontrol(row.get("sector"))
+    top_stocks = stock_movers_by_sector.get(nse_sector, []) if nse_sector else []
+    return {
+        **row,
+        "nseSector": nse_sector or "",
+        "topStocks": top_stocks[:5],
+    }
+
+
+def nse_sector_for_moneycontrol(sector_name):
+    if not sector_name:
+        return ""
+    mapped = MONEYCONTROL_NSE_SECTOR_MAP.get(sector_name)
+    if mapped:
+        return mapped
+    key = sector_match_key(sector_name)
+    for moneycontrol_name, nse_sector in MONEYCONTROL_NSE_SECTOR_MAP.items():
+        map_key = sector_match_key(moneycontrol_name)
+        if key == map_key or (key and (key in map_key or map_key in key)):
+            return nse_sector
+    return ""
+
+
+def primary_opportunity_candidates(scanned_stocks):
+    qualifying = [
+        stock for stock in scanned_stocks
+        if (
+            stock["nearAvailableHigh"]
+            or stock["near52WeekHigh"]
+            or stock["breakout"]
+            or stock["breakoutWatch"]
+            or stock["narrowRange4Breakout"]
+            or stock["narrowRange7Breakout"]
+            or stock["narrowRange4Watch"]
+            or stock["narrowRange7Watch"]
+            or stock["reversalWatch"]
+            or stock["bullishReversal"]
+            or stock["trendReversal"]
+        )
+    ]
+    sorted_qualifying = sorted(qualifying, key=lambda item: item["score"], reverse=True)
+    if len(sorted_qualifying) >= 50:
+        return sorted_qualifying[:50]
+
+    selected_symbols = {stock["symbol"] for stock in sorted_qualifying}
+    fillers = [
+        stock for stock in sorted(scanned_stocks, key=lambda item: item["score"], reverse=True)
+        if stock["symbol"] not in selected_symbols
+    ]
+    return [*sorted_qualifying, *fillers][:50]
+
+
+def market_activity_universe(nse_snapshot=None):
+    return merge_watchlists(
+        BREAKOUT_WATCHLIST,
+        HIGH_ACTIVITY_WATCHLIST,
+        ORDER_CATALYST_WATCHLIST,
+        nse_snapshot_watchlist(nse_snapshot),
+    )
+
+
+def nse_snapshot_watchlist(nse_snapshot):
+    if not nse_snapshot or not nse_snapshot.get("available"):
+        return []
+    rows = []
+    for key, label in (
+        ("topGainers", "Top gainer"),
+        ("topLosers", "Top loser"),
+        ("mostActive", "Most active"),
+        ("weekHighs", "52W high"),
+    ):
+        for item in nse_snapshot.get(key) or []:
+            symbol = nse_text(item.get("symbol")).upper()
+            if symbol:
+                rows.append({
+                    "symbol": f"{symbol}.NS",
+                    "name": item.get("name") or symbol,
+                    "tags": [label, "NSE live"],
+                })
+    for item in ((nse_snapshot.get("priceBands") or {}).get("rows") or []):
+        symbol = nse_text(item.get("symbol")).upper()
+        if symbol:
+            rows.append({
+                "symbol": f"{symbol}.NS",
+                "name": item.get("name") or symbol,
+                "tags": ["Price band", "NSE live"],
+            })
+    return rows
 
 
 def merge_watchlists(*watchlists):
@@ -1423,31 +2340,66 @@ def settle_map(items, mapper, concurrency=4):
 
 
 def scan_watchlist_stock(stock):
-    chart = get_chart_range(stock["symbol"], "2y", "1d")
+    chart = get_chart_range(stock["symbol"], "5y", "1d")
     candles = chart["candles"]
     if len(candles) < 80:
         raise RuntimeError(f"Not enough data for {stock['symbol']}")
 
     closes = [candle["close"] for candle in candles]
     highs = [candle["high"] for candle in candles]
+    lows = [candle["low"] for candle in candles]
     volumes = [candle.get("volume") or 0 for candle in candles]
     latest = candles[-1]
     previous = candles[-2]
     available_high = max(highs)
     high_index = highs.index(available_high)
     high_52 = max(candle["high"] for candle in candles[-252:])
+    recent_55_high = max(candle["high"] for candle in candles[-56:])
+    prior_5_high = max(candle["high"] for candle in candles[-6:-1])
     prior_20_high = max(candle["high"] for candle in candles[-21:-1])
     prior_55_high = max(candle["high"] for candle in candles[-56:-1])
+    prior_20_low = min(candle["low"] for candle in candles[-21:-1])
     atr_value = last(atr(candles[-80:], 14)) or latest["close"] * 0.02
+    sma20_values = sma(closes, 20)
+    sma50_values = sma(closes, 50)
+    rsi_values = rsi(closes, 14)
+    sma20_value = last(sma20_values)
+    sma50_value = last(sma50_values)
+    rsi_value = last(rsi_values)
+    sma20_slope = (
+        sma20_values[-1] - sma20_values[-6]
+        if len(sma20_values) >= 6 and is_finite(sma20_values[-1]) and is_finite(sma20_values[-6])
+        else None
+    )
     avg_volume_20 = last(sma(volumes, 20))
     volume_ratio = latest.get("volume", 0) / avg_volume_20 if avg_volume_20 else None
     pct_below_available_high = safe_divide(available_high - latest["close"], available_high) * 100
     pct_below_52_high = safe_divide(high_52 - latest["close"], high_52) * 100
+    pct_above_prior_20_low = safe_divide(latest["close"] - prior_20_low, prior_20_low) * 100
+    drawdown_from_recent_high = safe_divide(recent_55_high - latest["close"], recent_55_high) * 100
     breakout = latest["close"] > prior_55_high and previous["close"] <= prior_55_high
     breakout_watch = latest["close"] >= prior_55_high * 0.98 or latest["close"] >= prior_20_high * 0.99
     near_available_high = 0 <= pct_below_available_high <= 3
     near_52_week_high = 0 <= pct_below_52_high <= 3
     near_52_week_setup = 0 <= pct_below_52_high <= 5
+    bullish_reversal = (
+        drawdown_from_recent_high >= 5
+        and latest["close"] > prior_5_high
+        and previous["close"] <= prior_5_high
+        and latest["close"] > (latest.get("open") or latest["close"])
+    )
+    trend_reversal = (
+        is_finite(sma20_value)
+        and previous["close"] <= sma20_value
+        and latest["close"] > sma20_value
+        and (not is_finite(sma50_value) or latest["close"] >= sma50_value * 0.96)
+        and ((sma20_slope or 0) >= 0 or latest["close"] > previous["close"])
+    )
+    reversal_watch = (
+        0 <= pct_above_prior_20_low <= 8
+        and latest["close"] > previous["close"]
+        and (not is_finite(rsi_value) or rsi_value <= 48)
+    )
     narrow_range_4 = narrow_range_breakout(candles, 4, atr_value)
     narrow_range_7 = narrow_range_breakout(candles, 7, atr_value)
     narrow_range_4_breakout = near_52_week_setup and narrow_range_4["breakout"]
@@ -1464,6 +2416,9 @@ def scan_watchlist_stock(stock):
         + (30 if narrow_range_7_breakout else 0)
         + (10 if narrow_range_4_watch else 0)
         + (12 if narrow_range_7_watch else 0)
+        + (26 if bullish_reversal else 0)
+        + (22 if trend_reversal else 0)
+        + (14 if reversal_watch else 0)
         + (8 if volume_ratio and volume_ratio > 1.2 else 0)
         + clamp(momentum or 0, -10, 12),
         0,
@@ -1481,10 +2436,20 @@ def scan_watchlist_stock(stock):
         "high52Week": round2(high_52),
         "pctBelowAvailableHigh": round2(pct_below_available_high),
         "pctBelow52WeekHigh": round2(pct_below_52_high),
+        "pctAbovePrior20Low": round2(pct_above_prior_20_low),
+        "drawdownFromRecentHigh": round2(drawdown_from_recent_high),
+        "prior5High": round2(prior_5_high),
         "prior20High": round2(prior_20_high),
         "prior55High": round2(prior_55_high),
+        "prior20Low": round2(prior_20_low),
+        "sma20": round_or_none(sma20_value),
+        "sma50": round_or_none(sma50_value),
+        "rsi14": round_or_none(rsi_value),
         "breakout": breakout,
         "breakoutWatch": breakout_watch,
+        "bullishReversal": bullish_reversal,
+        "trendReversal": trend_reversal,
+        "reversalWatch": reversal_watch,
         "nearAvailableHigh": near_available_high,
         "near52WeekHigh": near_52_week_high,
         "near52WeekSetup": near_52_week_setup,
@@ -1507,6 +2472,9 @@ def scan_watchlist_stock(stock):
             "narrowRange7Breakout": narrow_range_7_breakout,
             "narrowRange4Watch": narrow_range_4_watch,
             "narrowRange7Watch": narrow_range_7_watch,
+            "bullishReversal": bullish_reversal,
+            "trendReversal": trend_reversal,
+            "reversalWatch": reversal_watch,
         }),
     }
 
@@ -1827,6 +2795,12 @@ def commodity_trend(closes):
 
 
 def describe_breakout_signal(data):
+    if data.get("bullishReversal"):
+        return "Bullish reversal confirmed"
+    if data.get("trendReversal"):
+        return "Trend reversal above SMA20"
+    if data.get("reversalWatch"):
+        return "Reversal watch near recent low"
     if data.get("narrowRange7Breakout"):
         return "52-week NR7 range breakout"
     if data.get("narrowRange4Breakout"):
@@ -1836,11 +2810,11 @@ def describe_breakout_signal(data):
     if data.get("narrowRange4Watch"):
         return "52-week NR4 breakout watch"
     if data["breakout"] and data["nearAvailableHigh"]:
-        return "Breakout near 2-year scan high"
+        return "Breakout near multi-year scan high"
     if data["breakout"]:
         return "Fresh breakout"
     if data["nearAvailableHigh"]:
-        return "Near 2-year scan high"
+        return "Near multi-year scan high"
     if data["near52WeekHigh"]:
         return "Near 52-week high"
     return "Close to breakout level"
@@ -2237,6 +3211,14 @@ def benchmark_name_for(benchmark_symbol):
 
 
 def get_chart_range(symbol, range_value="1y", interval="1d"):
+    return cached(
+        f"chart:{symbol}:{range_value}:{interval}",
+        lambda: fetch_chart_range(symbol, range_value, interval),
+        5 * 60,
+    )
+
+
+def fetch_chart_range(symbol, range_value="1y", interval="1d"):
     endpoint = (
         "https://query1.finance.yahoo.com/v8/finance/chart/"
         f"{quote(symbol)}?range={quote(range_value)}&interval={quote(interval)}&includePrePost=false&events=div%2Csplits"
@@ -2364,7 +3346,7 @@ def get_screener_fundamentals(symbol):
     return screener
 
 
-def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benchmark=None):
+def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benchmark=None, open_interest=None):
     closes = [item["close"] for item in candles]
     volumes = [item.get("volume") or 0 for item in candles]
     current = closes[-1]
@@ -2576,6 +3558,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
             "items": events,
         },
         "growthDrivers": growth_drivers,
+        "openInterest": open_interest or open_interest_unavailable(symbol),
         "researchLevels": research_levels,
         "series": series,
     }
@@ -5231,6 +6214,31 @@ def fetch_nse_json(path):
         if attempt < 2:
             time.sleep(0.4 * (attempt + 1))
     raise RuntimeError("NSE India is temporarily unavailable. Please retry in a moment.") from last_error
+
+
+def fetch_nse_json_with_session(path):
+    endpoint = path if str(path).startswith("http") else f"{NSE_BASE_URL}{path}"
+    cookie_jar = CookieJar()
+    opener = build_opener(HTTPSHandler(context=SSL_CONTEXT), HTTPCookieProcessor(cookie_jar))
+    last_error = None
+    for attempt in range(3):
+        try:
+            with opener.open(Request(NSE_BASE_URL, headers=NSE_HEADERS), timeout=20) as response:
+                response.read()
+            with opener.open(Request(endpoint, headers=NSE_HEADERS), timeout=20) as response:
+                text = response.read().decode("utf-8", errors="replace")
+            return json.loads(text)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"NSE India did not return JSON: {text[:80]}") from error
+        except HTTPError as error:
+            if error.code not in {401, 403, 429, 500, 502, 503, 504}:
+                raise RuntimeError(f"NSE India returned {error.code}.") from error
+            last_error = error
+        except (TimeoutError, URLError, OSError) as error:
+            last_error = error
+        if attempt < 2:
+            time.sleep(0.4 * (attempt + 1))
+    raise RuntimeError("NSE India option-chain endpoint is temporarily unavailable.") from last_error
 
 
 def fetch_text(endpoint, json_request=False, sec=False):

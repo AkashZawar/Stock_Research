@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -244,6 +244,114 @@ class MarketClockTests(SimpleTestCase):
         self.assertTrue(clock["nextOpenAt"].startswith("2026-05-29T03:45:00"))
 
 
+class OpenInterestTests(SimpleTestCase):
+    def test_build_open_interest_report_summarizes_expiry_horizons(self):
+        payload = {
+            "records": {
+                "timestamp": "13-May-2026 10:25:00",
+                "underlyingValue": 1000,
+                "expiryDates": ["14-May-2026", "28-May-2026", "25-Jun-2026"],
+                "data": [
+                    {
+                        "expiryDate": "14-May-2026",
+                        "strikePrice": 980,
+                        "CE": {"openInterest": 120, "changeinOpenInterest": 10, "totalTradedVolume": 50, "impliedVolatility": 20},
+                        "PE": {"openInterest": 240, "changeinOpenInterest": 30, "totalTradedVolume": 70, "impliedVolatility": 22},
+                    },
+                    {
+                        "expiryDate": "14-May-2026",
+                        "strikePrice": 1020,
+                        "CE": {"openInterest": 300, "changeinOpenInterest": 45, "totalTradedVolume": 90, "impliedVolatility": 19},
+                        "PE": {"openInterest": 100, "changeinOpenInterest": -5, "totalTradedVolume": 40, "impliedVolatility": 21},
+                    },
+                    {
+                        "expiryDate": "28-May-2026",
+                        "strikePrice": 1000,
+                        "CE": {"openInterest": 200, "changeinOpenInterest": 20, "totalTradedVolume": 60},
+                        "PE": {"openInterest": 220, "changeinOpenInterest": 35, "totalTradedVolume": 80},
+                    },
+                    {
+                        "expiryDate": "25-Jun-2026",
+                        "strikePrice": 1040,
+                        "CE": {"openInterest": 500, "changeinOpenInterest": 100, "totalTradedVolume": 120},
+                        "PE": {"openInterest": 150, "changeinOpenInterest": 15, "totalTradedVolume": 55},
+                    },
+                ],
+            },
+        }
+
+        report = services.build_open_interest_report("ABC", payload, today=date(2026, 5, 13))
+
+        self.assertTrue(report["available"])
+        self.assertEqual(report["periods"]["day"]["totalCallOi"], 420)
+        self.assertEqual(report["periods"]["day"]["totalPutOi"], 340)
+        self.assertEqual(report["periods"]["day"]["totalCallVolume"], 140)
+        self.assertEqual(report["periods"]["day"]["totalPutVolume"], 110)
+        self.assertEqual(report["periods"]["day"]["volumePcr"], 0.79)
+        self.assertEqual(report["periods"]["day"]["volumeBias"], "Call volume dominates")
+        self.assertIn("call positions are more active", report["periods"]["day"]["volumeSummary"])
+        self.assertEqual(report["periods"]["day"]["maxCallOiStrike"], 1020)
+        self.assertEqual(report["periods"]["month"]["totalCallOi"], 620)
+        self.assertEqual(report["periods"]["quarter"]["totalCallOi"], 1120)
+        self.assertEqual(report["periods"]["quarter"]["totalPutOi"], 710)
+        self.assertTrue(report["periods"]["quarter"]["callPutVolumeSplitAvailable"])
+        self.assertEqual(report["periods"]["day"]["rows"][0]["volumeBias"], "Call volume dominates")
+
+    def test_build_open_interest_report_accepts_nse_v3_expiry_shape(self):
+        payload = {
+            "records": {
+                "timestamp": "13-May-2026 15:30:00",
+                "underlyingValue": 1361.2,
+                "data": [
+                    {
+                        "strikePrice": 1360,
+                        "CE": {"expiryDate": "26-05-2026", "openInterest": 900, "changeinOpenInterest": 50, "totalTradedVolume": 80},
+                        "PE": {"expiryDate": "26-05-2026", "openInterest": 1200, "changeinOpenInterest": 70, "totalTradedVolume": 120},
+                    }
+                ],
+            },
+        }
+
+        report = services.build_open_interest_report("RELIANCE", payload, today=date(2026, 5, 13))
+
+        self.assertTrue(report["available"])
+        self.assertEqual(report["expiryDates"][0]["label"], "26-05-2026")
+        self.assertEqual(report["periods"]["day"]["totalCallVolume"], 80)
+        self.assertEqual(report["periods"]["day"]["totalPutVolume"], 120)
+        self.assertEqual(report["periods"]["day"]["volumePcr"], 1.5)
+        self.assertIn("put positions are more active", report["periods"]["day"]["volumeSummary"])
+
+    def test_oi_spurt_fallback_builds_day_aggregate_view(self):
+        services.clear_cache("nse-oi-spurts-underlyings")
+        payload = {
+            "timestamp": "13-May-2026 15:20:00",
+            "data": [
+                {
+                    "symbol": "RELIANCE",
+                    "latestOI": 410741,
+                    "prevOI": 400145,
+                    "changeInOI": 10596,
+                    "avgInOI": 2.65,
+                    "volume": 211592,
+                    "optValue": 136702549855,
+                    "underlyingValue": 1361,
+                }
+            ],
+        }
+
+        with patch("market.services.fetch_nse_json", return_value=payload):
+            report = services.get_oi_spurt_open_interest("RELIANCE")
+
+        self.assertTrue(report["available"])
+        self.assertTrue(report["periods"]["day"]["aggregateOnly"])
+        self.assertEqual(report["periods"]["day"]["totalOi"], 410741)
+        self.assertEqual(report["periods"]["day"]["changeOi"], 10596)
+        self.assertEqual(report["periods"]["day"]["volume"], 211592)
+        self.assertFalse(report["periods"]["day"]["callPutVolumeSplitAvailable"])
+        self.assertIn("not call/put split", report["periods"]["day"]["volumeSummary"])
+        self.assertFalse(report["periods"]["week"]["available"])
+
+
 class MarketSnapshotTests(SimpleTestCase):
     def test_build_nse_market_snapshot_from_payloads_normalizes_exchange_data(self):
         payloads = {
@@ -345,6 +453,77 @@ class MarketSnapshotTests(SimpleTestCase):
         self.assertEqual(snapshot["breadth"]["stocks"], 561)
         self.assertEqual(match["sector"], "Software & IT Services")
         self.assertEqual(snapshot["sectorIndices"][0]["name"], "NIFTY IT")
+
+    def test_moneycontrol_sector_snapshot_filters_movers_and_attaches_top_stocks(self):
+        payload = {
+            "allSectors": [
+                {
+                    "sector": f"Sector {index}",
+                    "trend": "Neutral",
+                    "stockCnt": 10,
+                    "industryCnt": 2,
+                    "advance": 5,
+                    "decline": 5,
+                    "mCapPerChange": index - 5,
+                    "slug": f"sector-{index}",
+                }
+                for index in range(9)
+            ] + [
+                {
+                    "sector": "Software & IT Services",
+                    "trend": "Bullish",
+                    "stockCnt": 20,
+                    "industryCnt": 3,
+                    "advance": 14,
+                    "decline": 6,
+                    "mCapPerChange": 8,
+                    "slug": "software-it-services",
+                }
+            ],
+            "sectorIndices": [],
+        }
+
+        snapshot = services.build_moneycontrol_sector_snapshot_from_payload(payload)
+        enriched = services.attach_sector_top_stocks(snapshot, {
+            "NIFTY IT": [{"symbol": "TCS", "changePercent": 2.5, "price": 3900}],
+        })
+        software = next(row for row in enriched["topPerforming"] if row["sector"] == "Software & IT Services")
+
+        self.assertEqual(len(snapshot["topPerforming"]), 5)
+        self.assertEqual(len(snapshot["underPerforming"]), 3)
+        self.assertEqual(software["nseSector"], "NIFTY IT")
+        self.assertEqual(software["topStocks"][0]["symbol"], "TCS")
+
+    def test_sector_open_interest_aggregates_oi_by_nse_sector(self):
+        oi_payload = {
+            "timestamp": "14-May-2026 11:20:00",
+            "data": [
+                {"symbol": "TCS", "latestOI": 1000, "prevOI": 900, "changeInOI": 100, "volume": 300},
+                {"symbol": "INFY", "latestOI": 800, "prevOI": 1000, "changeInOI": -200, "volume": 250},
+                {"symbol": "RELIANCE", "latestOI": 1200, "prevOI": 1100, "changeInOI": 100, "volume": 400},
+                {"symbol": "UNMAPPED", "latestOI": 100, "prevOI": 80, "changeInOI": 20, "volume": 10},
+            ],
+        }
+        sector_map = {
+            "symbols": {
+                "TCS": "NIFTY IT",
+                "INFY": "NIFTY IT",
+                "RELIANCE": "NIFTY OIL & GAS",
+            },
+            "sectors": {"NIFTY IT": 2, "NIFTY OIL & GAS": 1},
+        }
+
+        report = services.build_sector_open_interest_from_payloads(oi_payload, sector_map)
+        by_sector = {row["sector"]: row for row in report["rows"]}
+
+        self.assertTrue(report["available"])
+        self.assertEqual(report["coverage"]["mappedStocks"], 3)
+        self.assertEqual(report["coverage"]["unmappedStocks"], 1)
+        self.assertEqual(by_sector["NIFTY IT"]["latestOi"], 1800)
+        self.assertEqual(by_sector["NIFTY IT"]["changeOi"], -100)
+        self.assertEqual(by_sector["NIFTY IT"]["volume"], 550)
+        self.assertEqual(by_sector["NIFTY OIL & GAS"]["topStocks"][0]["symbol"], "RELIANCE")
+        self.assertEqual(report["totals"]["latestOi"], 3000)
 
 
 class AssetAnalysisTests(SimpleTestCase):

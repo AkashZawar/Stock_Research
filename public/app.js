@@ -22,6 +22,8 @@ const refreshMonitor = document.querySelector("#refreshMonitor");
 const monitorLoading = document.querySelector("#monitorLoading");
 const monitorError = document.querySelector("#monitorError");
 const monitorContent = document.querySelector("#monitorContent");
+const monitorPaneButtons = Array.from(document.querySelectorAll("[data-monitor-pane-button]"));
+const monitorSections = Array.from(document.querySelectorAll("[data-monitor-section]"));
 const refreshSearchLogs = document.querySelector("#refreshSearchLogs");
 const searchLogLoading = document.querySelector("#searchLogLoading");
 const searchLogError = document.querySelector("#searchLogError");
@@ -39,6 +41,13 @@ const marketClockEl = document.querySelector("#marketClock");
 const marketClockTime = document.querySelector("#marketClockTime");
 const marketClockStatus = document.querySelector("#marketClockStatus");
 const marketClockDetail = document.querySelector("#marketClockDetail");
+const openInterestPanel = document.querySelector("#openInterestPanel");
+const openInterestSource = document.querySelector("#openInterestSource");
+const openInterestSummary = document.querySelector("#openInterestSummary");
+const openInterestChart = document.querySelector("#openInterestChart");
+const openInterestMetrics = document.querySelector("#openInterestMetrics");
+const openInterestRows = document.querySelector("#openInterestRows");
+const openInterestTabs = Array.from(document.querySelectorAll("[data-oi-period]"));
 const assetContexts = {
   etf: {
     tab: etfTab,
@@ -71,6 +80,8 @@ let suggestionDialogEl = null;
 let chartDialogEl = null;
 let expandedChartCanvas = null;
 let marketClockTimer = null;
+let selectedOpenInterestPeriod = "day";
+let selectedMonitorPane = "primary";
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -104,11 +115,20 @@ searchLogTab.addEventListener("click", () => {
   }
 });
 refreshMonitor.addEventListener("click", () => loadMarketMonitor(true));
+for (const button of monitorPaneButtons) {
+  button.addEventListener("click", () => setMonitorPane(button.dataset.monitorPaneButton || "primary"));
+}
 refreshSearchLogs.addEventListener("click", loadSearchLogs);
 useCurrentReport.addEventListener("click", prefillTradeFromReport);
 chartSupportToggle.addEventListener("change", redrawChart);
 chartResistanceToggle.addEventListener("change", redrawChart);
 expandChartButton.addEventListener("click", openExpandedChart);
+for (const tab of openInterestTabs) {
+  tab.addEventListener("click", () => {
+    selectedOpenInterestPeriod = tab.dataset.oiPeriod || "day";
+    renderOpenInterest(latestReport?.openInterest, latestReport?.currency);
+  });
+}
 canvas.addEventListener("click", confirmTradingViewRedirect);
 canvas.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") {
@@ -439,6 +459,7 @@ async function loadMarketMonitor(forceRefresh) {
     }
     latestMonitor = payload;
     renderMarketMonitor(payload);
+    setMonitorPane(selectedMonitorPane);
     monitorContent.classList.remove("is-hidden");
   } catch (error) {
     monitorError.textContent = error.message;
@@ -648,6 +669,7 @@ function renderReport(report) {
   renderOwnershipSnapshot(report.growthDrivers, report.fundamentals.metrics);
   renderLevels(report.researchLevels, currency, report.technical.levels);
   renderLatestCandle(report.technical.latestCandle, currency);
+  renderOpenInterest(report.openInterest, currency);
   renderTechnical(report.technical, currency);
   renderFundamentals(report.fundamentals.metrics, report.fundamentals.signals, currency);
   renderGrowthDrivers(report.growthDrivers, currency);
@@ -830,6 +852,225 @@ function renderLatestCandle(candle, currency) {
         <span>Invalidation <strong>${formatMoney(candle.invalidationLevel, currency)}</strong></span>
         <span>Body / wicks <strong>${formatPercentValue(candle.bodyPercent)} body · U ${formatPercentValue(candle.upperWickPercent)} · L ${formatPercentValue(candle.lowerWickPercent)}</strong></span>
       </div>
+    </article>
+  `;
+}
+
+function renderOpenInterest(openInterest, currency) {
+  if (!openInterestPanel || !openInterestSummary || !openInterestMetrics || !openInterestRows) {
+    return;
+  }
+
+  const periods = openInterest?.periods || {};
+  let activeKey = selectedOpenInterestPeriod;
+  let activePeriod = periods[activeKey]?.available ? periods[activeKey] : null;
+  if (!activePeriod) {
+    const fallback = Object.entries(periods).find(([, period]) => period?.available);
+    if (fallback) {
+      activeKey = fallback[0];
+      activePeriod = fallback[1];
+    }
+  }
+
+  for (const tab of openInterestTabs) {
+    const key = tab.dataset.oiPeriod;
+    tab.classList.toggle("is-active", key === (activePeriod ? activeKey : "day"));
+    tab.disabled = !openInterest?.available || !periods[key]?.available;
+  }
+
+  if (!openInterest?.available || !activePeriod) {
+    openInterestPanel.classList.add("is-unavailable");
+    if (openInterestSource) {
+      openInterestSource.textContent = openInterest?.source || "NSE India option-chain equities";
+    }
+    openInterestSummary.textContent = openInterest?.summary || "Open interest is not available for this stock.";
+    if (openInterestChart) {
+      openInterestChart.innerHTML = "";
+    }
+    openInterestMetrics.innerHTML = "";
+    openInterestRows.innerHTML = `
+      <tr>
+        <td colspan="5">No option-chain OI data was returned for this symbol.</td>
+      </tr>
+    `;
+    return;
+  }
+
+  openInterestPanel.classList.remove("is-unavailable");
+  if (openInterestSource) {
+    const expiryText = (activePeriod.expiryDates || []).map((item) => item.label).join(", ");
+    const timestamp = openInterest.timestamp ? ` · ${escapeHtml(openInterest.timestamp)}` : "";
+    openInterestSource.textContent = `${openInterest.source || "NSE option chain"}${timestamp}${expiryText ? ` · Expiry ${expiryText}` : ""}`;
+  }
+  openInterestSummary.textContent = activePeriod.summary || openInterest.summary || "";
+
+  if (activePeriod.aggregateOnly) {
+    if (openInterestChart) {
+      openInterestChart.innerHTML = renderAggregateOiChart(activePeriod);
+    }
+    openInterestMetrics.innerHTML = [
+      oiMetric("Latest OI", formatLarge(activePeriod.totalOi, ""), "Contracts", activePeriod.changeOi),
+      oiMetric("Previous OI", formatLarge(activePeriod.previousOi, ""), "Previous trade day", 0),
+      oiMetric("Change in OI", formatSignedLarge(activePeriod.changeOi), `${formatPercentValue(activePeriod.changePercent)} change`, activePeriod.changeOi),
+      oiMetric("Volume", formatLarge(activePeriod.volume, ""), "Contracts traded", activePeriod.volume),
+      oiMetric("Underlying", formatMoney(activePeriod.underlyingValue, currency), activePeriod.bias || "OI bias", activePeriod.changeOi),
+      oiMetric("Options value", formatLarge(activePeriod.optionsValue, "INR"), "NSE turnover field", activePeriod.changeOi)
+    ].join("");
+    openInterestRows.innerHTML = `
+      <tr>
+        <td>Aggregate</td>
+        <td colspan="4">
+          ${escapeHtml(activePeriod.bias || "OI view")}
+          <span>Latest OI ${formatLarge(activePeriod.totalOi, "")} · Previous ${formatLarge(activePeriod.previousOi, "")} · Change ${formatSignedLarge(activePeriod.changeOi)}</span>
+          <span>Full call/put strike OI was not returned by NSE for this request; Week, Month, and Quarter views need full option-chain rows.</span>
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  if (openInterestChart) {
+    openInterestChart.innerHTML = renderOiChart(activePeriod, currency);
+  }
+
+  const netChange = (activePeriod.totalPutChangeOi || 0) - (activePeriod.totalCallChangeOi || 0);
+  const pcrTone = Number.isFinite(activePeriod.pcr) ? activePeriod.pcr - 1 : 0;
+  openInterestMetrics.innerHTML = [
+    oiMetric("Call OI", formatLarge(activePeriod.totalCallOi, ""), `Chg ${formatSignedLarge(activePeriod.totalCallChangeOi)}`, activePeriod.totalCallChangeOi),
+    oiMetric("Put OI", formatLarge(activePeriod.totalPutOi, ""), `Chg ${formatSignedLarge(activePeriod.totalPutChangeOi)}`, activePeriod.totalPutChangeOi),
+    oiMetric("PCR", formatNumber(activePeriod.pcr), activePeriod.bias || "OI bias", pcrTone),
+    oiMetric("Call volume", formatLarge(activePeriod.totalCallVolume, ""), activePeriod.volumeBias || "Volume split", activePeriod.totalCallVolume - activePeriod.totalPutVolume),
+    oiMetric("Put volume", formatLarge(activePeriod.totalPutVolume, ""), `Volume PCR ${formatNumber(activePeriod.volumePcr)}`, activePeriod.totalPutVolume - activePeriod.totalCallVolume),
+    oiMetric("Max Call OI", formatMoney(activePeriod.maxCallOiStrike, currency), "Likely resistance", -1),
+    oiMetric("Max Put OI", formatMoney(activePeriod.maxPutOiStrike, currency), "Likely support", 1),
+    oiMetric("Max Pain", formatMoney(activePeriod.maxPain, currency), `Net chg ${formatSignedLarge(netChange)}`, netChange)
+  ].join("");
+
+  const rows = activePeriod.rows || [];
+  openInterestRows.innerHTML = rows.length ? rows.map((row) => `
+    <tr>
+      <td>${formatMoney(row.strike, currency)}<span>Total ${formatLarge(row.totalOi, "")}</span></td>
+      <td>${formatLarge(row.callOi, "")}<span class="${changeClass(row.callChangeOi)}">${formatSignedLarge(row.callChangeOi)}</span><span>Vol ${formatLarge(row.callVolume, "")}</span></td>
+      <td>${formatLarge(row.putOi, "")}<span class="${changeClass(row.putChangeOi)}">${formatSignedLarge(row.putChangeOi)}</span><span>Vol ${formatLarge(row.putVolume, "")}</span></td>
+      <td>${formatNumber(row.pcrAtStrike)}<span>Vol PCR ${formatNumber(row.volumePcrAtStrike)}</span><span>Net ${formatSignedLarge(row.netChangeOi)}</span></td>
+      <td>${escapeHtml(row.bias || "Balanced")}<span>${escapeHtml(row.volumeBias || "")}</span></td>
+    </tr>
+  `).join("") : `
+    <tr>
+      <td colspan="5">No strike-level OI rows were available for this period.</td>
+    </tr>
+  `;
+}
+
+function renderAggregateOiChart(period) {
+  const previous = Math.max(0, period.previousOi || 0);
+  const latest = Math.max(0, period.totalOi || 0);
+  const change = Math.max(0, Math.abs(period.changeOi || 0));
+  const maxValue = Math.max(previous, latest, change, 1);
+  return `
+    <section class="oi-chart-card">
+      <div class="oi-chart-head">
+        <strong>Aggregate OI movement</strong>
+        <span>${escapeHtml(period.volumeSummary || "Call/put volume split unavailable.")}</span>
+      </div>
+      ${oiSingleBar("Previous OI", previous, maxValue, "neutral")}
+      ${oiSingleBar("Latest OI", latest, maxValue, period.changeOi >= 0 ? "put" : "call")}
+      ${oiSingleBar("OI change", change, maxValue, period.changeOi >= 0 ? "put" : "call", formatSignedLarge(period.changeOi))}
+    </section>
+  `;
+}
+
+function renderOiChart(period, currency) {
+  const oiTotal = Math.max((period.totalCallOi || 0) + (period.totalPutOi || 0), 1);
+  const volumeTotal = Math.max((period.totalCallVolume || 0) + (period.totalPutVolume || 0), 1);
+  const rows = (period.rows || []).slice(0, 10);
+  const maxStrikeValue = Math.max(...rows.map((row) => Math.max(row.callOi || 0, row.putOi || 0, row.callVolume || 0, row.putVolume || 0)), 1);
+
+  return `
+    <section class="oi-chart-card">
+      <div class="oi-chart-head">
+        <strong>Call vs put positioning</strong>
+        <span>${escapeHtml(period.volumeSummary || "")}</span>
+      </div>
+      ${oiSplitBar("Open interest", period.totalCallOi || 0, period.totalPutOi || 0, oiTotal)}
+      ${oiSplitBar("Traded volume", period.totalCallVolume || 0, period.totalPutVolume || 0, volumeTotal)}
+    </section>
+    <section class="oi-chart-card">
+      <div class="oi-chart-head">
+        <strong>Strike OI and volume</strong>
+        <span>Top strikes by open interest</span>
+      </div>
+      <div class="oi-strike-chart">
+        ${rows.map((row) => `
+          <article class="oi-strike-row">
+            <strong>${formatMoney(row.strike, currency)}</strong>
+            <div>
+              ${oiDualMiniBar("OI", row.callOi || 0, row.putOi || 0, maxStrikeValue)}
+              ${oiDualMiniBar("Vol", row.callVolume || 0, row.putVolume || 0, maxStrikeValue)}
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function oiSplitBar(label, callValue, putValue, total) {
+  const callPercent = clampPercent(callValue / total * 100);
+  const putPercent = clampPercent(putValue / total * 100);
+  return `
+    <div class="oi-split-row">
+      <div>
+        <strong>${escapeHtml(label)}</strong>
+        <span>Calls ${formatLarge(callValue, "")} · Puts ${formatLarge(putValue, "")}</span>
+      </div>
+      <div class="oi-split-bar" aria-label="${escapeHtml(label)} call put split">
+        <span class="oi-bar oi-call" style="width:${callPercent}%"></span>
+        <span class="oi-bar oi-put" style="width:${putPercent}%"></span>
+      </div>
+    </div>
+  `;
+}
+
+function oiSingleBar(label, value, maxValue, tone, displayValue = formatLarge(value, "")) {
+  return `
+    <div class="oi-single-row">
+      <span>${escapeHtml(label)}</span>
+      <div class="oi-single-track">
+        <i class="oi-bar oi-${tone}" style="width:${clampPercent(value / maxValue * 100)}%"></i>
+      </div>
+      <strong>${escapeHtml(displayValue)}</strong>
+    </div>
+  `;
+}
+
+function oiDualMiniBar(label, callValue, putValue, maxValue) {
+  return `
+    <div class="oi-mini-row">
+      <span>${escapeHtml(label)}</span>
+      <div class="oi-mini-bars">
+        <i class="oi-bar oi-call" style="width:${clampPercent(callValue / maxValue * 100)}%"></i>
+        <i class="oi-bar oi-put" style="width:${clampPercent(putValue / maxValue * 100)}%"></i>
+      </div>
+      <small>C ${formatLarge(callValue, "")} / P ${formatLarge(putValue, "")}</small>
+    </div>
+  `;
+}
+
+function clampPercent(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, value));
+}
+
+function oiMetric(label, value, note, toneValue) {
+  const toneClass = changeClass(toneValue);
+  return `
+    <article>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small class="${toneClass}">${escapeHtml(note || "")}</small>
     </article>
   `;
 }
@@ -1085,11 +1326,24 @@ function renderMarketMonitor(data) {
   document.querySelector("#catalystCount").textContent = `${(data.orderCatalysts || []).length} found`;
   renderNseSnapshot(data.nseSnapshot || {});
   renderMoneycontrolSectorAnalysis(data.moneycontrolSectorAnalysis || {});
-  renderCommodities(data.commodities || []);
+  renderCommodities(data.commodities || [], data.usdInr || {});
   renderBreakoutRows(data.breakoutCandidates || []);
   renderHighVolumeRows(data.highVolumeCandidates || []);
   renderOrderCatalystRows(data.orderCatalysts || []);
+  annotateMonitorTableCells();
   setupMonitorCollapsibles();
+}
+
+function setMonitorPane(pane) {
+  selectedMonitorPane = pane === "details" ? "details" : "primary";
+  for (const button of monitorPaneButtons) {
+    const isActive = button.dataset.monitorPaneButton === selectedMonitorPane;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+  }
+  for (const section of monitorSections) {
+    section.classList.toggle("is-hidden", section.dataset.monitorSection !== selectedMonitorPane);
+  }
 }
 
 function setupMonitorCollapsibles() {
@@ -1105,21 +1359,40 @@ function setupMonitorCollapsibles() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "collapse-toggle";
-    button.setAttribute("aria-expanded", "true");
-    button.setAttribute("aria-label", "Collapse section");
-    button.title = "Collapse section";
-    button.textContent = "−";
+    setMonitorPanelCollapsed(panel, button, true);
     button.addEventListener("click", () => {
-      const collapsed = panel.classList.toggle("is-collapsed");
-      button.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      button.setAttribute("aria-label", collapsed ? "Expand section" : "Collapse section");
-      button.title = collapsed ? "Expand section" : "Collapse section";
-      button.textContent = collapsed ? "+" : "−";
+      setMonitorPanelCollapsed(panel, button, !panel.classList.contains("is-collapsed"));
     });
 
     header.appendChild(button);
     panel.dataset.collapsibleReady = "1";
     panel.dataset.collapsibleIndex = String(index);
+  });
+}
+
+function setMonitorPanelCollapsed(panel, button, collapsed) {
+  panel.classList.toggle("is-collapsed", collapsed);
+  button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  button.setAttribute("aria-label", collapsed ? "Expand section" : "Collapse section");
+  button.title = collapsed ? "Expand section" : "Collapse section";
+  button.textContent = collapsed ? "+" : "−";
+}
+
+function annotateMonitorTableCells() {
+  document.querySelectorAll("#monitorContent .monitor-table").forEach((table) => {
+    const headers = Array.from(table.querySelectorAll("thead th")).map((header) => header.textContent.trim());
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      const cells = Array.from(row.querySelectorAll("td"));
+      if (cells.length === 1 && cells[0].hasAttribute("colspan")) {
+        cells[0].dataset.fullRow = "true";
+        cells[0].removeAttribute("data-label");
+        return;
+      }
+      cells.forEach((cell, index) => {
+        cell.dataset.label = headers[index] || "";
+        delete cell.dataset.fullRow;
+      });
+    });
   });
 }
 
@@ -1206,11 +1479,12 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
     return;
   }
   summary.innerHTML = "";
+  renderSectorOpenInterest(snapshot.sectorOpenInterest || {});
 
   if (!snapshot.available) {
     setText("#moneycontrolSectorStatus", "Unavailable");
     summary.innerHTML = `<article class="market-mini-card"><span>Moneycontrol</span><strong>Unavailable</strong><small>${escapeHtml(snapshot.error || "Sector analysis could not be loaded.")}</small></article>`;
-    emptyTable("#moneycontrolSectorRows", 8, "Moneycontrol sector analysis is unavailable.");
+    emptyTable("#moneycontrolSectorRows", 9, "Moneycontrol sector analysis is unavailable.");
     emptyTable("#moneycontrolIndexRows", 4, "Moneycontrol sectoral indices are unavailable.");
     return;
   }
@@ -1218,7 +1492,7 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
   const sectors = summarizedMoneycontrolSectors(snapshot);
   const indices = snapshot.sectorIndices || [];
   const breadth = snapshot.breadth || {};
-  setText("#moneycontrolSectorStatus", `${sectors.length} signals`);
+  setText("#moneycontrolSectorStatus", `Top 5 / Bottom 3 movers`);
   setText("#moneycontrolIndexStatus", `${indices.length} indices`);
 
   const summaryCards = [
@@ -1237,7 +1511,7 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
   const sectorRows = document.querySelector("#moneycontrolSectorRows");
   sectorRows.innerHTML = "";
   if (!sectors.length) {
-    emptyTable("#moneycontrolSectorRows", 8, "No sector rows were returned by Moneycontrol.");
+    emptyTable("#moneycontrolSectorRows", 9, "No sector rows were returned by Moneycontrol.");
   } else {
     for (const item of sectors) {
       const row = document.createElement("tr");
@@ -1247,6 +1521,7 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
       row.innerHTML = `
         <td><span class="sector-signal ${item.signalType === "weak" ? "is-weak" : "is-strong"}">${escapeHtml(item.signal || "Tracked")}</span></td>
         <td><strong>${title}</strong><span>${formatNumber(item.stocks)} stocks · ${formatNumber(item.industries)} industries</span></td>
+        <td>${renderMoneycontrolSectorStocks(item.topStocks || [], item.nseSector)}</td>
         <td>${escapeHtml(item.trend || "n/a")}<span>${escapeHtml(item.summary || "")}</span></td>
         <td class="${changeClass(item.marketCapChangePercent)}">${signed(item.marketCapChangePercent)}%<span>${formatLarge(item.marketCapCrore, "")} cr</span></td>
         <td>${formatNumber(item.advance)} / ${formatNumber(item.decline)}<span>${formatPercentValue(item.advancePercent)} advancing</span></td>
@@ -1276,6 +1551,93 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
   }
 }
 
+function renderMoneycontrolSectorStocks(stocks, nseSector) {
+  if (!stocks.length) {
+    return `<span>${nseSector ? "No stock movers returned." : "No NSE sector match."}</span>`;
+  }
+  return `
+    ${nseSector ? `<span>${escapeHtml(nseSector)}</span>` : ""}
+    ${stocks.slice(0, 4).map((stock) => `
+      <strong>${escapeHtml(stock.symbol || "n/a")}</strong>
+      <span class="${changeClass(stock.changePercent)}">${signed(stock.changePercent)}% · ${formatMoney(stock.price, "INR")}</span>
+    `).join("")}
+  `;
+}
+
+function renderSectorOpenInterest(openInterest) {
+  const summary = document.querySelector("#sectorOiSummary");
+  const rows = document.querySelector("#sectorOiRows");
+  if (!summary || !rows) {
+    return;
+  }
+
+  summary.innerHTML = "";
+  rows.innerHTML = "";
+
+  if (!openInterest.available) {
+    setText("#sectorOiStatus", "OI unavailable");
+    summary.innerHTML = `
+      <article class="market-mini-card">
+        <span>Sector OI</span>
+        <strong>Unavailable</strong>
+        <small>${escapeHtml(openInterest.error || openInterest.summary || "NSE sector-wise OI could not be loaded.")}</small>
+      </article>
+    `;
+    emptyTable("#sectorOiRows", 6, "Sector-wise OI is unavailable.");
+    return;
+  }
+
+  const totals = openInterest.totals || {};
+  const coverage = openInterest.coverage || {};
+  const highestOi = openInterest.highestOi || {};
+  const topBuildUp = openInterest.topBuildUp || {};
+  const sectorRows = openInterest.rows || [];
+  setText("#sectorOiStatus", `${sectorRows.length} sectors${openInterest.timestamp ? " · " + openInterest.timestamp : ""}`);
+
+  const cards = [
+    ["Mapped F&O", formatNumber(coverage.mappedStocks), `${formatNumber(coverage.sourceRows)} NSE OI rows · ${formatNumber(coverage.unmappedStocks)} unmapped`],
+    ["Mapped OI", formatLarge(totals.latestOi, ""), `Change ${formatSignedLarge(totals.changeOi)} (${formatPercentValue(totals.changePercent)})`],
+    ["Total Volume", formatLarge(totals.volume, ""), "NSE derivative volume"],
+    ["Highest OI", highestOi.sector || "n/a", formatLarge(highestOi.latestOi, "")],
+    ["Top Build-up", topBuildUp.sector || "n/a", `${formatSignedLarge(topBuildUp.changeOi)} (${formatPercentValue(topBuildUp.changePercent)})`],
+  ];
+  for (const [label, value, detail] of cards) {
+    const card = document.createElement("article");
+    card.className = "market-mini-card";
+    card.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small>`;
+    summary.appendChild(card);
+  }
+
+  if (!sectorRows.length) {
+    emptyTable("#sectorOiRows", 6, "No sector-wise OI rows were returned.");
+    return;
+  }
+
+  for (const item of sectorRows) {
+    const row = document.createElement("tr");
+    const toneClass = item.changeOi > 0 ? "is-strong" : item.changeOi < 0 ? "is-weak" : "";
+    row.innerHTML = `
+      <td><strong>${escapeHtml(item.sector || "Sector")}</strong><span>${formatNumber(item.stockCount)} mapped F&O stocks</span></td>
+      <td>${formatLarge(item.latestOi, "")}<span>Prev ${formatLarge(item.previousOi, "")}</span></td>
+      <td class="${changeClass(item.changeOi)}">${formatSignedLarge(item.changeOi)}<span>${formatPercentValue(item.changePercent)}</span></td>
+      <td>${formatLarge(item.volume, "")}<span>Vol/OI ${formatNumber(item.volumeToOi)}</span></td>
+      <td>${renderSectorOiStocks(item.topStocks || [])}</td>
+      <td><span class="sector-signal ${toneClass}">${escapeHtml(item.bias || "Tracked")}</span><small>${escapeHtml(item.summary || "")}</small></td>
+    `;
+    rows.appendChild(row);
+  }
+}
+
+function renderSectorOiStocks(stocks) {
+  if (!stocks.length) {
+    return "<span>n/a</span>";
+  }
+  return stocks.map((stock) => `
+    <strong>${escapeHtml(stock.symbol || "n/a")}</strong>
+    <span>${formatLarge(stock.latestOi, "")} OI · ${formatSignedLarge(stock.changeOi)}</span>
+  `).join("");
+}
+
 function summarizedMoneycontrolSectors(snapshot) {
   const rows = [];
   const seen = new Set();
@@ -1289,12 +1651,12 @@ function summarizedMoneycontrolSectors(snapshot) {
     }
   };
 
-  addRows(snapshot.topPerforming || [], "Leader", "strong");
-  addRows(snapshot.underPerforming || [], "Weak", "weak");
+  addRows((snapshot.topPerforming || []).slice(0, 5), "Top 5", "strong");
+  addRows((snapshot.underPerforming || []).slice(0, 3), "Bottom 3", "weak");
   if (!rows.length) {
-    addRows((snapshot.sectors || []).slice(0, 10), "Tracked", "neutral");
+    addRows((snapshot.sectors || []).slice(0, 8), "Tracked", "neutral");
   }
-  return rows.slice(0, 12);
+  return rows.slice(0, 8);
 }
 
 function renderNseMoverRows(selector, items, emptyMessage) {
@@ -1383,9 +1745,23 @@ function setText(selector, value) {
   }
 }
 
-function renderCommodities(items) {
+function renderCommodities(items, usdInr) {
   const container = document.querySelector("#commodityGrid");
   container.innerHTML = "";
+  if (usdInr?.available) {
+    setText("#usdInrStatus", `USD/INR ${formatNumber(usdInr.price)}`);
+    const fxCard = document.createElement("article");
+    fxCard.className = "commodity-card currency-card";
+    fxCard.innerHTML = `
+      <span>Currency</span>
+      <strong>USD / INR</strong>
+      <p>${formatNumber(usdInr.price)} <em class="${changeClass(usdInr.changePercent)}">${signed(usdInr.changePercent)}%</em></p>
+      <small>${escapeHtml(usdInr.lastDate || "Latest provider close")}</small>
+    `;
+    container.appendChild(fxCard);
+  } else {
+    setText("#usdInrStatus", "USD/INR n/a");
+  }
 
   for (const item of items) {
     const card = document.createElement("article");
@@ -1395,6 +1771,7 @@ function renderCommodities(items) {
       <span>${escapeHtml(item.category)}</span>
       <strong>${escapeHtml(item.name)}</strong>
       <p>${formatMoney(item.price, "USD")} <em class="${directionClass}">${signed(item.changePercent)}%</em></p>
+      <small>${Number.isFinite(item.inrPrice) ? `${formatMoney(item.inrPrice, "INR")} at USD/INR ${formatNumber(item.usdInr)}` : "INR conversion n/a"}</small>
       <small>1W ${formatPercentValue(item.oneWeek)} · 1M ${formatPercentValue(item.oneMonth)} · ${escapeHtml(item.trend)}</small>
     `;
     container.appendChild(card);
@@ -1406,7 +1783,7 @@ function renderBreakoutRows(items) {
   body.innerHTML = "";
 
   if (!items.length) {
-    body.innerHTML = "<tr><td colspan=\"7\">No near-high or breakout candidates found in the current scan.</td></tr>";
+    body.innerHTML = "<tr><td colspan=\"7\">No high, breakout, or reversal candidates found in the current scan.</td></tr>";
     return;
   }
 
@@ -1415,11 +1792,11 @@ function renderBreakoutRows(items) {
     row.innerHTML = `
       <td><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.symbol)}</span></td>
       <td>${formatMoney(item.price, "INR")}<span class="${changeClass(item.changePercent)}">${signed(item.changePercent)}%</span></td>
-      <td>${escapeHtml(item.signal)}</td>
-      <td>${formatPercentValue(item.pctBelow52WeekHigh)}<span>52W high ${formatMoney(item.high52Week, "INR")}</span><span>2Y high ${formatMoney(item.availableHigh, "INR")}</span></td>
-      <td>${formatMoney(item.prior55High, "INR")}<span>20D ${formatMoney(item.prior20High, "INR")}</span></td>
+      <td>${escapeHtml(item.signal)}<span>${escapeHtml((item.tags || []).join(" · "))}</span><span>Score ${scoreText(item.score || 0)}</span></td>
+      <td>${formatPercentValue(item.pctBelowAvailableHigh)}<span>Scan high ${formatMoney(item.availableHigh, "INR")}</span><span>52W gap ${formatPercentValue(item.pctBelow52WeekHigh)}</span></td>
+      <td>Breakout ${formatMoney(item.prior55High, "INR")}<span>SMA20 ${formatMoney(item.sma20, "INR")} · RSI ${formatNumber(item.rsi14)}</span><span>Reversal low ${formatMoney(item.prior20Low, "INR")} (${formatPercentValue(item.pctAbovePrior20Low)})</span></td>
       <td>${rangeBreakoutText(item, "narrowRange4", "NR4")}<span>${rangeBreakoutText(item, "narrowRange7", "NR7")}</span></td>
-      <td>${formatNumber(item.volumeRatio)}x</td>
+      <td>${formatNumber(item.volumeRatio)}x<span>1M ${formatPercentValue(item.oneMonth)}</span><span>DD ${formatPercentValue(item.drawdownFromRecentHigh)}</span></td>
     `;
     body.appendChild(row);
   }
@@ -2310,6 +2687,14 @@ function formatLarge(value, currency) {
     notation: "compact",
     maximumFractionDigits: 2
   }).format(value);
+}
+
+function formatSignedLarge(value) {
+  if (!Number.isFinite(value)) {
+    return "n/a";
+  }
+  const prefix = value >= 0 ? "+" : "-";
+  return `${prefix}${formatLarge(Math.abs(value), "")}`;
 }
 
 function formatNumber(value) {

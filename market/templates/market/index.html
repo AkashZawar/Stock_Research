@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260512-market-clock-1">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260514-monitor-tabs-1">
   </head>
   <body>
     <main class="app-shell">
@@ -165,6 +165,37 @@
                 </div>
                 <canvas id="priceChart" aria-label="One-year candlestick price chart" role="button" tabindex="0" title="Open this chart on TradingView"></canvas>
                 <section id="latestCandleReadout" class="candle-readout"></section>
+                <section id="openInterestPanel" class="open-interest-panel">
+                  <div class="section-head">
+                    <div>
+                      <h3>Open Interest (OI)</h3>
+                      <p class="muted" id="openInterestSource"></p>
+                    </div>
+                    <div class="oi-period-tabs" role="tablist" aria-label="Open interest period">
+                      <button type="button" class="is-active" data-oi-period="day">Day</button>
+                      <button type="button" data-oi-period="week">Week</button>
+                      <button type="button" data-oi-period="month">Month</button>
+                      <button type="button" data-oi-period="quarter">Quarter</button>
+                    </div>
+                  </div>
+                  <p id="openInterestSummary" class="outlook-text"></p>
+                  <div id="openInterestChart" class="oi-chart"></div>
+                  <div id="openInterestMetrics" class="oi-metric-grid"></div>
+                  <div class="table-wrap">
+                    <table class="monitor-table oi-table">
+                      <thead>
+                        <tr>
+                          <th>Strike</th>
+                          <th>Call OI</th>
+                          <th>Put OI</th>
+                          <th>PCR</th>
+                          <th>Bias</th>
+                        </tr>
+                      </thead>
+                      <tbody id="openInterestRows"></tbody>
+                    </table>
+                  </div>
+                </section>
               </article>
 
               <article class="levels-panel panel-accent-amber">
@@ -456,7 +487,7 @@
           <section class="monitor-header">
             <div>
               <p class="eyebrow">Market Monitor</p>
-              <h2>NSE snapshot, sector analysis, breakouts, and catalyst watchlists</h2>
+              <h2>Primary opportunities and detailed market internals</h2>
               <p class="muted" id="monitorGenerated">Not loaded yet.</p>
             </div>
             <button type="button" id="refreshMonitor">Refresh Monitor</button>
@@ -470,15 +501,20 @@
           <section id="monitorError" class="error-state is-hidden"></section>
 
           <section id="monitorContent" class="monitor-content is-hidden">
-            <article class="analysis-panel panel-accent-teal">
+            <nav class="monitor-subtabs" aria-label="Market monitor views">
+              <button type="button" class="is-active" data-monitor-pane-button="primary">Primary Monitor</button>
+              <button type="button" data-monitor-pane-button="details">Market Details</button>
+            </nav>
+
+            <article class="analysis-panel panel-accent-teal" data-monitor-section="primary">
               <div class="section-head">
-                <h3>International Commodities</h3>
-                <span class="pill">Live reference</span>
+                <h3>International Commodities / USD-INR</h3>
+                <span id="usdInrStatus" class="pill">USD/INR</span>
               </div>
               <div id="commodityGrid" class="monitor-grid"></div>
             </article>
 
-            <article class="analysis-panel nse-snapshot-panel panel-accent-blue">
+            <article class="analysis-panel nse-snapshot-panel panel-accent-blue" data-monitor-section="details">
               <div class="section-head">
                 <h3>NSE Market Snapshot</h3>
                 <span id="nseSnapshotStatus" class="pill">NSE</span>
@@ -488,11 +524,34 @@
               <div id="nseIndexGrid" class="nse-index-grid"></div>
             </article>
 
-            <section class="market-signal-grid nse-data-grid">
+            <section class="market-signal-grid nse-data-grid" data-monitor-section="details">
+              <article class="analysis-panel panel-accent-slate">
+                <div class="section-head">
+                  <h3>Sector-wise OI</h3>
+                  <span id="sectorOiStatus" class="pill">NSE OI</span>
+                </div>
+                <div id="sectorOiSummary" class="monitor-grid sector-oi-summary-grid"></div>
+                <div class="table-wrap sector-oi-wrap">
+                  <table class="monitor-table sector-oi-table">
+                    <thead>
+                      <tr>
+                        <th>Sector</th>
+                        <th>Latest OI</th>
+                        <th>OI Change</th>
+                        <th>Volume</th>
+                        <th>Top OI Stocks</th>
+                        <th>Bias</th>
+                      </tr>
+                    </thead>
+                    <tbody id="sectorOiRows"></tbody>
+                  </table>
+                </div>
+              </article>
+
               <article class="analysis-panel panel-accent-violet">
                 <div class="section-head">
                   <h3>Moneycontrol Sector Analysis</h3>
-                  <span id="moneycontrolSectorStatus" class="pill">Sector scan</span>
+                  <span id="moneycontrolSectorStatus" class="pill">Top 5 / Bottom 3</span>
                 </div>
                 <div id="moneycontrolSectorSummary" class="sector-summary-grid"></div>
                 <div class="table-wrap">
@@ -501,6 +560,7 @@
                       <tr>
                         <th>Signal</th>
                         <th>Sector</th>
+                        <th>Top Stocks</th>
                         <th>Trend</th>
                         <th>Mcap Chg</th>
                         <th>A/D</th>
@@ -535,7 +595,7 @@
               </article>
             </section>
 
-            <section class="market-signal-grid nse-data-grid">
+            <section class="market-signal-grid nse-data-grid" data-monitor-section="primary">
               <article class="analysis-panel panel-accent-emerald">
                 <div class="section-head">
                   <h3>NSE Top Gainers</h3>
@@ -579,7 +639,7 @@
               </article>
             </section>
 
-            <section class="market-signal-grid nse-data-grid">
+            <section class="market-signal-grid nse-data-grid" data-monitor-section="details">
               <article class="analysis-panel panel-accent-slate">
                 <div class="section-head">
                   <h3>NSE Most Active</h3>
@@ -623,10 +683,10 @@
               </article>
             </section>
 
-            <section class="wide-grid">
+            <section class="wide-grid" data-monitor-section="primary">
               <article class="analysis-panel panel-accent-blue">
                 <div class="section-head">
-                  <h3>Near Highs & Breakouts</h3>
+                  <h3>Primary 50: Highs / Breakouts / Reversals</h3>
                   <span id="scanCount" class="pill"></span>
                 </div>
                 <div class="table-wrap">
@@ -635,9 +695,9 @@
                       <tr>
                         <th>Stock</th>
                         <th>Price</th>
-                        <th>Signal</th>
-                        <th>52W Gap</th>
-                        <th>Breakout</th>
+                        <th>Setup</th>
+                        <th>High Gap</th>
+                        <th>Levels</th>
                         <th>NR4 / NR7</th>
                         <th>Volume</th>
                       </tr>
@@ -649,7 +709,7 @@
 
             </section>
 
-            <section class="market-signal-grid">
+            <section class="market-signal-grid" data-monitor-section="details">
               <article class="analysis-panel panel-accent-emerald">
                 <div class="section-head">
                   <h3>High-Volume Momentum</h3>
@@ -816,6 +876,6 @@
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260512-market-clock-1"></script>
+    <script src="{% static 'app.js' %}?v=20260514-monitor-tabs-1"></script>
   </body>
 </html>
