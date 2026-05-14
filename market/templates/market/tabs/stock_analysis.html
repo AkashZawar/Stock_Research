@@ -1,0 +1,222 @@
+        <section id="analysisView" class="tab-view">
+          <section id="emptyState" class="empty-state">
+            <h2>No report loaded</h2>
+            <p>Search a ticker to generate a one-year chart report with fundamentals, technicals, ownership/catalyst checks, and research levels.</p>
+          </section>
+
+          <section id="loadingState" class="loading-state is-hidden">
+            <div class="spinner"></div>
+            <p>Building report...</p>
+          </section>
+
+          <section id="errorState" class="error-state is-hidden"></section>
+
+          <section id="report" class="report is-hidden">
+            <section class="quote-panel panel-accent-slate">
+              <div>
+                <p class="eyebrow" id="exchangeText"></p>
+                <h2 id="stockName"></h2>
+                <p class="muted" id="generatedText"></p>
+              </div>
+              <div id="marketClock" class="market-clock is-closed" aria-live="polite">
+                <span class="market-clock-icon" aria-hidden="true"></span>
+                <div>
+                  <span id="marketClockTime">--:--</span>
+                  <strong id="marketClockStatus">Market status</strong>
+                  <small id="marketClockDetail">Search a stock to load exchange session time.</small>
+                </div>
+              </div>
+              <div class="price-block">
+                <span id="currentPrice"></span>
+                <strong id="priceChange"></strong>
+              </div>
+            </section>
+
+            <section class="score-grid">
+              <article class="metric-card">
+                <span>Overall</span>
+                <strong id="overallScore"></strong>
+                <small id="outlookLabel"></small>
+              </article>
+              <article class="metric-card">
+                <span>Technical</span>
+                <strong id="technicalScore"></strong>
+                <small id="technicalSummary"></small>
+              </article>
+              <article class="metric-card">
+                <span>Fundamental</span>
+                <strong id="fundamentalScore"></strong>
+                <small id="fundamentalSummary"></small>
+              </article>
+              <article class="metric-card">
+                <span>Event Risk</span>
+                <strong id="eventRiskScore"></strong>
+                <small id="eventRiskSummary"></small>
+              </article>
+              <article class="metric-card">
+                <span>Confidence</span>
+                <strong id="confidenceScore"></strong>
+                <small id="confidenceSummary"></small>
+              </article>
+            </section>
+
+            <section class="analysis-panel ownership-snapshot-panel panel-accent-violet">
+              <div class="section-head">
+                <h3>Promoter / FII / DII Holdings</h3>
+                <span id="ownershipSnapshotPeriod" class="pill"></span>
+              </div>
+              <div id="ownershipSnapshotList" class="ownership-snapshot-grid"></div>
+              <p id="ownershipSnapshotNote" class="muted ownership-snapshot-note"></p>
+            </section>
+
+            <section class="main-grid">
+              <article class="chart-panel panel-accent-blue">
+                <div class="section-head">
+                  <h3>Chart</h3>
+                  <div class="chart-tools">
+                    <button type="button" id="expandChart" class="chart-action">Enlarge</button>
+                    <div class="level-toggles" aria-label="Chart level filters">
+                      <label class="level-toggle">
+                        <input id="chartSupportToggle" type="checkbox" checked>
+                        <span>Support</span>
+                      </label>
+                      <label class="level-toggle">
+                        <input id="chartResistanceToggle" type="checkbox" checked>
+                        <span>Resistance</span>
+                      </label>
+                    </div>
+                    <div class="legend">
+                      <span><i class="line candle-up"></i>Up candle</span>
+                      <span><i class="line candle-down"></i>Down candle</span>
+                      <span><i class="line sma50"></i>SMA 50</span>
+                      <span><i class="line sma200"></i>SMA 200</span>
+                      <span><i class="line support"></i>Support</span>
+                      <span><i class="line resistance"></i>Resistance</span>
+                    </div>
+                  </div>
+                </div>
+                <canvas id="priceChart" aria-label="One-year candlestick price chart" role="button" tabindex="0" title="Open this chart on TradingView"></canvas>
+                <section id="latestCandleReadout" class="candle-readout"></section>
+                <section id="openInterestPanel" class="open-interest-panel">
+                  <div class="section-head">
+                    <div>
+                      <h3>Open Interest (OI)</h3>
+                      <p class="muted" id="openInterestSource"></p>
+                    </div>
+                    <div class="oi-period-tabs" role="tablist" aria-label="Open interest period">
+                      <button type="button" class="is-active" data-oi-period="day">Day</button>
+                      <button type="button" data-oi-period="week">Week</button>
+                      <button type="button" data-oi-period="month">Month</button>
+                      <button type="button" data-oi-period="quarter">Quarter</button>
+                    </div>
+                  </div>
+                  <p id="openInterestSummary" class="outlook-text"></p>
+                  <div id="openInterestChart" class="oi-chart"></div>
+                  <div id="openInterestMetrics" class="oi-metric-grid"></div>
+                  <div class="table-wrap">
+                    <table class="monitor-table oi-table">
+                      <thead>
+                        <tr>
+                          <th>Strike</th>
+                          <th>Call OI</th>
+                          <th>Put OI</th>
+                          <th>PCR</th>
+                          <th>Bias</th>
+                        </tr>
+                      </thead>
+                      <tbody id="openInterestRows"></tbody>
+                    </table>
+                  </div>
+                </section>
+              </article>
+
+              <article class="levels-panel panel-accent-amber">
+                <div class="section-head">
+                  <h3>Research Levels</h3>
+                  <span id="levelMode" class="pill"></span>
+                </div>
+                <p id="levelsNote" class="muted"></p>
+                <dl class="levels-list">
+                  <div>
+                    <dt>Pullback entry zone</dt>
+                    <dd id="pullbackEntry"></dd>
+                  </div>
+                  <div>
+                    <dt>Breakout trigger</dt>
+                    <dd id="breakoutTrigger"></dd>
+                  </div>
+                  <div>
+                    <dt>Invalidation</dt>
+                    <dd id="invalidation"></dd>
+                  </div>
+                  <div>
+                    <dt>Targets</dt>
+                    <dd id="targets"></dd>
+                  </div>
+                  <div>
+                    <dt>Risk/reward</dt>
+                    <dd id="riskReward"></dd>
+                  </div>
+                  <div>
+                    <dt>Support zones</dt>
+                    <dd id="supportZones"></dd>
+                  </div>
+                  <div>
+                    <dt>Resistance zones</dt>
+                    <dd id="resistanceZones"></dd>
+                  </div>
+                </dl>
+              </article>
+            </section>
+
+            <section class="analysis-panel swing-plan-panel panel-accent-emerald">
+              <div class="section-head">
+                <h3>Swing Trade Plan</h3>
+                <span id="swingTradeSuitability" class="pill"></span>
+              </div>
+              <p id="swingTradeSummary" class="outlook-text"></p>
+              <div id="swingTradeList" class="swing-plan-list"></div>
+            </section>
+
+            <section class="detail-grid">
+              <article class="analysis-panel panel-accent-blue">
+                <h3>Technical Analysis</h3>
+                <div id="technicalMetrics" class="metric-table"></div>
+                <ul id="technicalSignals" class="signal-list"></ul>
+              </article>
+
+              <article class="analysis-panel panel-accent-teal">
+                <h3>Fundamental Analysis</h3>
+                <div id="fundamentalMetrics" class="metric-table"></div>
+                <ul id="fundamentalSignals" class="signal-list"></ul>
+              </article>
+
+              <article class="analysis-panel panel-accent-violet">
+                <h3>Ownership & Growth Catalysts</h3>
+                <p id="growthDriverText" class="outlook-text"></p>
+                <div id="growthDriverList" class="growth-driver-list"></div>
+              </article>
+            </section>
+
+            <section class="detail-grid">
+              <article class="analysis-panel panel-accent-slate">
+                <h3>Accuracy & Reliability</h3>
+                <p id="qualityText" class="outlook-text"></p>
+                <div id="qualityMetrics" class="metric-table"></div>
+                <div id="qualityChecks" class="accuracy-check-list"></div>
+                <ul id="qualityWarnings" class="signal-list"></ul>
+              </article>
+
+              <article class="analysis-panel panel-accent-rose">
+                <h3>Scenarios</h3>
+                <div id="scenarioList" class="scenario-list"></div>
+              </article>
+
+              <article class="analysis-panel panel-accent-cyan">
+                <h3>Cross-check</h3>
+                <p class="outlook-text">Use these sources to manually verify chart, results, news, and fundamentals before acting.</p>
+                <div id="referenceLinks" class="reference-links"></div>
+              </article>
+            </section>
+          </section>
+        </section>

@@ -1,0 +1,34 @@
+        <section id="searchLogView" class="tab-view is-hidden">
+          <section class="monitor-header">
+            <div>
+              <p class="eyebrow">Search Logs</p>
+              <h2>Stock search audit trail</h2>
+              <p class="muted" id="searchLogSummary">Not loaded yet.</p>
+            </div>
+            <button type="button" id="refreshSearchLogs">Refresh Logs</button>
+          </section>
+
+          <section id="searchLogLoading" class="loading-state is-hidden">
+            <div class="spinner"></div>
+            <p>Loading search logs...</p>
+          </section>
+
+          <section id="searchLogError" class="error-state is-hidden"></section>
+
+          <section id="searchLogContent" class="analysis-panel search-log-panel panel-accent-slate is-hidden">
+            <div class="table-wrap">
+              <table class="monitor-table search-log-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Stock</th>
+                    <th>IP address</th>
+                    <th>Device</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="searchLogRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>

@@ -1,0 +1,183 @@
+        <section id="etfView" class="tab-view is-hidden">
+          <section class="asset-workbench">
+            <section class="monitor-header asset-header panel-accent-cyan">
+              <div>
+                <p class="eyebrow">ETF Analysis</p>
+                <h2>Exchange-traded fund research</h2>
+                <p class="muted">Review ETF trend, volatility, drawdown, expense ratio, holdings, and allocation discipline.</p>
+              </div>
+              <form class="asset-search-form" id="etfForm" data-asset-type="etf">
+                <label for="etfInput">ETF symbol or name</label>
+                <div class="asset-search-row">
+                  <input id="etfInput" name="symbol" list="etfSuggestions" placeholder="NIFTYBEES.NS, BANKBEES.NS, SPY, VOO" autocomplete="off" required>
+                  <datalist id="etfSuggestions"></datalist>
+                  <button type="submit">Analyze ETF</button>
+                </div>
+              </form>
+            </section>
+
+            <section id="etfEmpty" class="empty-state">
+              <h2>No ETF loaded</h2>
+              <p>Search an ETF to evaluate trend, cost, risk, support/resistance, and portfolio exposure.</p>
+              <section class="asset-shortlist-panel" aria-labelledby="etfShortlistTitle">
+                <div class="asset-shortlist-head">
+                  <div>
+                    <p class="eyebrow">Default research shortlist</p>
+                    <h3 id="etfShortlistTitle">Top 10 ETF candidates to review</h3>
+                  </div>
+                  <span class="pill">NSE / Investing / Moneycontrol / Screener</span>
+                </div>
+                <div class="asset-source-strip" aria-label="ETF research sources">
+                  <a href="https://www.nseindia.com/products-services/etfs-launched-on-nse" target="_blank" rel="noopener noreferrer">NSE ETF list</a>
+                  <a href="https://in.investing.com/etfs" target="_blank" rel="noopener noreferrer">Investing.com ETFs</a>
+                  <a href="https://www.moneycontrol.com/mutualfundindia/" target="_blank" rel="noopener noreferrer">Moneycontrol funds</a>
+                  <a href="https://www.screener.in/explore/" target="_blank" rel="noopener noreferrer">Screener checks</a>
+                </div>
+                <div class="asset-shortlist-grid">
+                  <article class="asset-shortlist-card">
+                    <span>01</span>
+                    <strong>Nippon India ETF Nifty 50 BeES</strong>
+                    <small>NIFTYBEES.NS · Core Nifty 50 exposure</small>
+                    <p>Broad large-cap market exposure; review liquidity, tracking error, and expense ratio before allocation.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="NIFTYBEES.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>02</span>
+                    <strong>SBI ETF Nifty 50</strong>
+                    <small>SETFNIF50.NS · Large-cap passive exposure</small>
+                    <p>Alternative Nifty 50 tracker; compare volume, bid-ask spread, AUM, and tracking difference.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="SETFNIF50.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>03</span>
+                    <strong>ICICI Prudential Nifty 50 ETF</strong>
+                    <small>ICICINIFTY.NS · Low-cost index candidate</small>
+                    <p>Use as a cross-check against other Nifty 50 ETFs for costs, liquidity, and index replication quality.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="ICICINIFTY.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>04</span>
+                    <strong>HDFC Nifty 50 ETF</strong>
+                    <small>HDFCNIFTY.NS · Large-cap index basket</small>
+                    <p>Review against peer Nifty ETFs; prefer tighter spreads and consistent traded value.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="HDFCNIFTY.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>05</span>
+                    <strong>Nippon India ETF Junior BeES</strong>
+                    <small>JUNIORBEES.NS · Nifty Next 50 exposure</small>
+                    <p>Higher-beta equity basket; suitable only after checking drawdown, trend, and portfolio overlap.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="JUNIORBEES.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>06</span>
+                    <strong>Nippon India ETF Bank BeES</strong>
+                    <small>BANKBEES.NS · Banking sector exposure</small>
+                    <p>Sector concentration is high; review bank index trend, OI, and sector breadth before entry.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="BANKBEES.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>07</span>
+                    <strong>SBI ETF Nifty Bank</strong>
+                    <small>SETFNIFBK.NS · Bank index tracker</small>
+                    <p>Compare against Bank BeES for liquidity and tracking; avoid oversizing sector exposure.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="SETFNIFBK.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>08</span>
+                    <strong>Nippon India ETF Gold BeES</strong>
+                    <small>GOLDBEES.NS · Gold allocation hedge</small>
+                    <p>Use as a hedge candidate; check premium/discount to NAV and international gold trend.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="GOLDBEES.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>09</span>
+                    <strong>Nippon India Silver ETF</strong>
+                    <small>SILVERBEES.NS · Silver commodity exposure</small>
+                    <p>More volatile than gold; check iNAV premium, volumes, and commodity momentum first.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="SILVERBEES.NS">Analyze</button>
+                  </article>
+                  <article class="asset-shortlist-card">
+                    <span>10</span>
+                    <strong>Motilal Oswal Nasdaq 100 ETF</strong>
+                    <small>MON100.NS · Global technology exposure</small>
+                    <p>Useful for global diversification; check premium to NAV and US market trend before entry.</p>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="MON100.NS">Analyze</button>
+                  </article>
+                </div>
+              </section>
+            </section>
+            <section id="etfLoading" class="loading-state is-hidden">
+              <div class="spinner"></div>
+              <p>Building ETF report...</p>
+            </section>
+            <section id="etfError" class="error-state is-hidden"></section>
+
+            <section id="etfReport" class="asset-report is-hidden">
+              <section class="quote-panel panel-accent-cyan">
+                <div>
+                  <p class="eyebrow" id="etfExchange"></p>
+                  <h2 id="etfName"></h2>
+                  <p class="muted" id="etfGenerated"></p>
+                </div>
+                <div class="price-block">
+                  <span id="etfPrice"></span>
+                  <strong id="etfChange"></strong>
+                </div>
+              </section>
+
+              <section class="score-grid">
+                <article class="metric-card">
+                  <span>Suitability</span>
+                  <strong id="etfSuitability"></strong>
+                  <small id="etfSummary"></small>
+                </article>
+                <article class="metric-card">
+                  <span>Momentum</span>
+                  <strong id="etfMomentum"></strong>
+                  <small id="etfMomentumText"></small>
+                </article>
+                <article class="metric-card">
+                  <span>Risk</span>
+                  <strong id="etfRisk"></strong>
+                  <small id="etfRiskText"></small>
+                </article>
+                <article class="metric-card">
+                  <span>Confidence</span>
+                  <strong id="etfConfidence"></strong>
+                  <small id="etfConfidenceText"></small>
+                </article>
+              </section>
+
+              <section class="detail-grid">
+                <article class="analysis-panel panel-accent-cyan">
+                  <h3>ETF Profile</h3>
+                  <div id="etfProfileMetrics" class="metric-table"></div>
+                </article>
+                <article class="analysis-panel panel-accent-blue">
+                  <h3>Performance & Risk</h3>
+                  <div id="etfPerformanceMetrics" class="metric-table"></div>
+                </article>
+                <article class="analysis-panel panel-accent-emerald">
+                  <h3>Allocation Plan</h3>
+                  <div id="etfPlanList" class="asset-plan-list"></div>
+                </article>
+              </section>
+
+              <section class="detail-grid">
+                <article class="analysis-panel panel-accent-violet">
+                  <h3>Top Holdings / Sectors</h3>
+                  <div id="etfHoldingList" class="asset-holding-list"></div>
+                </article>
+                <article class="analysis-panel panel-accent-slate">
+                  <h3>Data Checks</h3>
+                  <ul id="etfChecks" class="signal-list"></ul>
+                </article>
+                <article class="analysis-panel panel-accent-amber">
+                  <h3>Cross-check</h3>
+                  <div id="etfReferenceLinks" class="reference-links"></div>
+                </article>
+              </section>
+            </section>
+          </section>
+        </section>

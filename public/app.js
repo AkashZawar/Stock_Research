@@ -189,6 +189,31 @@ window.addEventListener("resize", () => {
   }
 });
 
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-asset-shortlist-symbol]");
+  if (!button) {
+    return;
+  }
+
+  const symbol = button.dataset.assetShortlistSymbol || "";
+  const type = button.dataset.assetShortlistType || "etf";
+  const mode = button.dataset.assetShortlistMode || "analyze";
+  const context = type === "mutual-fund" ? assetContexts.fund : assetContexts.etf;
+  if (!symbol || !context) {
+    return;
+  }
+
+  context.input.value = symbol;
+  context.suggestions.innerHTML = "";
+  setActiveTab(context.prefix);
+  if (mode === "search") {
+    searchAssets(context, symbol);
+    context.input.focus();
+    return;
+  }
+  analyzeAsset(context, symbol);
+});
+
 function setActiveTab(tab) {
   const isEtf = tab === "etf";
   const isFund = tab === "fund";
