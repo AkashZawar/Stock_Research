@@ -17,6 +17,7 @@
                 <p class="eyebrow" id="exchangeText"></p>
                 <h2 id="stockName"></h2>
                 <p class="muted" id="generatedText"></p>
+                <p id="reportVerdict" class="section-summary quote-verdict"></p>
               </div>
               <div id="marketClock" class="market-clock is-closed" aria-live="polite">
                 <span class="market-clock-icon" aria-hidden="true"></span>
@@ -65,6 +66,7 @@
                 <h3>Promoter / FII / DII Holdings</h3>
                 <span id="ownershipSnapshotPeriod" class="pill"></span>
               </div>
+              <p id="ownershipSectionSummary" class="section-summary"></p>
               <div id="ownershipSnapshotList" class="ownership-snapshot-grid"></div>
               <p id="ownershipSnapshotNote" class="muted ownership-snapshot-note"></p>
             </section>
@@ -86,8 +88,6 @@
                       </label>
                     </div>
                     <div class="legend">
-                      <span><i class="line candle-up"></i>Up candle</span>
-                      <span><i class="line candle-down"></i>Down candle</span>
                       <span><i class="line sma50"></i>SMA 50</span>
                       <span><i class="line sma200"></i>SMA 200</span>
                       <span><i class="line support"></i>Support</span>
@@ -95,6 +95,7 @@
                     </div>
                   </div>
                 </div>
+                <p id="chartSectionSummary" class="section-summary"></p>
                 <canvas id="priceChart" aria-label="One-year candlestick price chart" role="button" tabindex="0" title="Open this chart on TradingView"></canvas>
                 <section id="latestCandleReadout" class="candle-readout"></section>
                 <section id="openInterestPanel" class="open-interest-panel">
@@ -181,12 +182,14 @@
             <section class="detail-grid">
               <article class="analysis-panel panel-accent-blue">
                 <h3>Technical Analysis</h3>
+                <p id="technicalSectionSummary" class="section-summary"></p>
                 <div id="technicalMetrics" class="metric-table"></div>
                 <ul id="technicalSignals" class="signal-list"></ul>
               </article>
 
               <article class="analysis-panel panel-accent-teal">
                 <h3>Fundamental Analysis</h3>
+                <p id="fundamentalSectionSummary" class="section-summary"></p>
                 <div id="fundamentalMetrics" class="metric-table"></div>
                 <ul id="fundamentalSignals" class="signal-list"></ul>
               </article>
@@ -209,12 +212,13 @@
 
               <article class="analysis-panel panel-accent-rose">
                 <h3>Scenarios</h3>
+                <p id="scenarioSectionSummary" class="section-summary"></p>
                 <div id="scenarioList" class="scenario-list"></div>
               </article>
 
               <article class="analysis-panel panel-accent-cyan">
                 <h3>Cross-check</h3>
-                <p class="outlook-text">Use these sources to manually verify chart, results, news, and fundamentals before acting.</p>
+                <p id="crossCheckSummary" class="section-summary">Watchlist discipline: verify chart, results, news, and fundamentals before acting.</p>
                 <div id="referenceLinks" class="reference-links"></div>
               </article>
             </section>

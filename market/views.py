@@ -11,6 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 from . import services
 from .models import StockSearchLog
 from .models import TradeReference
+from .models import WatchlistItem
 
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,46 @@ def search_logs(request):
         "count": StockSearchLog.objects.count(),
         "results": [item.as_dict() for item in logs],
     })
+
+
+@csrf_exempt
+def watchlist_items(request):
+    if request.method == "GET":
+        items = [item.as_dict() for item in WatchlistItem.objects.all()]
+        return JsonResponse({"results": items})
+
+    if request.method == "POST":
+        try:
+            payload = read_json_body(request)
+            symbol = str(payload.get("symbol", "")).strip().upper()
+            item = WatchlistItem.objects.filter(symbol=symbol).first() if symbol else WatchlistItem()
+            item = save_watchlist_item(item or WatchlistItem(), payload)
+            return JsonResponse(item.as_dict(), status=201)
+        except ValueError as error:
+            return JsonResponse({"error": str(error)}, status=400)
+
+    return HttpResponseNotAllowed(["GET", "POST"])
+
+
+@csrf_exempt
+def watchlist_item_detail(request, item_id):
+    try:
+        item = WatchlistItem.objects.get(pk=item_id)
+    except WatchlistItem.DoesNotExist:
+        return JsonResponse({"error": "Watchlist item was not found."}, status=404)
+
+    if request.method == "PATCH":
+        try:
+            item = save_watchlist_item(item, read_json_body(request), partial=True)
+            return JsonResponse(item.as_dict())
+        except ValueError as error:
+            return JsonResponse({"error": str(error)}, status=400)
+
+    if request.method == "DELETE":
+        item.delete()
+        return JsonResponse({"deleted": True})
+
+    return HttpResponseNotAllowed(["PATCH", "DELETE"])
 
 
 def market_monitor(request):
@@ -248,6 +289,30 @@ def save_trade_reference(trade, payload, partial=False):
     trade.note = note
     trade.save()
     return trade
+
+
+def save_watchlist_item(item, payload, partial=False):
+    symbol = str(payload.get("symbol", item.symbol if partial else "")).strip().upper()
+    stock_name = str(payload.get("stockName", item.stock_name if partial else "")).strip()
+
+    if not symbol:
+        raise ValueError("Symbol is required.")
+
+    buy_price = decimal_from_payload(payload, "buyPrice", item.buy_price if partial else None, required=False)
+    sell_price = decimal_from_payload(payload, "sellPrice", item.sell_price if partial else None, required=False)
+    check_price = decimal_from_payload(payload, "checkPrice", item.check_price if partial else None, required=False)
+
+    for label, value in [("Buy price", buy_price), ("Sell price", sell_price), ("Check price", check_price)]:
+        if value is not None and value <= 0:
+            raise ValueError(f"{label} must be greater than zero.")
+
+    item.symbol = symbol[:32]
+    item.stock_name = stock_name[:160]
+    item.buy_price = buy_price
+    item.sell_price = sell_price
+    item.check_price = check_price
+    item.save()
+    return item
 
 
 def decimal_from_payload(payload, key, current_value, required):

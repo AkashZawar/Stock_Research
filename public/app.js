@@ -9,12 +9,14 @@ const canvas = document.querySelector("#priceChart");
 const analysisTab = document.querySelector("#analysisTab");
 const etfTab = document.querySelector("#etfTab");
 const fundTab = document.querySelector("#fundTab");
+const watchlistTab = document.querySelector("#watchlistTab");
 const monitorTab = document.querySelector("#monitorTab");
 const tradeTab = document.querySelector("#tradeTab");
 const searchLogTab = document.querySelector("#searchLogTab");
 const analysisView = document.querySelector("#analysisView");
 const etfView = document.querySelector("#etfView");
 const fundView = document.querySelector("#fundView");
+const watchlistView = document.querySelector("#watchlistView");
 const monitorView = document.querySelector("#monitorView");
 const tradeView = document.querySelector("#tradeView");
 const searchLogView = document.querySelector("#searchLogView");
@@ -34,6 +36,12 @@ const tradeRows = document.querySelector("#tradeRows");
 const tradeLoading = document.querySelector("#tradeLoading");
 const tradeError = document.querySelector("#tradeError");
 const useCurrentReport = document.querySelector("#useCurrentReport");
+const watchlistForm = document.querySelector("#watchlistForm");
+const watchlistRows = document.querySelector("#watchlistRows");
+const watchlistLoading = document.querySelector("#watchlistLoading");
+const watchlistError = document.querySelector("#watchlistError");
+const refreshWatchlistButton = document.querySelector("#refreshWatchlist");
+const useCurrentWatchlistReport = document.querySelector("#useCurrentWatchlistReport");
 const chartSupportToggle = document.querySelector("#chartSupportToggle");
 const chartResistanceToggle = document.querySelector("#chartResistanceToggle");
 const expandChartButton = document.querySelector("#expandChart");
@@ -72,6 +80,7 @@ const assetContexts = {
 let latestReport = null;
 let latestMonitor = null;
 let latestTradeReferences = null;
+let latestWatchlistItems = null;
 let latestSearchLogs = null;
 let latestAssetReports = { etf: null, fund: null };
 let searchTimer = null;
@@ -96,6 +105,14 @@ form.addEventListener("submit", async (event) => {
 analysisTab.addEventListener("click", () => setActiveTab("analysis"));
 etfTab.addEventListener("click", () => setActiveTab("etf"));
 fundTab.addEventListener("click", () => setActiveTab("fund"));
+watchlistTab.addEventListener("click", () => {
+  setActiveTab("watchlist");
+  if (!latestWatchlistItems) {
+    loadWatchlist();
+  } else {
+    renderWatchlist();
+  }
+});
 monitorTab.addEventListener("click", () => {
   setActiveTab("monitor");
   if (!latestMonitor) {
@@ -120,6 +137,8 @@ for (const button of monitorPaneButtons) {
 }
 refreshSearchLogs.addEventListener("click", loadSearchLogs);
 useCurrentReport.addEventListener("click", prefillTradeFromReport);
+refreshWatchlistButton.addEventListener("click", () => refreshWatchlist(true));
+useCurrentWatchlistReport.addEventListener("click", () => addCurrentReportToWatchlist());
 chartSupportToggle.addEventListener("change", redrawChart);
 chartResistanceToggle.addEventListener("change", redrawChart);
 expandChartButton.addEventListener("click", openExpandedChart);
@@ -149,6 +168,30 @@ tradeRows.addEventListener("click", async (event) => {
     return;
   }
   await deleteTradeReference(button.dataset.deleteTrade);
+});
+
+watchlistForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await addWatchlistItemFromForm();
+});
+
+watchlistRows.addEventListener("click", async (event) => {
+  const deleteButton = event.target.closest("[data-delete-watchlist]");
+  if (deleteButton) {
+    await deleteWatchlistItem(deleteButton.dataset.deleteWatchlist);
+    return;
+  }
+
+  const refreshButton = event.target.closest("[data-refresh-watchlist]");
+  if (refreshButton) {
+    await refreshWatchlistItem(refreshButton.dataset.refreshWatchlist, true);
+    return;
+  }
+
+  const checkButton = event.target.closest("[data-check-watchlist]");
+  if (checkButton) {
+    await checkWatchlistPrice(checkButton.dataset.checkWatchlist);
+  }
 });
 
 for (const context of Object.values(assetContexts)) {
@@ -217,19 +260,22 @@ document.addEventListener("click", (event) => {
 function setActiveTab(tab) {
   const isEtf = tab === "etf";
   const isFund = tab === "fund";
+  const isWatchlist = tab === "watchlist";
   const isMonitor = tab === "monitor";
   const isTrade = tab === "trade";
   const isLogs = tab === "logs";
-  const isAnalysis = !isEtf && !isFund && !isMonitor && !isTrade && !isLogs;
+  const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isTrade && !isLogs;
   analysisTab.classList.toggle("is-active", isAnalysis);
   etfTab.classList.toggle("is-active", isEtf);
   fundTab.classList.toggle("is-active", isFund);
+  watchlistTab.classList.toggle("is-active", isWatchlist);
   monitorTab.classList.toggle("is-active", isMonitor);
   tradeTab.classList.toggle("is-active", isTrade);
   searchLogTab.classList.toggle("is-active", isLogs);
   analysisView.classList.toggle("is-hidden", !isAnalysis);
   etfView.classList.toggle("is-hidden", !isEtf);
   fundView.classList.toggle("is-hidden", !isFund);
+  watchlistView.classList.toggle("is-hidden", !isWatchlist);
   monitorView.classList.toggle("is-hidden", !isMonitor);
   tradeView.classList.toggle("is-hidden", !isTrade);
   searchLogView.classList.toggle("is-hidden", !isLogs);
@@ -626,6 +672,622 @@ function renderTradeReferences(items) {
   }
 }
 
+async function loadWatchlist({ refreshAnalysis = true, showErrors = false } = {}) {
+  hideWatchlistError();
+  setWatchlistLoading(true);
+  try {
+    const savedItems = await fetchSavedWatchlistItems();
+    latestWatchlistItems = savedItems.map(savedWatchlistToDisplayItem);
+    renderWatchlist();
+    if (refreshAnalysis && savedItems.length) {
+      await refreshWatchlist(showErrors);
+    }
+  } catch (error) {
+    latestWatchlistItems = latestWatchlistItems || [];
+    renderWatchlist();
+    if (showErrors) {
+      showWatchlistError(error.message);
+    }
+  } finally {
+    setWatchlistLoading(false);
+  }
+}
+
+async function addWatchlistItemFromForm() {
+  hideWatchlistError();
+  const symbol = document.querySelector("#watchlistSymbol").value.trim();
+  if (!symbol) {
+    showWatchlistError("Enter a stock symbol or name.");
+    return;
+  }
+
+  setWatchlistLoading(true);
+  try {
+    const report = await fetchAnalysisForWatchlist(symbol);
+    const item = buildWatchlistItem(report, {
+      name: document.querySelector("#watchlistName").value.trim(),
+      buyPrice: inputNumber("#watchlistBuyPrice"),
+      sellPrice: inputNumber("#watchlistSellPrice"),
+      checkPrice: inputNumber("#watchlistCheckPrice")
+    });
+    await persistWatchlistItem(item);
+    saveWatchlistItem(item);
+    watchlistForm.reset();
+    renderWatchlist();
+  } catch (error) {
+    showWatchlistError(error.message);
+  } finally {
+    setWatchlistLoading(false);
+  }
+}
+
+async function addCurrentReportToWatchlist() {
+  hideWatchlistError();
+  if (!latestReport) {
+    showWatchlistError("Load a stock report first, then add it to the watchlist.");
+    return;
+  }
+  setWatchlistLoading(true);
+  try {
+    const item = buildWatchlistItem(latestReport);
+    await persistWatchlistItem(item);
+    saveWatchlistItem(item);
+    setActiveTab("watchlist");
+    renderWatchlist();
+  } catch (error) {
+    showWatchlistError(error.message);
+  } finally {
+    setWatchlistLoading(false);
+  }
+}
+
+async function refreshWatchlist(showErrors = false) {
+  hideWatchlistError();
+  setWatchlistLoading(true);
+  try {
+    const baseItems = await fetchSavedWatchlistItems();
+    const items = baseItems.length ? baseItems.map(savedWatchlistToDisplayItem) : loadWatchlistItems();
+    if (!items.length) {
+      latestWatchlistItems = [];
+      renderWatchlist();
+      return;
+    }
+
+    const nextItems = [];
+    const failures = [];
+    for (const item of items) {
+      try {
+        const report = await fetchAnalysisForWatchlist(item.symbol);
+        nextItems.push(buildWatchlistItem(report, {
+          id: item.id,
+          name: item.manualName || "",
+          buyPrice: item.manualBuyPrice,
+          sellPrice: item.manualSellPrice,
+          checkPrice: item.checkPrice
+        }));
+      } catch (error) {
+        failures.push(`${item.symbol}: ${error.message}`);
+        nextItems.push({ ...item, rowTone: "watch", indicatorLabel: "Refresh failed", reason: error.message });
+      }
+    }
+
+    saveWatchlistItems(nextItems);
+    renderWatchlist();
+    if (showErrors && failures.length) {
+      showWatchlistError(`Some stocks could not refresh. ${failures.slice(0, 2).join(" | ")}`);
+    }
+  } catch (error) {
+    if (showErrors) {
+      showWatchlistError(error.message);
+    }
+  } finally {
+    setWatchlistLoading(false);
+  }
+}
+
+async function refreshWatchlistItem(id, showErrors = false) {
+  hideWatchlistError();
+  const items = loadWatchlistItems();
+  const item = items.find((entry) => String(entry.id) === String(id));
+  if (!item) {
+    return;
+  }
+
+  setWatchlistLoading(true);
+  try {
+    const report = await fetchAnalysisForWatchlist(item.symbol);
+    saveWatchlistItem(buildWatchlistItem(report, {
+      id: item.id,
+      name: item.manualName || "",
+      buyPrice: item.manualBuyPrice,
+      sellPrice: item.manualSellPrice,
+      checkPrice: item.checkPrice
+    }));
+    renderWatchlist();
+  } catch (error) {
+    if (showErrors) {
+      showWatchlistError(error.message);
+    }
+  } finally {
+    setWatchlistLoading(false);
+  }
+}
+
+async function fetchAnalysisForWatchlist(symbol) {
+  const response = await fetch(`/api/analyze?symbol=${encodeURIComponent(symbol)}`);
+  const payload = await response.json();
+  if (!response.ok) {
+    if (payload.suggestions) {
+      throw new Error("Choose a specific ticker from the suggestions, then add it to the watchlist.");
+    }
+    throw new Error(payload.error || "Could not refresh stock analysis.");
+  }
+  return payload;
+}
+
+function buildWatchlistItem(report, overrides = {}) {
+  const snapshot = buildWatchlistSnapshot(report, overrides);
+  const decision = evaluateWatchlistPrice(snapshot, snapshot.quotePrice);
+  const checkDecision = Number.isFinite(snapshot.checkPrice)
+    ? evaluateWatchlistPrice(snapshot, snapshot.checkPrice)
+    : null;
+
+  return {
+    id: overrides.id || watchlistId(report.symbol),
+    symbol: report.symbol,
+    name: overrides.name || report.longName || report.symbol,
+    manualName: overrides.name || "",
+    manualBuyPrice: Number.isFinite(overrides.buyPrice) ? overrides.buyPrice : null,
+    manualSellPrice: Number.isFinite(overrides.sellPrice) ? overrides.sellPrice : null,
+    currency: report.currency,
+    quotePrice: snapshot.quotePrice,
+    buyLow: snapshot.buyLow,
+    buyHigh: snapshot.buyHigh,
+    sellPrice: snapshot.sellPrice,
+    targetOne: snapshot.targetOne,
+    targetTwo: snapshot.targetTwo,
+    stopLoss: snapshot.stopLoss,
+    breakoutTrigger: snapshot.breakoutTrigger,
+    checkPrice: snapshot.checkPrice,
+    oneWeekVolume: oneWeekVolume(report),
+    avgDailyVolumeWeek: averageDailyVolume(report, 5),
+    analystTarget: snapshot.analystTarget,
+    recommendation: snapshot.recommendation,
+    planHorizon: snapshot.planHorizon,
+    planTimeframe: snapshot.planTimeframe,
+    planSetup: snapshot.planSetup,
+    planScore: snapshot.planScore,
+    riskReward: snapshot.riskReward,
+    volumeRatio: snapshot.volumeRatio,
+    avgVolume20: snapshot.avgVolume20,
+    sourceSummary: snapshot.sourceSummary,
+    overallScore: snapshot.overallScore,
+    technicalScore: snapshot.technicalScore,
+    fundamentalScore: snapshot.fundamentalScore,
+    eventRiskScore: snapshot.eventRiskScore,
+    qualityScore: snapshot.qualityScore,
+    rowTone: decision.tone,
+    indicatorLabel: decision.label,
+    reason: decision.reason,
+    checkResult: checkDecision ? checkDecision.fullText : "",
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function buildWatchlistSnapshot(report, overrides = {}) {
+  const levels = report.researchLevels || {};
+  const fundamentals = report.fundamentals?.metrics || {};
+  const bestPlan = bestWatchlistPlan(report.swingTradePlan);
+  const buyLow = Number.isFinite(overrides.buyPrice)
+    ? overrides.buyPrice
+    : finiteOrClient(bestPlan?.entry?.low, levels.pullbackEntry?.low, report.quote?.price);
+  const rawBuyHigh = Number.isFinite(overrides.buyPrice)
+    ? overrides.buyPrice
+    : finiteOrClient(bestPlan?.entry?.high, levels.pullbackEntry?.high, levels.pullbackEntry?.low, report.quote?.price);
+  const buyHigh = Number.isFinite(buyLow) && Number.isFinite(rawBuyHigh)
+    ? Math.max(buyLow, rawBuyHigh)
+    : rawBuyHigh;
+  const targets = Array.isArray(levels.targets) ? levels.targets.filter(Number.isFinite) : [];
+  const planTargets = Array.isArray(bestPlan?.targets) ? bestPlan.targets.map((target) => target.price).filter(Number.isFinite) : [];
+  const targetOne = Number.isFinite(overrides.sellPrice)
+    ? overrides.sellPrice
+    : finiteOrClient(planTargets[0], targets[0], fundamentals.targetMeanPrice, report.quote?.price);
+  const targetTwo = finiteOrClient(planTargets[1], targets[1], fundamentals.targetMeanPrice, targetOne);
+  const sellPrice = Number.isFinite(overrides.sellPrice)
+    ? overrides.sellPrice
+    : targetOne;
+  return {
+    currency: report.currency,
+    quotePrice: report.quote?.price,
+    buyLow,
+    buyHigh,
+    sellPrice,
+    targetOne,
+    targetTwo,
+    stopLoss: finiteOrClient(bestPlan?.stopLoss, levels.invalidation),
+    checkPrice: Number.isFinite(overrides.checkPrice) ? overrides.checkPrice : null,
+    breakoutTrigger: finiteOrClient(bestPlan?.entry?.trigger, levels.breakoutTrigger),
+    invalidation: finiteOrClient(levels.invalidation, bestPlan?.stopLoss),
+    analystTarget: fundamentals.targetMeanPrice,
+    recommendation: fundamentals.recommendationKey || "",
+    planHorizon: bestPlan?.horizon || "",
+    planTimeframe: bestPlan?.timeframe || "",
+    planSetup: bestPlan?.setup || "",
+    planScore: bestPlan?.score,
+    riskReward: bestPlan?.riskReward,
+    volumeRatio: report.technical?.indicators?.volumeRatio,
+    avgVolume20: report.technical?.indicators?.avgVolume20,
+    sourceSummary: watchlistSourceSummary(report),
+    overallScore: report.scores?.overall,
+    technicalScore: report.scores?.technical,
+    fundamentalScore: report.scores?.fundamental,
+    eventRiskScore: report.scores?.eventRisk,
+    qualityScore: report.scores?.confidence
+  };
+}
+
+function evaluateWatchlistPrice(snapshot, price) {
+  const scoreOk = numericOr(snapshot.overallScore, 0) >= 58
+    && numericOr(snapshot.technicalScore, 0) >= 55
+    && numericOr(snapshot.fundamentalScore, 0) >= 45
+    && numericOr(snapshot.qualityScore, 0) >= 50
+    && numericOr(snapshot.eventRiskScore, 100) < 65;
+  const planOk = numericOr(snapshot.planScore, snapshot.overallScore || 0) >= 50;
+  const riskRewardOk = !Number.isFinite(snapshot.riskReward) || snapshot.riskReward >= 1.3;
+  const volumeOk = !Number.isFinite(snapshot.volumeRatio) || snapshot.volumeRatio >= 1.1;
+  const analystNote = analystTargetNote(snapshot.analystTarget, price, snapshot.currency);
+
+  if (!Number.isFinite(price)) {
+    return {
+      tone: scoreOk ? "consider" : "watch",
+      label: scoreOk ? "Consider" : "Watchlist",
+      reason: scoreOk ? "Analysis is supportive, but price needs to be checked." : "Analysis is not strong enough without price confirmation.",
+      fullText: "Enter a price to check buy/sell suitability."
+    };
+  }
+
+  if (Number.isFinite(snapshot.stopLoss) && price <= snapshot.stopLoss) {
+    const reason = `Below stop loss near ${formatMoney(snapshot.stopLoss, snapshot.currency)}; avoid fresh buy.`;
+    return { tone: "avoid", label: "Avoid", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (Number.isFinite(snapshot.targetTwo) && price >= snapshot.targetTwo) {
+    const reason = `Above final target near ${formatMoney(snapshot.targetTwo, snapshot.currency)}; protect gains instead of buying.`;
+    return { tone: "avoid", label: "Sell zone", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (Number.isFinite(snapshot.targetOne) && price >= snapshot.targetOne) {
+    const reason = `Good sell/trim zone near target 1 ${formatMoney(snapshot.targetOne, snapshot.currency)}.`;
+    return { tone: "avoid", label: "Sell zone", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (!scoreOk || !planOk) {
+    const reason = "Watchlist only: scores, quality, or event risk are not aligned enough.";
+    return { tone: "watch", label: "Watchlist", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (!riskRewardOk) {
+    const reason = `Watchlist only: risk/reward is weak at ${formatNumber(snapshot.riskReward)}:1.`;
+    return { tone: "watch", label: "Weak R/R", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (Number.isFinite(snapshot.buyLow) && Number.isFinite(snapshot.buyHigh) && price >= snapshot.buyLow && price <= snapshot.buyHigh) {
+    const reason = `Good buy zone: price is inside ${formatMoney(snapshot.buyLow, snapshot.currency)}-${formatMoney(snapshot.buyHigh, snapshot.currency)}.`;
+    return { tone: "consider", label: "Consider", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (Number.isFinite(snapshot.buyLow) && price < snapshot.buyLow) {
+    const reason = `Below planned entry zone; wait for price to reclaim ${formatMoney(snapshot.buyLow, snapshot.currency)} or form a new setup.`;
+    return { tone: "watch", label: "Below entry", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (
+    Number.isFinite(snapshot.buyLow)
+    && Number.isFinite(snapshot.buyHigh)
+    && price >= snapshot.buyLow * 0.98
+    && price <= snapshot.buyHigh * 1.025
+  ) {
+    const reason = `Near buy zone; consider only if price holds above ${formatMoney(snapshot.buyHigh, snapshot.currency)}.`;
+    return { tone: "consider", label: "Near buy", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  if (Number.isFinite(snapshot.breakoutTrigger) && price >= snapshot.breakoutTrigger && (!Number.isFinite(snapshot.sellPrice) || price < snapshot.sellPrice)) {
+    const reason = volumeOk
+      ? `Breakout entry is supported above trigger ${formatMoney(snapshot.breakoutTrigger, snapshot.currency)} with acceptable volume.`
+      : `Breakout watch: price is above trigger ${formatMoney(snapshot.breakoutTrigger, snapshot.currency)}, but volume confirmation is weak.`;
+    return { tone: volumeOk ? "consider" : "watch", label: volumeOk ? "Breakout" : "Volume watch", reason, fullText: `${reason} ${analystNote}`.trim() };
+  }
+
+  const reason = "Watchlist only: wait for pullback to buy zone or a cleaner breakout.";
+  return { tone: "watch", label: "Watchlist", reason, fullText: `${reason} ${analystNote}`.trim() };
+}
+
+function analystTargetNote(target, price, currency) {
+  if (!Number.isFinite(target) || !Number.isFinite(price) || price <= 0) {
+    return "Analyst target was not available from the public data provider.";
+  }
+  const upside = ((target - price) / price) * 100;
+  return `Analyst target ${formatMoney(target, currency)} implies ${formatPercentValue(upside)} from this price.`;
+}
+
+function bestWatchlistPlan(swingTradePlan) {
+  const plans = Array.isArray(swingTradePlan?.plans) ? swingTradePlan.plans : [];
+  if (!plans.length) {
+    return null;
+  }
+  const bestHorizon = swingTradePlan?.suitability?.bestHorizon;
+  return plans.find((plan) => plan.horizon === bestHorizon)
+    || plans.reduce((best, plan) => numericOr(plan.score, 0) > numericOr(best.score, 0) ? plan : best, plans[0]);
+}
+
+function watchlistSourceSummary(report) {
+  const labels = (report.references?.links || [])
+    .map((link) => link.label || "")
+    .filter(Boolean);
+  const sourceNames = [];
+  if ((report.source || "").includes("Screener")) {
+    sourceNames.push("Screener");
+  }
+  if (labels.some((label) => label.includes("TradingView"))) {
+    sourceNames.push("TradingView");
+  }
+  if (labels.some((label) => label.includes("NSE"))) {
+    sourceNames.push("NSE");
+  }
+  if (labels.some((label) => label.includes("BSE"))) {
+    sourceNames.push("BSE");
+  }
+  if (labels.some((label) => label.includes("Moneycontrol"))) {
+    sourceNames.push("Moneycontrol");
+  }
+  return sourceNames.length ? [...new Set(sourceNames)].join(" / ") : report.source || "Public market data";
+}
+
+function renderWatchlist() {
+  const items = loadWatchlistItems();
+  watchlistRows.innerHTML = "";
+  setText("#watchlistCount", `${items.length} saved`);
+
+  if (!items.length) {
+    watchlistRows.innerHTML = "<tr><td colspan=\"7\">No watchlist stocks saved yet.</td></tr>";
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.className = `watchlist-row is-${item.rowTone || "watch"}`;
+    row.innerHTML = `
+      <td>
+        <span class="watchlist-indicator is-${escapeHtml(item.rowTone || "watch")}"></span>
+        <strong>${escapeHtml(item.indicatorLabel || "Watchlist")}</strong>
+        <small>${escapeHtml(item.reason || "")}</small>
+      </td>
+      <td>
+        <strong>${escapeHtml(item.name || item.symbol)}</strong>
+        <span>${escapeHtml(item.symbol)} · LTP ${formatMoney(item.quotePrice, item.currency)}</span>
+        <small>${escapeHtml([item.planHorizon, item.planTimeframe, item.planSetup].filter(Boolean).join(" · ") || "Plan from latest analysis")}</small>
+        <small>Sources: ${escapeHtml(item.sourceSummary || "Public market data")}</small>
+      </td>
+      <td>${formatBuyRange(item)}<span>Trigger ${formatMoney(item.breakoutTrigger, item.currency)}</span><span>Stop ${formatMoney(item.stopLoss, item.currency)} · ${item.manualBuyPrice ? "manual" : "plan"}</span></td>
+      <td>${formatTargetRange(item)}<span>R/R ${formatRiskReward(item.riskReward)} · Score ${scoreText(item.planScore || item.overallScore || 0)}</span><span>${escapeHtml(item.recommendation ? `Analyst view: ${item.recommendation}` : "Plan target")}</span></td>
+      <td>${formatLarge(item.oneWeekVolume, "")}<span>${formatLarge(item.avgDailyVolumeWeek, "")} avg/day</span><span>${formatVolumeConfirmation(item)}</span></td>
+      <td>
+        <div class="watchlist-price-check">
+          <input data-watchlist-price="${escapeHtml(item.id)}" type="number" step="0.01" min="0" value="${Number.isFinite(item.checkPrice) ? item.checkPrice : ""}" placeholder="Enter price">
+          <button type="button" data-check-watchlist="${escapeHtml(item.id)}">Check</button>
+        </div>
+        <small>${escapeHtml(item.checkResult || "Enter a price to test buy/sell suitability.")}</small>
+      </td>
+      <td>
+        <button class="link-button" type="button" data-refresh-watchlist="${escapeHtml(item.id)}">Refresh</button>
+        <button class="link-button" type="button" data-delete-watchlist="${escapeHtml(item.id)}">Delete</button>
+      </td>
+    `;
+    watchlistRows.appendChild(row);
+  }
+}
+
+async function checkWatchlistPrice(id) {
+  hideWatchlistError();
+  const items = loadWatchlistItems();
+  const item = items.find((entry) => String(entry.id) === String(id));
+  const input = watchlistRows.querySelector(`[data-watchlist-price="${id}"]`);
+  if (!item || !input) {
+    return;
+  }
+  const price = Number.parseFloat(input.value);
+  if (!Number.isFinite(price) || price <= 0) {
+    showWatchlistError("Enter a valid price to check.");
+    return;
+  }
+  const decision = evaluateWatchlistPrice(item, price);
+  item.checkPrice = price;
+  item.checkResult = decision.fullText;
+  try {
+    await updateSavedWatchlistItem(id, { checkPrice: price });
+  } catch (error) {
+    showWatchlistError(error.message);
+  }
+  saveWatchlistItems(items);
+  renderWatchlist();
+}
+
+async function deleteWatchlistItem(id) {
+  hideWatchlistError();
+  try {
+    await deleteSavedWatchlistItem(id);
+  } catch (error) {
+    showWatchlistError(error.message);
+  }
+  saveWatchlistItems(loadWatchlistItems().filter((item) => String(item.id) !== String(id)));
+  renderWatchlist();
+}
+
+function saveWatchlistItem(item) {
+  const items = loadWatchlistItems();
+  const existingIndex = items.findIndex((entry) => entry.symbol === item.symbol);
+  if (existingIndex >= 0) {
+    items[existingIndex] = { ...item, id: items[existingIndex].id };
+  } else {
+    items.unshift(item);
+  }
+  saveWatchlistItems(items);
+}
+
+function loadWatchlistItems() {
+  return Array.isArray(latestWatchlistItems) ? latestWatchlistItems : [];
+}
+
+function saveWatchlistItems(items) {
+  latestWatchlistItems = items;
+}
+
+async function fetchSavedWatchlistItems() {
+  const response = await fetch("/api/watchlist");
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Could not load watchlist.");
+  }
+  return payload.results || [];
+}
+
+async function persistWatchlistItem(item) {
+  const response = await fetch("/api/watchlist", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      symbol: item.symbol,
+      stockName: item.manualName || item.name || "",
+      buyPrice: item.manualBuyPrice,
+      sellPrice: item.manualSellPrice,
+      checkPrice: item.checkPrice
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Could not save watchlist item.");
+  }
+  item.id = payload.id;
+  return payload;
+}
+
+async function updateSavedWatchlistItem(id, fields) {
+  const response = await fetch(`/api/watchlist/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields)
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Could not update watchlist item.");
+  }
+  return payload;
+}
+
+async function deleteSavedWatchlistItem(id) {
+  const response = await fetch(`/api/watchlist/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Could not delete watchlist item.");
+  }
+  return payload;
+}
+
+function savedWatchlistToDisplayItem(item) {
+  return {
+    id: item.id,
+    symbol: item.symbol,
+    name: item.stockName || item.symbol,
+    manualName: item.stockName || "",
+    manualBuyPrice: item.buyPrice,
+    manualSellPrice: item.sellPrice,
+    checkPrice: item.checkPrice,
+    currency: "",
+    quotePrice: null,
+    buyLow: item.buyPrice,
+    buyHigh: item.buyPrice,
+    sellPrice: item.sellPrice,
+    targetOne: item.sellPrice,
+    targetTwo: item.sellPrice,
+    oneWeekVolume: null,
+    avgDailyVolumeWeek: null,
+    rowTone: "watch",
+    indicatorLabel: "Needs refresh",
+    reason: "Refresh to calculate live trade levels and volume.",
+    checkResult: item.checkPrice ? "Refresh to check this price against live levels." : "",
+    updatedAt: item.updatedAt
+  };
+}
+
+function showWatchlistError(message) {
+  watchlistError.textContent = message;
+  watchlistError.classList.remove("is-hidden");
+}
+
+function hideWatchlistError() {
+  watchlistError.classList.add("is-hidden");
+}
+
+function setWatchlistLoading(isLoading) {
+  watchlistLoading.classList.toggle("is-hidden", !isLoading);
+}
+
+function inputNumber(selector) {
+  const value = Number.parseFloat(document.querySelector(selector).value);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function oneWeekVolume(report) {
+  return (report.series || [])
+    .slice(-5)
+    .reduce((total, item) => total + (Number.isFinite(item.volume) ? item.volume : 0), 0);
+}
+
+function averageDailyVolume(report, days) {
+  const rows = (report.series || []).slice(-days);
+  if (!rows.length) {
+    return 0;
+  }
+  return rows.reduce((total, item) => total + (Number.isFinite(item.volume) ? item.volume : 0), 0) / rows.length;
+}
+
+function formatBuyRange(item) {
+  if (!Number.isFinite(item.buyLow) && !Number.isFinite(item.buyHigh)) {
+    return "n/a";
+  }
+  if (!Number.isFinite(item.buyLow) || item.buyLow === item.buyHigh) {
+    return formatMoney(item.buyHigh, item.currency);
+  }
+  return `${formatMoney(item.buyLow, item.currency)} - ${formatMoney(item.buyHigh, item.currency)}`;
+}
+
+function formatTargetRange(item) {
+  if (Number.isFinite(item.targetOne) && Number.isFinite(item.targetTwo) && item.targetOne !== item.targetTwo) {
+    return `${formatMoney(item.targetOne, item.currency)} / ${formatMoney(item.targetTwo, item.currency)}`;
+  }
+  return formatMoney(item.sellPrice || item.targetOne, item.currency);
+}
+
+function formatRiskReward(value) {
+  return Number.isFinite(value) ? `${formatNumber(value)}:1` : "n/a";
+}
+
+function formatVolumeConfirmation(item) {
+  if (!Number.isFinite(item.volumeRatio)) {
+    return "Volume confirmation n/a";
+  }
+  return `Volume ${formatNumber(item.volumeRatio)}x 20D avg`;
+}
+
+function finiteOrClient(...values) {
+  return values.find((value) => Number.isFinite(value)) ?? null;
+}
+
+function watchlistId(symbol) {
+  const suffix = window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${symbol}-${suffix}`;
+}
+
 function renderSearchLogs(items, totalCount) {
   searchLogRows.innerHTML = "";
   document.querySelector("#searchLogSummary").textContent = `${items.length} recent searches shown${totalCount > items.length ? ` of ${totalCount}` : ""}.`;
@@ -702,7 +1364,108 @@ function renderReport(report) {
   renderScenarios(report.scenarios, currency);
   renderSwingTradePlan(report.swingTradePlan, currency);
   renderReferences(report.references);
+  renderSectionSummaries(report, currency);
   redrawChart();
+}
+
+function renderSectionSummaries(report, currency) {
+  const eventRisk = report.scores?.eventRisk;
+  const qualityScore = report.scores?.confidence;
+  const overallGate = Math.min(
+    numericOr(report.scores?.overall, 0),
+    numericOr(qualityScore, 0),
+    100 - numericOr(eventRisk, 100)
+  );
+
+  setText(
+    "#reportVerdict",
+    decisionLine(
+      overallGate,
+      "overall score, data quality, and event risk are aligned.",
+      "wait for cleaner confirmation from score, quality, or event risk."
+    )
+  );
+  setText("#ownershipSectionSummary", ownershipDecision(report.growthDrivers, report.scores?.fundamental));
+  setText(
+    "#chartSectionSummary",
+    decisionLine(
+      report.scores?.technical,
+      "trend and momentum support an entry only near the planned levels.",
+      "wait for a breakout, pullback, or moving-average repair."
+    )
+  );
+  setText("#levelsNote", levelsDecision(report.researchLevels, report.scores?.overall, eventRisk, currency));
+  setText(
+    "#technicalSectionSummary",
+    decisionLine(
+      report.scores?.technical,
+      "technical setup is supportive if price respects support and volume confirms.",
+      "technical setup is not clean enough yet; keep it on watchlist."
+    )
+  );
+  setText(
+    "#fundamentalSectionSummary",
+    decisionLine(
+      report.scores?.fundamental,
+      "fundamental profile is strong enough to support a position-sized entry.",
+      "fundamentals are mixed or incomplete, so keep it on watchlist."
+    )
+  );
+  setText("#growthDriverText", growthDecision(report.growthDrivers, report.scores?.fundamental));
+  setText("#qualityText", qualityDecision(report.quality));
+  setText("#scenarioSectionSummary", scenarioDecision(report.scenarios, report.scores?.overall, eventRisk));
+  setText("#crossCheckSummary", "Watchlist discipline: verify live chart, filings, results, and news before treating this as investable.");
+}
+
+function decisionLine(score, positiveReason, watchReason) {
+  if (numericOr(score, 0) >= 65) {
+    return `Good to consider: ${positiveReason}`;
+  }
+  return `Watchlist only: ${watchReason}`;
+}
+
+function ownershipDecision(growthDrivers, fundamentalScore) {
+  const rows = growthDrivers?.ownership?.rows || [];
+  const institutionalRows = rows.filter((row) => ["Promoters", "FIIs", "DIIs"].includes(row.name));
+  const improvingCount = institutionalRows.filter((row) => numericOr(row.changePoints, 0) > 0).length;
+  if (numericOr(fundamentalScore, 0) >= 60 && improvingCount >= 2) {
+    return "Good to consider: ownership trend is supportive with improving key holder participation.";
+  }
+  return "Watchlist only: ownership trend is mixed, incomplete, or needs latest filing verification.";
+}
+
+function levelsDecision(levels, overallScore, eventRisk, currency) {
+  const buyLow = levels?.pullbackEntry?.low;
+  const buyHigh = levels?.pullbackEntry?.high;
+  const target = Array.isArray(levels?.targets) ? levels.targets[0] : null;
+  if (numericOr(overallScore, 0) >= 65 && numericOr(eventRisk, 100) < 65) {
+    return `Good to consider only near ${formatMoney(buyLow, currency)}-${formatMoney(buyHigh, currency)}; first sell zone is ${formatMoney(target, currency)}.`;
+  }
+  return `Watchlist only: wait for price near ${formatMoney(buyLow, currency)}-${formatMoney(buyHigh, currency)} or a cleaner breakout.`;
+}
+
+function growthDecision(growthDrivers, fundamentalScore) {
+  const catalysts = growthDrivers?.catalysts || [];
+  const budgetImpacts = growthDrivers?.budgetImpacts || [];
+  const hasPositiveContext = catalysts.length || budgetImpacts.length || growthDrivers?.sectorAnalysis?.available;
+  if (numericOr(fundamentalScore, 0) >= 60 && hasPositiveContext) {
+    return "Good to consider: growth/catalyst context supports the fundamental story, but verify latest filings.";
+  }
+  return "Watchlist only: catalyst support is limited or not strong enough for an investment call.";
+}
+
+function qualityDecision(quality) {
+  if (numericOr(quality?.score, 0) >= 75) {
+    return "Good to consider: data coverage is strong enough for a useful research view.";
+  }
+  return "Watchlist only: data quality needs manual cross-checking before acting.";
+}
+
+function scenarioDecision(scenarios, overallScore, eventRisk) {
+  if (numericOr(overallScore, 0) >= 65 && numericOr(eventRisk, 100) < 65 && scenarios?.stance !== "Wait for repair") {
+    return "Good to consider: bull/base scenarios are usable if triggers confirm.";
+  }
+  return "Watchlist only: scenario risk is high until price confirms the trigger.";
 }
 
 function renderMarketClock(clock) {
@@ -1900,62 +2663,45 @@ function renderTechnical(technical, currency) {
   const indicators = technical.indicators;
   const relativeStrength = technical.relativeStrength || {};
   const rows = [
-    ["SMA 20", formatMoney(indicators.sma20, currency)],
     ["SMA 50", formatMoney(indicators.sma50, currency)],
     ["SMA 200", formatMoney(indicators.sma200, currency)],
     ["RSI 14", formatNumber(indicators.rsi14)],
     ["MACD", formatNumber(indicators.macd)],
-    ["ATR 14", formatMoney(indicators.atr14, currency)],
     ["ATR %", formatPercentValue(indicators.atrPercent)],
     ["1M return", formatPercentValue(technical.performance.oneMonth)],
     ["3M return", formatPercentValue(technical.performance.threeMonth)],
-    ["6M return", formatPercentValue(technical.performance.sixMonth)],
     ["1Y return", formatPercentValue(technical.performance.oneYear)]
   ];
 
   if (relativeStrength.available) {
-    const oneMonth = relativeStrength.rows?.find((row) => row.period === "oneMonth");
-    const threeMonth = relativeStrength.rows?.find((row) => row.period === "threeMonth");
-    rows.push(
-      [`RS vs ${relativeStrength.benchmarkName}`, relativeStrength.label || "n/a"],
-      ["1M relative", formatPointChange(oneMonth?.spread)],
-      ["3M relative", formatPointChange(threeMonth?.spread)]
-    );
+    rows.push([`RS vs ${relativeStrength.benchmarkName}`, relativeStrength.label || "n/a"]);
   }
 
   renderTable("#technicalMetrics", rows);
   renderList("#technicalSignals", [
     ...(technical.signals || []),
     ...(relativeStrength.available ? [relativeStrength.summary] : [])
-  ]);
+  ].slice(0, 5));
 }
 
 function renderFundamentals(metrics, signals, currency) {
   const rows = [
     ["Sector", metrics.sector || "n/a"],
-    ["Industry", metrics.industry || "n/a"],
     ["Market cap", formatLarge(metrics.marketCap, currency)],
     ["Revenue", formatLarge(metrics.revenue, currency)],
     ["Net profit", formatLarge(metrics.netIncome, currency)],
     ["Trailing P/E", formatNumber(metrics.trailingPE)],
-    ["Forward P/E", formatNumber(metrics.forwardPE)],
-    ["PEG ratio", formatNumber(metrics.pegRatio)],
-    ["Price/book", formatNumber(metrics.priceToBook)],
     ["Revenue growth", formatRatioPercent(metrics.revenueGrowth)],
-    ["5Y sales growth", formatRatioPercent(metrics.salesGrowth5y)],
-    ["Earnings growth", formatRatioPercent(metrics.earningsGrowth)],
     ["Profit margin", formatRatioPercent(metrics.profitMargins)],
     ["Return on equity", formatRatioPercent(metrics.returnOnEquity)],
-    ["ROCE", formatRatioPercent(metrics.returnOnCapitalEmployed)],
     ["Debt/equity", formatNumber(metrics.debtToEquity)],
     ["Promoter holding", formatRatioPercent(metrics.promoterHolding)],
     ["Target mean", formatMoney(metrics.targetMeanPrice, currency)],
-    ["Analyst view", metrics.recommendationKey || "n/a"],
-    ["Data source", metrics.dataSource || "n/a"]
+    ["Analyst view", metrics.recommendationKey || "n/a"]
   ];
 
   renderTable("#fundamentalMetrics", rows);
-  renderList("#fundamentalSignals", signals);
+  renderList("#fundamentalSignals", (signals || []).slice(0, 5));
 }
 
 function renderOwnershipSnapshot(growthDrivers, fundamentals) {
@@ -2050,15 +2796,12 @@ function renderGrowthDrivers(data, currency) {
     const rows = ownershipRows
       .filter((row) => ["Promoters", "FIIs", "DIIs", "Public"].includes(row.name))
       .map((row) => {
-        const history = (row.quarters || [])
-          .map((quarter) => `${escapeHtml(quarter.period)} ${formatRatioPercent(quarter.value)}`)
-          .join(" / ");
         return `
           <div class="ownership-row">
             <span>${escapeHtml(row.name)}</span>
             <strong>${formatRatioPercent(row.latest)}</strong>
             <em class="${changeClass(row.changePoints)}">${formatPointChange(row.changePoints)}</em>
-            <small>${escapeHtml(row.trend || "n/a")}${history ? ` · ${history}` : ""}</small>
+            <small>${escapeHtml(row.trend || "n/a")}</small>
           </div>
         `;
       })
@@ -2087,7 +2830,7 @@ function renderGrowthDrivers(data, currency) {
     container.appendChild(card);
   }
 
-  const catalysts = data.catalysts || [];
+  const catalysts = (data.catalysts || []).slice(0, 3);
   if (catalysts.length) {
     const card = document.createElement("article");
     card.className = "growth-card";
@@ -2136,7 +2879,7 @@ function renderGrowthDrivers(data, currency) {
     container.appendChild(card);
   }
 
-  const budgetImpacts = data.budgetImpacts || [];
+  const budgetImpacts = (data.budgetImpacts || []).slice(0, 3);
   if (budgetImpacts.length) {
     const card = document.createElement("article");
     card.className = "growth-card";
@@ -2165,14 +2908,13 @@ function renderQuality(quality) {
   renderTable("#qualityMetrics", [
     ["Confidence", `${quality.score}/100 (${quality.label})`],
     ["Chart candles", formatNumber(quality.chartPoints)],
-    ["Fundamental metrics", formatNumber(quality.availableFundamentalMetrics)],
     ["Data sources", quality.dataSources || "n/a"]
   ]);
   renderAccuracyChecks(quality.checks || []);
   renderList("#qualityWarnings", [
     ...(quality.strengths || []).map((item) => `Strength: ${item}`),
     ...(quality.warnings || []).map((item) => `Warning: ${item}`)
-  ]);
+  ].slice(0, 4));
 }
 
 function renderAccuracyChecks(checks) {
@@ -2209,26 +2951,22 @@ function renderScenarios(scenarios, currency) {
       title: scenarios.bull.title,
       lines: [
         `Trigger: ${formatMoney(scenarios.bull.trigger, currency)}`,
-        scenarios.bull.confirmation,
         `Targets: ${scenarios.bull.expectedMove.map((value) => formatMoney(value, currency)).join(" / ")}`,
-        scenarios.bull.reason
+        scenarios.bull.confirmation
       ]
     },
     {
       title: scenarios.base.title,
       lines: [
         `Range: ${formatMoney(scenarios.base.rangeLow, currency)} - ${formatMoney(scenarios.base.rangeHigh, currency)}`,
-        scenarios.base.action,
-        scenarios.base.reason
+        scenarios.base.action
       ]
     },
     {
       title: scenarios.bear.title,
       lines: [
         `Trigger: ${formatMoney(scenarios.bear.trigger, currency)}`,
-        scenarios.bear.nextSupport ? `Next support: ${formatMoney(scenarios.bear.nextSupport, currency)}` : "Next support: n/a",
-        scenarios.bear.action,
-        scenarios.bear.reason
+        scenarios.bear.action
       ]
     }
   ];
@@ -2775,6 +3513,10 @@ function holdingChangeClass(value) {
   return value > 0 ? "is-up" : "is-down";
 }
 
+function numericOr(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function scoreText(value) {
   return `${Math.round(value)}/100`;
 }
@@ -2830,4 +3572,5 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+renderWatchlist();
 showState("empty");

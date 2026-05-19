@@ -7,6 +7,7 @@ from django.test import TestCase
 
 from . import services
 from .models import StockSearchLog
+from .models import WatchlistItem
 
 
 class SwingTradePlanTests(SimpleTestCase):
@@ -350,6 +351,51 @@ class OpenInterestTests(SimpleTestCase):
         self.assertFalse(report["periods"]["day"]["callPutVolumeSplitAvailable"])
         self.assertIn("not call/put split", report["periods"]["day"]["volumeSummary"])
         self.assertFalse(report["periods"]["week"]["available"])
+
+
+class WatchlistApiTests(TestCase):
+    def test_watchlist_post_upserts_symbol_and_get_lists_item(self):
+        response = self.client.post(
+            "/api/watchlist",
+            data={
+                "symbol": "hal.ns",
+                "stockName": "HAL",
+                "buyPrice": 4200,
+                "sellPrice": 4700,
+                "checkPrice": 4300,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(WatchlistItem.objects.count(), 1)
+        self.assertEqual(response.json()["symbol"], "HAL.NS")
+
+        response = self.client.post(
+            "/api/watchlist",
+            data={"symbol": "HAL.NS", "stockName": "Hindustan Aeronautics", "buyPrice": 4250},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(WatchlistItem.objects.count(), 1)
+        item = WatchlistItem.objects.get()
+        self.assertEqual(item.stock_name, "Hindustan Aeronautics")
+        self.assertEqual(float(item.buy_price), 4250.0)
+
+        response = self.client.get("/api/watchlist")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"][0]["symbol"], "HAL.NS")
+
+    def test_watchlist_rejects_invalid_price(self):
+        response = self.client.post(
+            "/api/watchlist",
+            data={"symbol": "HAL.NS", "buyPrice": -1},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("greater than zero", response.json()["error"])
 
 
 class MarketSnapshotTests(SimpleTestCase):

@@ -4315,3 +4315,115 @@ body {
   display: none !important;
   background: none !important;
 }
+
+.section-summary {
+  margin: 8px 0 12px;
+  color: #d4e1da;
+  font-size: 0.92rem;
+  font-weight: 750;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.quote-verdict {
+  margin-bottom: 0;
+}
+
+.watchlist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.watchlist-table-panel {
+  min-width: 0;
+}
+
+.watchlist-table {
+  min-width: 980px;
+}
+
+.watchlist-row td:first-child {
+  border-left: 4px solid var(--red);
+}
+
+.watchlist-row.is-consider td:first-child {
+  border-left-color: var(--green);
+}
+
+.watchlist-row.is-watch td:first-child {
+  border-left-color: var(--amber);
+}
+
+.watchlist-row.is-avoid td:first-child {
+  border-left-color: var(--red);
+}
+
+.watchlist-indicator {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 7px;
+  border-radius: 999px;
+  background: var(--red);
+  box-shadow: 0 0 0 4px rgba(255, 107, 122, 0.12);
+  vertical-align: middle;
+}
+
+.watchlist-indicator.is-consider {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(56, 229, 143, 0.12);
+}
+
+.watchlist-indicator.is-watch {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(255, 184, 77, 0.12);
+}
+
+.watchlist-price-check {
+  display: grid;
+  grid-template-columns: minmax(92px, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.watchlist-price-check input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: rgba(6, 10, 8, 0.86);
+  outline: none;
+}
+
+.watchlist-price-check input:focus {
+  border-color: var(--xtract-primary);
+  box-shadow: 0 0 0 3px rgba(156, 255, 110, 0.14);
+}
+
+.watchlist-price-check button {
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid rgba(156, 255, 110, 0.28);
+  border-radius: 8px;
+  color: #071007;
+  background: linear-gradient(135deg, var(--xtract-primary), var(--xtract-secondary));
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+@media (max-width: 760px) {
+  .watchlist-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .watchlist-actions button {
+    flex: 1 1 160px;
+  }
+}

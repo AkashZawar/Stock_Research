@@ -52,6 +52,31 @@ class TradeReference(models.Model):
         }
 
 
+class WatchlistItem(models.Model):
+    symbol = models.CharField(max_length=32, unique=True)
+    stock_name = models.CharField(max_length=160, blank=True)
+    buy_price = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    sell_price = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    check_price = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "symbol": self.symbol,
+            "stockName": self.stock_name,
+            "buyPrice": float(self.buy_price) if self.buy_price is not None else None,
+            "sellPrice": float(self.sell_price) if self.sell_price is not None else None,
+            "checkPrice": float(self.check_price) if self.check_price is not None else None,
+            "createdAt": self.created_at.isoformat(),
+            "updatedAt": self.updated_at.isoformat(),
+        }
+
+
 class StockSearchLog(models.Model):
     raw_input = models.CharField(max_length=160, blank=True)
     symbol = models.CharField(max_length=32, blank=True, db_index=True)
