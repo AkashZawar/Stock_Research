@@ -158,7 +158,15 @@ def market_monitor(request):
     try:
         if request.GET.get("refresh") == "1":
             services.clear_cache("market-monitor")
-        return JsonResponse(services.cached("market-monitor", services.build_market_monitor, 10 * 60))
+            services.start_market_monitor_refresh()
+            return JsonResponse(services.build_fast_market_monitor(refreshing=True))
+
+        cached_payload = services.get_cached("market-monitor")
+        if cached_payload:
+            return JsonResponse(cached_payload)
+
+        services.start_market_monitor_refresh()
+        return JsonResponse(services.build_fast_market_monitor(refreshing=True))
     except Exception as error:
         return JsonResponse({"error": str(error)}, status=500)
 

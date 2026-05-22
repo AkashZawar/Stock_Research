@@ -89,6 +89,7 @@ let suggestionDialogEl = null;
 let chartDialogEl = null;
 let expandedChartCanvas = null;
 let marketClockTimer = null;
+let monitorPollTimer = null;
 let selectedOpenInterestPeriod = "day";
 let selectedMonitorPane = "primary";
 
@@ -516,10 +517,13 @@ function normalizeSuggestionGroups(suggestionsPayload) {
     .filter((group) => group.items.length);
 }
 
-async function loadMarketMonitor(forceRefresh) {
-  monitorLoading.classList.remove("is-hidden");
-  monitorError.classList.add("is-hidden");
-  monitorContent.classList.add("is-hidden");
+async function loadMarketMonitor(forceRefresh, options = {}) {
+  const silent = Boolean(options.silent);
+  if (!silent) {
+    monitorLoading.classList.remove("is-hidden");
+    monitorError.classList.add("is-hidden");
+    monitorContent.classList.add("is-hidden");
+  }
 
   try {
     const suffix = forceRefresh ? "?refresh=1" : "";
@@ -532,11 +536,34 @@ async function loadMarketMonitor(forceRefresh) {
     renderMarketMonitor(payload);
     setMonitorPane(selectedMonitorPane);
     monitorContent.classList.remove("is-hidden");
+    if (payload.refreshing) {
+      scheduleMarketMonitorPoll();
+    } else {
+      clearMarketMonitorPoll();
+    }
   } catch (error) {
-    monitorError.textContent = error.message;
-    monitorError.classList.remove("is-hidden");
+    if (!silent) {
+      monitorError.textContent = error.message;
+      monitorError.classList.remove("is-hidden");
+    }
   } finally {
-    monitorLoading.classList.add("is-hidden");
+    if (!silent) {
+      monitorLoading.classList.add("is-hidden");
+    }
+  }
+}
+
+function scheduleMarketMonitorPoll() {
+  clearMarketMonitorPoll();
+  monitorPollTimer = window.setTimeout(() => {
+    loadMarketMonitor(false, { silent: true });
+  }, 3000);
+}
+
+function clearMarketMonitorPoll() {
+  if (monitorPollTimer) {
+    window.clearTimeout(monitorPollTimer);
+    monitorPollTimer = null;
   }
 }
 
@@ -2107,9 +2134,15 @@ function tradingViewChartUrl(report) {
 }
 
 function renderMarketMonitor(data) {
-  document.querySelector("#monitorGenerated").textContent = `Generated ${formatDateTime(data.generatedAt)} from ${data.source}`;
+  const refreshText = data.refreshing ? " · full scan refreshing" : "";
+  document.querySelector("#monitorGenerated").textContent = `Generated ${formatDateTime(data.generatedAt)} from ${data.source}${refreshText}`;
   document.querySelector("#monitorNote").textContent = data.note;
-  document.querySelector("#scanCount").textContent = `${data.scannedCount} scanned`;
+  const primaryUniverse = data.primaryScanUniverse || {};
+  const primaryLabel = primaryUniverse.label || "Nifty 500 only";
+  const scannedCount = data.scannedCount || 0;
+  const universeCount = primaryUniverse.count || 0;
+  const scanText = universeCount > scannedCount ? `${scannedCount}/${universeCount} scanned` : `${scannedCount} scanned`;
+  document.querySelector("#scanCount").textContent = `${primaryLabel} · ${scanText}`;
   document.querySelector("#highVolumeCount").textContent = `${data.activityScannedCount || 0} scanned`;
   document.querySelector("#catalystCount").textContent = `${(data.orderCatalysts || []).length} found`;
   renderNseSnapshot(data.nseSnapshot || {});

@@ -4,6 +4,7 @@ import math
 import os
 import re
 import ssl
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
@@ -19,10 +20,13 @@ import certifi
 
 CACHE_TTL_SECONDS = 5 * 60
 SEC_CACHE_TTL_SECONDS = 24 * 60 * 60
+MARKET_MONITOR_CACHE_SECONDS = 10 * 60
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
 _cache = {}
+_market_monitor_refresh_lock = threading.Lock()
+_market_monitor_refreshing = False
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 MODULES = ",".join([
@@ -99,6 +103,12 @@ NSE_OI_SECTOR_INDICES = (
     "NIFTY ENERGY",
     "NIFTY INFRASTRUCTURE",
 )
+NIFTY_500_INDEX_NAME = "NIFTY 500"
+NIFTY_500_PRIMARY_CACHE_SECONDS = 6 * 60 * 60
+NIFTY_500_PRIMARY_SCAN_LIMIT = 120
+MARKET_MONITOR_PRIMARY_CONCURRENCY = 6
+MARKET_MONITOR_ACTIVITY_CONCURRENCY = 3
+MARKET_MONITOR_CATALYST_CONCURRENCY = 2
 NSE_SNAPSHOT_ENDPOINTS = {
     "marketStatus": "/api/marketStatus",
     "allIndices": "/api/allIndices",
@@ -2077,9 +2087,26 @@ def sector_rank(match, sectors):
 
 
 def build_market_monitor():
-    nse_snapshot = safe_nse_market_snapshot()
-    moneycontrol_sectors = safe_moneycontrol_sector_snapshot()
-    sector_open_interest = safe_sector_open_interest()
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        nse_snapshot_future = executor.submit(safe_nse_market_snapshot)
+        moneycontrol_sectors_future = executor.submit(safe_moneycontrol_sector_snapshot)
+        sector_open_interest_future = executor.submit(safe_sector_open_interest)
+        breakout_universe_future = executor.submit(safe_nifty500_primary_universe)
+        usd_inr_future = executor.submit(safe_usd_inr_snapshot)
+        commodity_results_future = executor.submit(
+            settle_map,
+            COMMODITIES,
+            get_commodity_snapshot,
+            3,
+        )
+
+        nse_snapshot = nse_snapshot_future.result()
+        moneycontrol_sectors = moneycontrol_sectors_future.result()
+        sector_open_interest = sector_open_interest_future.result()
+        breakout_universe = breakout_universe_future.result()
+        usd_inr = usd_inr_future.result()
+        commodity_results = commodity_results_future.result()
+
     moneycontrol_sectors = attach_sector_top_stocks(
         moneycontrol_sectors,
         sector_open_interest.get("stockMoversBySector") or {},
@@ -2088,12 +2115,33 @@ def build_market_monitor():
         **moneycontrol_sectors,
         "sectorOpenInterest": sector_open_interest,
     }
-    breakout_universe = market_activity_universe(nse_snapshot)
-    usd_inr = safe_usd_inr_snapshot()
-    commodity_results = settle_map(COMMODITIES, get_commodity_snapshot, concurrency=3)
-    scan_results = settle_map(breakout_universe, scan_watchlist_stock, concurrency=6)
-    activity_results = settle_map(market_activity_universe(), scan_high_activity_stock, concurrency=4)
-    catalyst_results = settle_map(ORDER_CATALYST_WATCHLIST, scan_order_catalyst_stock, concurrency=2)
+
+    primary_scan_universe = primary_scan_candidates_from_nifty500(breakout_universe)
+    activity_universe = market_activity_universe()
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        scan_results_future = executor.submit(
+            settle_map,
+            primary_scan_universe,
+            scan_watchlist_stock,
+            MARKET_MONITOR_PRIMARY_CONCURRENCY,
+        )
+        activity_results_future = executor.submit(
+            settle_map,
+            activity_universe,
+            scan_high_activity_stock,
+            MARKET_MONITOR_ACTIVITY_CONCURRENCY,
+        )
+        catalyst_results_future = executor.submit(
+            settle_map,
+            ORDER_CATALYST_WATCHLIST,
+            scan_order_catalyst_stock,
+            MARKET_MONITOR_CATALYST_CONCURRENCY,
+        )
+
+        scan_results = scan_results_future.result()
+        activity_results = activity_results_future.result()
+        catalyst_results = catalyst_results_future.result()
+
     commodity_snapshots = [
         commodity_with_inr(value, usd_inr)
         for ok, value in commodity_results
@@ -2117,7 +2165,7 @@ def build_market_monitor():
     return {
         "generatedAt": iso_now(),
         "source": "NSE India public market APIs, Moneycontrol sector analysis, Yahoo Finance public endpoints, and headline scan",
-        "note": "NSE snapshot uses public NSE website endpoints; sector analysis uses Moneycontrol's sector-analysis page, and sector-wise OI maps NSE Change in OI symbols into NSE sectoral indices. 52-week and 2-year scan highs use the recent daily history returned by the provider. NR4/NR7 breakout means price is breaking above a tight prior 4-day or 7-day range near the 52-week high. Confirm liquidity, headlines, and levels on your broker or exchange feed before acting.",
+        "note": "NSE snapshot uses public NSE website endpoints; sector analysis uses Moneycontrol's sector-analysis page, and sector-wise OI maps NSE Change in OI symbols into NSE sectoral indices. Primary 50 stays Nifty 500-only: it ranks current Nifty 500 constituents with NSE price, volume, and 52-week range data, then chart-scans the strongest candidates. NR4/NR7 breakout means price is breaking above a tight prior 4-day or 7-day range near the 52-week high. Confirm liquidity, headlines, and levels on your broker or exchange feed before acting.",
         "nseSnapshot": nse_snapshot,
         "moneycontrolSectorAnalysis": moneycontrol_sectors,
         "commodities": commodity_snapshots,
@@ -2127,9 +2175,150 @@ def build_market_monitor():
         "orderCatalysts": order_catalysts,
         "impacted": impacted,
         "scannedCount": len(scanned_stocks),
+        "primaryScanUniverse": {
+            "label": "Nifty 500 only",
+            "count": len(breakout_universe),
+            "scanned": len(primary_scan_universe),
+            "scanLimit": NIFTY_500_PRIMARY_SCAN_LIMIT,
+            "available": bool(breakout_universe),
+        },
         "activityScannedCount": len(activity_stocks),
         "catalystScannedCount": len([value for ok, value in catalyst_results if ok]),
     }
+
+
+def build_fast_market_monitor(refreshing=True):
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        nse_snapshot_future = executor.submit(safe_nse_market_snapshot)
+        universe_future = executor.submit(safe_nifty500_primary_universe)
+        nse_snapshot = nse_snapshot_future.result()
+        breakout_universe = universe_future.result()
+
+    primary_scan_universe = primary_scan_candidates_from_nifty500(breakout_universe)
+    candidates = [
+        fast_primary_candidate(stock)
+        for stock in primary_scan_universe[:50]
+    ]
+
+    return {
+        "generatedAt": iso_now(),
+        "source": "NSE India public market APIs with background chart scan",
+        "note": "Fast mode ranks Nifty 500 constituents from NSE price, volume, and 52-week range data while the full chart scan refreshes in the background.",
+        "refreshing": refreshing,
+        "fastMode": True,
+        "nseSnapshot": nse_snapshot,
+        "moneycontrolSectorAnalysis": {
+            "available": False,
+            "sectors": [],
+            "topPerforming": [],
+            "underPerforming": [],
+            "sectorOpenInterest": {"available": False, "stockMoversBySector": {}},
+        },
+        "commodities": [],
+        "usdInr": {"available": False},
+        "breakoutCandidates": candidates,
+        "highVolumeCandidates": [],
+        "orderCatalysts": [],
+        "impacted": [],
+        "scannedCount": len(candidates),
+        "primaryScanUniverse": {
+            "label": "Nifty 500 only",
+            "count": len(breakout_universe),
+            "scanned": len(primary_scan_universe),
+            "scanLimit": NIFTY_500_PRIMARY_SCAN_LIMIT,
+            "available": bool(breakout_universe),
+        },
+        "activityScannedCount": 0,
+        "catalystScannedCount": 0,
+    }
+
+
+def fast_primary_candidate(stock):
+    price = stock.get("nsePrice")
+    year_high = stock.get("nseYearHigh")
+    year_low = stock.get("nseYearLow")
+    change_percent = stock.get("nseChangePercent")
+    pct_below_high = (
+        safe_divide(year_high - price, year_high) * 100
+        if is_finite(price) and is_finite(year_high) and year_high > 0
+        else None
+    )
+    pct_above_low = (
+        safe_divide(price - year_low, year_low) * 100
+        if is_finite(price) and is_finite(year_low) and year_low > 0
+        else None
+    )
+    score = round(clamp(primary_scan_prefilter_score(stock), 0, 100))
+
+    return {
+        "symbol": stock["symbol"],
+        "name": stock["name"],
+        "tags": [*stock.get("tags", []), "Fast rank"],
+        "price": round_or_none(price),
+        "changePercent": round_or_none(change_percent),
+        "availableHigh": round_or_none(year_high),
+        "availableHighDate": "",
+        "high52Week": round_or_none(year_high),
+        "pctBelowAvailableHigh": round_or_none(pct_below_high),
+        "pctBelow52WeekHigh": round_or_none(pct_below_high),
+        "pctAbovePrior20Low": None,
+        "drawdownFromRecentHigh": None,
+        "prior5High": None,
+        "prior20High": None,
+        "prior55High": None,
+        "prior20Low": round_or_none(year_low),
+        "sma20": None,
+        "sma50": None,
+        "rsi14": None,
+        "breakout": False,
+        "breakoutWatch": is_finite(pct_below_high) and pct_below_high <= 5,
+        "bullishReversal": False,
+        "trendReversal": False,
+        "reversalWatch": is_finite(pct_above_low) and pct_above_low <= 20 and (change_percent or 0) > 0,
+        "nearAvailableHigh": is_finite(pct_below_high) and pct_below_high <= 3,
+        "near52WeekHigh": is_finite(pct_below_high) and pct_below_high <= 3,
+        "near52WeekSetup": is_finite(pct_below_high) and pct_below_high <= 5,
+        "narrowRange4": {},
+        "narrowRange7": {},
+        "narrowRange4Breakout": False,
+        "narrowRange7Breakout": False,
+        "narrowRange4Watch": False,
+        "narrowRange7Watch": False,
+        "atr": None,
+        "volumeRatio": None,
+        "oneMonth": None,
+        "score": score,
+        "signal": describe_fast_primary_signal(pct_below_high, change_percent),
+    }
+
+
+def describe_fast_primary_signal(pct_below_high, change_percent):
+    if is_finite(pct_below_high) and pct_below_high <= 3:
+        return "Near 52-week high; chart scan pending"
+    if is_finite(change_percent) and change_percent > 2:
+        return "Nifty 500 momentum candidate; chart scan pending"
+    return "Nifty 500 ranked candidate; chart scan pending"
+
+
+def start_market_monitor_refresh():
+    global _market_monitor_refreshing
+    with _market_monitor_refresh_lock:
+        if _market_monitor_refreshing:
+            return False
+        _market_monitor_refreshing = True
+
+    thread = threading.Thread(target=refresh_market_monitor_cache, daemon=True)
+    thread.start()
+    return True
+
+
+def refresh_market_monitor_cache():
+    global _market_monitor_refreshing
+    try:
+        set_cached("market-monitor", build_market_monitor(), MARKET_MONITOR_CACHE_SECONDS)
+    finally:
+        with _market_monitor_refresh_lock:
+            _market_monitor_refreshing = False
 
 
 def safe_usd_inr_snapshot():
@@ -2252,6 +2441,114 @@ def primary_opportunity_candidates(scanned_stocks):
     return [*sorted_qualifying, *fillers][:50]
 
 
+def safe_nifty500_primary_universe():
+    try:
+        return cached(
+            "nifty-500-primary-universe",
+            build_nifty500_primary_universe,
+            NIFTY_500_PRIMARY_CACHE_SECONDS,
+        )
+    except Exception:
+        return []
+
+
+def build_nifty500_primary_universe():
+    payload = fetch_nse_stock_index_payload(NIFTY_500_INDEX_NAME)
+    index_key = sector_match_key(NIFTY_500_INDEX_NAME)
+    rows = []
+    for item in payload.get("data") or []:
+        symbol = nse_text(item.get("symbol")).upper()
+        if not symbol or sector_match_key(symbol) == index_key:
+            continue
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        rows.append({
+            "symbol": f"{symbol}.NS",
+            "name": nse_text(meta.get("companyName"))
+                or nse_text(item.get("companyName"))
+                or nse_text(item.get("name"))
+                or symbol,
+            "tags": ["Nifty 500"],
+            "nsePrice": nse_round(item.get("lastPrice")),
+            "nseChangePercent": nse_round(item.get("pChange")),
+            "nseVolume": nse_int(item.get("totalTradedVolume")),
+            "nseValue": nse_round(item.get("totalTradedValue")),
+            "nseYearHigh": nse_round(item.get("yearHigh")),
+            "nseYearLow": nse_round(item.get("yearLow")),
+        })
+
+    universe = merge_watchlists(rows)
+    if not universe:
+        raise RuntimeError("NSE Nifty 500 constituents were unavailable.")
+    return universe
+
+
+def primary_scan_candidates_from_nifty500(universe):
+    if len(universe) <= NIFTY_500_PRIMARY_SCAN_LIMIT:
+        return universe
+    return sorted(
+        universe,
+        key=primary_scan_prefilter_score,
+        reverse=True,
+    )[:NIFTY_500_PRIMARY_SCAN_LIMIT]
+
+
+def primary_scan_prefilter_score(stock):
+    price = stock.get("nsePrice")
+    year_high = stock.get("nseYearHigh")
+    year_low = stock.get("nseYearLow")
+    change_percent = stock.get("nseChangePercent")
+    volume = stock.get("nseVolume")
+    traded_value = stock.get("nseValue")
+
+    score = 0
+    pct_below_high = (
+        safe_divide(year_high - price, year_high) * 100
+        if is_finite(price) and is_finite(year_high) and year_high > 0
+        else None
+    )
+    range_position = (
+        safe_divide(price - year_low, year_high - year_low) * 100
+        if is_finite(price)
+        and is_finite(year_high)
+        and is_finite(year_low)
+        and year_high > year_low
+        else None
+    )
+
+    if is_finite(pct_below_high):
+        score += clamp(36 - pct_below_high * 3, 0, 36)
+        if 0 <= pct_below_high <= 3:
+            score += 18
+        elif 3 < pct_below_high <= 8:
+            score += 8
+
+    if is_finite(range_position):
+        if range_position >= 78:
+            score += 12
+        elif 20 <= range_position <= 55:
+            score += 7
+
+    if is_finite(change_percent):
+        score += clamp(change_percent * 3, -8, 20)
+        if is_finite(range_position) and change_percent > 0 and range_position <= 55:
+            score += 8
+
+    if is_finite(volume) and volume > 0:
+        score += min(math.log10(volume + 1) * 2, 14)
+    if is_finite(traded_value) and traded_value > 0:
+        score += min(math.log10(traded_value + 1), 10)
+
+    return score
+
+
+def fetch_nse_stock_index_payload(index_name):
+    path = f"/api/equity-stockIndices?index={quote(index_name)}"
+    try:
+        return fetch_nse_json(path)
+    except RuntimeError:
+        return fetch_nse_json_with_session(path)
+
+
 def market_activity_universe(nse_snapshot=None):
     return merge_watchlists(
         BREAKOUT_WATCHLIST,
@@ -2299,11 +2596,15 @@ def merge_watchlists(*watchlists):
                 continue
             if symbol not in merged:
                 merged[symbol] = {
+                    **stock,
                     "symbol": symbol,
                     "name": stock.get("name") or symbol,
                     "tags": list(stock.get("tags") or []),
                 }
                 continue
+            for key, value in stock.items():
+                if key not in {"symbol", "name", "tags"} and key not in merged[symbol]:
+                    merged[symbol][key] = value
             merged[symbol]["tags"] = list(dict.fromkeys([
                 *merged[symbol].get("tags", []),
                 *(stock.get("tags") or []),
@@ -2344,7 +2645,7 @@ def settle_map(items, mapper, concurrency=4):
 
 
 def scan_watchlist_stock(stock):
-    chart = get_chart_range(stock["symbol"], "5y", "1d")
+    chart = get_chart_range(stock["symbol"], "2y", "1d")
     candles = chart["candles"]
     if len(candles) < 80:
         raise RuntimeError(f"Not enough data for {stock['symbol']}")
@@ -6280,6 +6581,18 @@ def cached(key, loader, ttl=CACHE_TTL_SECONDS):
             cached_value["expiresAt"] = time.time() + min(ttl, 60)
             return cached_value["data"]
         raise
+    _cache[key] = {"data": data, "expiresAt": time.time() + ttl}
+    return data
+
+
+def get_cached(key):
+    cached_value = _cache.get(key)
+    if cached_value and cached_value["expiresAt"] > time.time():
+        return cached_value["data"]
+    return None
+
+
+def set_cached(key, data, ttl=CACHE_TTL_SECONDS):
     _cache[key] = {"data": data, "expiresAt": time.time() + ttl}
     return data
 

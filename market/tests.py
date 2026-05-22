@@ -457,6 +457,110 @@ class MarketSnapshotTests(SimpleTestCase):
         self.assertEqual(snapshot["topGainers"][0]["symbol"], "TEST")
         self.assertEqual(snapshot["priceBands"]["count"][0]["label"], "Total")
 
+    def test_build_nifty500_primary_universe_normalizes_index_constituents(self):
+        payload = {
+            "data": [
+                {"symbol": "NIFTY 500", "meta": {"companyName": "Nifty 500"}},
+                {"symbol": "reliance", "meta": {"companyName": "Reliance Industries"}},
+                {"symbol": "TCS", "companyName": "Tata Consultancy Services"},
+                {"symbol": "RELIANCE", "companyName": "Duplicate row"},
+            ]
+        }
+
+        with patch("market.services.fetch_nse_stock_index_payload", return_value=payload):
+            universe = services.build_nifty500_primary_universe()
+
+        self.assertEqual([stock["symbol"] for stock in universe], ["RELIANCE.NS", "TCS.NS"])
+        self.assertEqual(universe[0]["name"], "Reliance Industries")
+        self.assertEqual(universe[0]["tags"], ["Nifty 500"])
+        self.assertEqual(universe[0]["nsePrice"], None)
+
+    def test_primary_scan_prefilter_limits_to_ranked_nifty500_candidates(self):
+        weak_rows = [
+            {
+                "symbol": f"WEAK{index}.NS",
+                "name": f"Weak {index}",
+                "tags": ["Nifty 500"],
+                "nsePrice": 50,
+                "nseYearHigh": 100,
+                "nseYearLow": 40,
+                "nseChangePercent": -1,
+                "nseVolume": 1000,
+                "nseValue": 1000,
+            }
+            for index in range(services.NIFTY_500_PRIMARY_SCAN_LIMIT)
+        ]
+        leader = {
+            "symbol": "LEADER.NS",
+            "name": "Leader",
+            "tags": ["Nifty 500"],
+            "nsePrice": 99,
+            "nseYearHigh": 100,
+            "nseYearLow": 60,
+            "nseChangePercent": 2,
+            "nseVolume": 5_000_000,
+            "nseValue": 500_000_000,
+        }
+
+        selected = services.primary_scan_candidates_from_nifty500([*weak_rows, leader])
+        symbols = [stock["symbol"] for stock in selected]
+
+        self.assertEqual(len(selected), services.NIFTY_500_PRIMARY_SCAN_LIMIT)
+        self.assertIn("LEADER.NS", symbols)
+        self.assertNotIn(f"WEAK{services.NIFTY_500_PRIMARY_SCAN_LIMIT - 1}.NS", symbols)
+
+    def test_fast_market_monitor_returns_ranked_nifty500_candidates(self):
+        universe = [{
+            "symbol": "LEADER.NS",
+            "name": "Leader",
+            "tags": ["Nifty 500"],
+            "nsePrice": 99,
+            "nseYearHigh": 100,
+            "nseYearLow": 60,
+            "nseChangePercent": 2,
+            "nseVolume": 5_000_000,
+            "nseValue": 500_000_000,
+        }]
+
+        with patch("market.services.safe_nse_market_snapshot", return_value={"available": True}), \
+            patch("market.services.safe_nifty500_primary_universe", return_value=universe):
+            report = services.build_fast_market_monitor(refreshing=True)
+
+        self.assertTrue(report["refreshing"])
+        self.assertTrue(report["fastMode"])
+        self.assertEqual(report["breakoutCandidates"][0]["symbol"], "LEADER.NS")
+        self.assertIn("chart scan pending", report["breakoutCandidates"][0]["signal"])
+
+    def test_market_monitor_primary_scan_uses_nifty500_universe_only(self):
+        primary_universe = [{"symbol": "RELIANCE.NS", "name": "Reliance Industries", "tags": ["Nifty 500"]}]
+        nse_snapshot = {
+            "available": True,
+            "topGainers": [{"symbol": "OUTSIDE", "name": "Outside Stock"}],
+            "topLosers": [],
+            "mostActive": [{"symbol": "ACTIVE", "name": "Active Stock"}],
+            "weekHighs": [],
+            "priceBands": {"rows": [{"symbol": "BAND", "name": "Band Stock"}]},
+        }
+        settle_calls = {}
+
+        def fake_settle_map(items, mapper, concurrency=4):
+            settle_calls.setdefault(mapper.__name__, []).append(list(items))
+            return []
+
+        with patch("market.services.safe_nse_market_snapshot", return_value=nse_snapshot), \
+            patch("market.services.safe_moneycontrol_sector_snapshot", return_value={"available": False}), \
+            patch("market.services.safe_sector_open_interest", return_value={"stockMoversBySector": {}}), \
+            patch("market.services.safe_nifty500_primary_universe", return_value=primary_universe), \
+            patch("market.services.safe_usd_inr_snapshot", return_value={"available": False}), \
+            patch("market.services.settle_map", side_effect=fake_settle_map):
+            report = services.build_market_monitor()
+
+        primary_scan = settle_calls["scan_watchlist_stock"][0]
+        self.assertEqual(primary_scan, primary_universe)
+        self.assertNotIn("OUTSIDE.NS", [stock["symbol"] for stock in primary_scan])
+        self.assertEqual(report["primaryScanUniverse"]["label"], "Nifty 500 only")
+        self.assertEqual(report["primaryScanUniverse"]["scanned"], 1)
+
     def test_moneycontrol_sector_snapshot_maps_stock_sector(self):
         payload = {
             "allSectors": [
