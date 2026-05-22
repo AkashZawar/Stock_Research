@@ -21,6 +21,8 @@ import certifi
 CACHE_TTL_SECONDS = 5 * 60
 SEC_CACHE_TTL_SECONDS = 24 * 60 * 60
 MARKET_MONITOR_CACHE_SECONDS = 10 * 60
+FAST_MARKET_MONITOR_CACHE_SECONDS = 15
+NSE_MARKET_SNAPSHOT_CACHE_SECONDS = 60
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
@@ -109,11 +111,11 @@ NIFTY_500_PRIMARY_SCAN_LIMIT = 120
 MARKET_MONITOR_PRIMARY_CONCURRENCY = 6
 MARKET_MONITOR_ACTIVITY_CONCURRENCY = 3
 MARKET_MONITOR_CATALYST_CONCURRENCY = 2
+NIFTY_50_INDEX_NAME = "NIFTY 50"
 NSE_SNAPSHOT_ENDPOINTS = {
     "marketStatus": "/api/marketStatus",
     "allIndices": "/api/allIndices",
-    "gainers": "/api/live-analysis-variations?index=gainers",
-    "losers": "/api/live-analysis-variations?index=loosers",
+    "nifty50": f"/api/equity-stockIndices?index={quote(NIFTY_50_INDEX_NAME)}",
     "mostActive": "/api/live-analysis-most-active-securities?index=volume",
     "weekHighs": "/api/live-analysis-52Week?index=high",
     "priceBands": "/api/live-analysis-price-band-hitter?index=upper",
@@ -578,7 +580,11 @@ def build_nse_market_snapshot():
 
 def safe_nse_market_snapshot():
     try:
-        return build_nse_market_snapshot()
+        return cached(
+            "nse-market-snapshot",
+            build_nse_market_snapshot,
+            NSE_MARKET_SNAPSHOT_CACHE_SECONDS,
+        )
     except Exception as error:
         return {
             "available": False,
@@ -618,8 +624,8 @@ def build_nse_market_snapshot_from_payloads(payloads):
         "breadth": breadth,
         "indices": indices,
         "sectorIndices": sector_indices,
-        "topGainers": normalize_nse_variation(payloads.get("gainers"), limit=10),
-        "topLosers": normalize_nse_variation(payloads.get("losers"), limit=10),
+        "topGainers": normalize_nse_index_movers(payloads.get("nifty50"), "gainers", limit=10),
+        "topLosers": normalize_nse_index_movers(payloads.get("nifty50"), "losers", limit=10),
         "mostActive": normalize_nse_most_active(payloads.get("mostActive"), limit=8),
         "weekHighs": normalize_nse_52_week_highs(payloads.get("weekHighs"), limit=8),
         "priceBands": normalize_nse_price_bands(payloads.get("priceBands"), limit=8),
@@ -764,6 +770,40 @@ def normalize_nse_variation(payload, limit=8):
             "corporateAction": "" if corporate_action in {"-", "--"} else corporate_action,
         })
     return normalized
+
+
+def normalize_nse_index_movers(payload, direction, limit=8):
+    rows = []
+    index_key = sector_match_key(NIFTY_50_INDEX_NAME)
+    for item in nse_group_data(payload, "data"):
+        symbol = nse_text(item.get("symbol")).upper()
+        if not symbol or sector_match_key(symbol) == index_key:
+            continue
+        change_percent = nse_round(item.get("pChange"))
+        if direction == "gainers" and (change_percent is None or change_percent <= 0):
+            continue
+        if direction == "losers" and (change_percent is None or change_percent >= 0):
+            continue
+        rows.append({
+            "symbol": symbol,
+            "series": nse_text(item.get("series")),
+            "price": nse_round(item.get("lastPrice")),
+            "change": nse_round(item.get("change")),
+            "changePercent": change_percent,
+            "open": nse_round(item.get("open")),
+            "high": nse_round(item.get("dayHigh")) or nse_round(item.get("high")),
+            "low": nse_round(item.get("dayLow")) or nse_round(item.get("low")),
+            "previousClose": nse_round(item.get("previousClose")),
+            "volume": nse_int(item.get("totalTradedVolume")) or nse_int(item.get("quantityTraded")),
+            "turnoverLakhs": nse_round(item.get("totalTradedValue")),
+            "corporateAction": "",
+        })
+
+    return sorted(
+        rows,
+        key=lambda item: item["changePercent"],
+        reverse=(direction == "gainers"),
+    )[:limit]
 
 
 def normalize_nse_most_active(payload, limit=8):
@@ -1618,6 +1658,7 @@ def build_nse_sector_constituent_map():
     symbol_to_sector = {}
     sector_counts = {}
     stock_movers = {}
+    stock_performance = {}
     errors = {}
     for ok, value in results:
         if not ok:
@@ -1627,6 +1668,16 @@ def build_nse_sector_constituent_map():
         symbols = value.get("symbols") or []
         sector_counts[sector] = len(symbols)
         stock_movers[sector] = value.get("topStocks") or []
+        stock_performance[sector] = {
+            "sector": sector,
+            "stockCount": len(symbols),
+            "advance": value.get("advance") or 0,
+            "decline": value.get("decline") or 0,
+            "unchanged": value.get("unchanged") or 0,
+            "bestStock": value.get("bestStock") or {},
+            "worstStock": value.get("worstStock") or {},
+            "timestamp": value.get("timestamp") or "",
+        }
         for symbol in symbols:
             symbol_to_sector.setdefault(symbol, sector)
     if not symbol_to_sector:
@@ -1635,6 +1686,7 @@ def build_nse_sector_constituent_map():
         "symbols": symbol_to_sector,
         "sectors": sector_counts,
         "stockMovers": stock_movers,
+        "stockPerformance": stock_performance,
         "errors": errors,
         "sourceIndices": list(NSE_OI_SECTOR_INDICES),
     }
@@ -1658,9 +1710,18 @@ def fetch_nse_sector_constituents(index_name):
             "changePercent": nse_round(item.get("pChange")),
             "volume": nse_int(item.get("totalTradedVolume")),
         })
+    ordered_by_move = sorted(
+        [stock for stock in stocks if is_finite(stock.get("changePercent"))],
+        key=lambda stock: stock["changePercent"],
+    )
     return {
         "sector": index_name,
         "symbols": list(dict.fromkeys(symbols)),
+        "advance": len([stock for stock in stocks if is_finite(stock.get("changePercent")) and stock["changePercent"] > 0]),
+        "decline": len([stock for stock in stocks if is_finite(stock.get("changePercent")) and stock["changePercent"] < 0]),
+        "unchanged": len([stock for stock in stocks if stock.get("changePercent") == 0]),
+        "bestStock": ordered_by_move[-1] if ordered_by_move else {},
+        "worstStock": ordered_by_move[0] if ordered_by_move else {},
         "topStocks": sorted(
             stocks,
             key=lambda stock: abs(stock.get("changePercent") or 0),
@@ -1674,6 +1735,7 @@ def fetch_nse_sector_constituents(index_name):
 def build_sector_open_interest_from_payloads(oi_payload, sector_map):
     symbol_to_sector = (sector_map or {}).get("symbols") or {}
     sector_stock_movers = (sector_map or {}).get("stockMovers") or {}
+    sector_stock_performance = (sector_map or {}).get("stockPerformance") or {}
     buckets = {}
     mapped_count = 0
     unmapped_count = 0
@@ -1759,6 +1821,7 @@ def build_sector_open_interest_from_payloads(oi_payload, sector_map):
                 "mappedStocks": mapped_count,
                 "unmappedStocks": unmapped_count,
             },
+            "sectorPerformance": sector_stock_performance,
         }
 
     total_latest = sum(row["latestOi"] for row in rows)
@@ -1788,6 +1851,7 @@ def build_sector_open_interest_from_payloads(oi_payload, sector_map):
         "highestOi": highest_oi,
         "topBuildUp": top_build_up,
         "stockMoversBySector": sector_stock_movers,
+        "sectorPerformance": sector_stock_performance,
         "coverage": {
             "sourceRows": len(source_rows),
             "mappedStocks": mapped_count,
@@ -1821,6 +1885,109 @@ def summarize_sector_open_interest_row(row):
         f"{row.get('sector')} has {row.get('stockCount', 0)} mapped F&O stocks, "
         f"OI change {change_text}; top OI names: {top_symbols or 'n/a'}."
     )
+
+
+def build_sector_stock_performance(nse_snapshot, sector_performance):
+    sector_performance = sector_performance or {}
+    index_rows = {
+        row.get("name"): row
+        for row in (nse_snapshot or {}).get("sectorIndices") or []
+        if row.get("name")
+    }
+    rows = []
+    for sector_name in NSE_SECTOR_INDICES:
+        performance = sector_performance.get(sector_name) or {}
+        index = index_rows.get(sector_name) or {}
+        if not performance and not index:
+            continue
+        row = {
+            "sector": sector_name,
+            "stockCount": performance.get("stockCount"),
+            "advance": first_present(performance.get("advance"), index.get("advances")),
+            "decline": first_present(performance.get("decline"), index.get("declines")),
+            "unchanged": first_present(performance.get("unchanged"), index.get("unchanged")),
+            "sectorLast": index.get("last"),
+            "sectorChange": index.get("change"),
+            "sectorChangePercent": index.get("changePercent"),
+            "sectorHigh": index.get("high"),
+            "sectorLow": index.get("low"),
+            "sectorPe": index.get("pe"),
+            "oneMonthChange": index.get("oneMonthChange"),
+            "oneYearChange": index.get("oneYearChange"),
+            "bestStock": performance.get("bestStock") or {},
+            "worstStock": performance.get("worstStock") or {},
+        }
+        row["summary"] = summarize_sector_stock_performance(row)
+        rows.append(row)
+
+    available_rows = [
+        row for row in rows
+        if row.get("bestStock") or row.get("worstStock") or is_finite(row.get("sectorChangePercent"))
+    ]
+    return {
+        "available": bool(available_rows),
+        "source": "NSE India sectoral index constituents",
+        "generatedAt": iso_now(),
+        "summary": summarize_sector_stock_performance_report(available_rows),
+        "rows": available_rows,
+    }
+
+
+def summarize_sector_stock_performance(row):
+    sector = row.get("sector") or "Sector"
+    sector_change = row.get("sectorChangePercent")
+    best = row.get("bestStock") or {}
+    worst = row.get("worstStock") or {}
+    best_change = best.get("changePercent")
+    worst_change = worst.get("changePercent")
+
+    if is_finite(sector_change) and best.get("symbol") and worst.get("symbol"):
+        best_spread = best_change - sector_change if is_finite(best_change) else None
+        worst_spread = worst_change - sector_change if is_finite(worst_change) else None
+        best_text = describe_stock_sector_spread(best["symbol"], best_spread, "led the sector")
+        worst_text = describe_stock_sector_spread(worst["symbol"], worst_spread, "was the weakest constituent")
+        direction = "up" if sector_change >= 0 else "down"
+        return f"{sector} is {direction} {abs(sector_change):.2f}%; {best_text}, while {worst_text}."
+
+    if best.get("symbol") and worst.get("symbol"):
+        return f"{sector}: {best['symbol']} is the strongest constituent and {worst['symbol']} is the weakest in the current NSE snapshot."
+    if is_finite(sector_change):
+        direction = "up" if sector_change >= 0 else "down"
+        return f"{sector} is {direction} {abs(sector_change):.2f}%; constituent best/worst data is not available."
+    return f"{sector} performance is not available in the current NSE snapshot."
+
+
+def describe_stock_sector_spread(symbol, spread, fallback):
+    if not is_finite(spread):
+        return f"{symbol} {fallback}"
+    if spread >= 0:
+        return f"{symbol} outperformed the sector by {spread:+.2f} pp"
+    return f"{symbol} lagged the sector by {abs(spread):.2f} pp"
+
+
+def summarize_sector_stock_performance_report(rows):
+    if not rows:
+        return "Sector stock performance is unavailable from NSE right now."
+    positive = len([row for row in rows if is_finite(row.get("sectorChangePercent")) and row["sectorChangePercent"] > 0])
+    negative = len([row for row in rows if is_finite(row.get("sectorChangePercent")) and row["sectorChangePercent"] < 0])
+    strongest = max(
+        rows,
+        key=lambda row: row.get("sectorChangePercent") if is_finite(row.get("sectorChangePercent")) else -999,
+    )
+    weakest = min(
+        rows,
+        key=lambda row: row.get("sectorChangePercent") if is_finite(row.get("sectorChangePercent")) else 999,
+    )
+    return (
+        f"{len(rows)} major NSE sectors tracked. "
+        f"{positive} sectors are positive and {negative} are negative. "
+        f"Strongest sector: {strongest.get('sector', 'n/a')} ({format_signed_percent(strongest.get('sectorChangePercent'))}); "
+        f"weakest sector: {weakest.get('sector', 'n/a')} ({format_signed_percent(weakest.get('sectorChangePercent'))})."
+    )
+
+
+def format_signed_percent(value):
+    return f"{value:+.2f}%" if is_finite(value) else "n/a"
 
 
 def get_moneycontrol_sector_snapshot():
@@ -2115,6 +2282,10 @@ def build_market_monitor():
         **moneycontrol_sectors,
         "sectorOpenInterest": sector_open_interest,
     }
+    sector_stock_performance = build_sector_stock_performance(
+        nse_snapshot,
+        sector_open_interest.get("sectorPerformance") or {},
+    )
 
     primary_scan_universe = primary_scan_candidates_from_nifty500(breakout_universe)
     activity_universe = market_activity_universe()
@@ -2168,6 +2339,7 @@ def build_market_monitor():
         "note": "NSE snapshot uses public NSE website endpoints; sector analysis uses Moneycontrol's sector-analysis page, and sector-wise OI maps NSE Change in OI symbols into NSE sectoral indices. Primary 50 stays Nifty 500-only: it ranks current Nifty 500 constituents with NSE price, volume, and 52-week range data, then chart-scans the strongest candidates. NR4/NR7 breakout means price is breaking above a tight prior 4-day or 7-day range near the 52-week high. Confirm liquidity, headlines, and levels on your broker or exchange feed before acting.",
         "nseSnapshot": nse_snapshot,
         "moneycontrolSectorAnalysis": moneycontrol_sectors,
+        "sectorStockPerformance": sector_stock_performance,
         "commodities": commodity_snapshots,
         "usdInr": usd_inr,
         "breakoutCandidates": candidates,
@@ -2213,6 +2385,12 @@ def build_fast_market_monitor(refreshing=True):
             "topPerforming": [],
             "underPerforming": [],
             "sectorOpenInterest": {"available": False, "stockMoversBySector": {}},
+        },
+        "sectorStockPerformance": {
+            "available": False,
+            "source": "NSE India sectoral index constituents",
+            "summary": "Sector stock performance will load after the full monitor refresh completes.",
+            "rows": [],
         },
         "commodities": [],
         "usdInr": {"available": False},

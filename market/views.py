@@ -159,16 +159,25 @@ def market_monitor(request):
         if request.GET.get("refresh") == "1":
             services.clear_cache("market-monitor")
             services.start_market_monitor_refresh()
-            return JsonResponse(services.build_fast_market_monitor(refreshing=True))
+            return JsonResponse(cache_fast_market_monitor())
 
         cached_payload = services.get_cached("market-monitor")
         if cached_payload:
             return JsonResponse(cached_payload)
 
         services.start_market_monitor_refresh()
-        return JsonResponse(services.build_fast_market_monitor(refreshing=True))
+        return JsonResponse(cache_fast_market_monitor())
     except Exception as error:
         return JsonResponse({"error": str(error)}, status=500)
+
+
+def cache_fast_market_monitor():
+    payload = services.build_fast_market_monitor(refreshing=True)
+    latest_payload = services.get_cached("market-monitor")
+    if latest_payload and not latest_payload.get("fastMode"):
+        return latest_payload
+    services.set_cached("market-monitor", payload, services.FAST_MARKET_MONITOR_CACHE_SECONDS)
+    return payload
 
 
 def record_stock_search(request, raw_input, symbol, status_code, error_message):

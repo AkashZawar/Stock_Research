@@ -245,6 +245,58 @@ class MarketClockTests(SimpleTestCase):
         self.assertTrue(clock["nextOpenAt"].startswith("2026-05-29T03:45:00"))
 
 
+class PerformanceCacheTests(SimpleTestCase):
+    def setUp(self):
+        services._cache.clear()
+
+    def tearDown(self):
+        services._cache.clear()
+
+    @patch("market.services.build_nse_market_snapshot")
+    def test_safe_nse_market_snapshot_reuses_short_ttl_cache(self, build_snapshot):
+        build_snapshot.return_value = {
+            "available": True,
+            "source": "NSE India public market APIs",
+            "generatedAt": "2026-05-22T10:00:00+05:30",
+        }
+
+        first = services.safe_nse_market_snapshot()
+        second = services.safe_nse_market_snapshot()
+
+        self.assertEqual(first, second)
+        self.assertEqual(build_snapshot.call_count, 1)
+
+
+class MarketMonitorEndpointTests(TestCase):
+    def setUp(self):
+        services._cache.clear()
+
+    def tearDown(self):
+        services._cache.clear()
+
+    def test_market_monitor_reuses_cached_fast_payload_while_refreshing(self):
+        fast_payload = {
+            "generatedAt": "2026-05-22T10:00:00+05:30",
+            "refreshing": True,
+            "fastMode": True,
+            "breakoutCandidates": [],
+        }
+
+        with (
+            patch("market.views.services.start_market_monitor_refresh") as start_refresh,
+            patch("market.views.services.build_fast_market_monitor", return_value=fast_payload) as build_fast,
+        ):
+            first = self.client.get("/api/market-monitor")
+            second = self.client.get("/api/market-monitor")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json(), fast_payload)
+        self.assertEqual(second.json(), fast_payload)
+        self.assertEqual(start_refresh.call_count, 1)
+        self.assertEqual(build_fast.call_count, 1)
+
+
 class OpenInterestTests(SimpleTestCase):
     def test_build_open_interest_report_summarizes_expiry_horizons(self):
         payload = {
@@ -443,6 +495,13 @@ class MarketSnapshotTests(SimpleTestCase):
             },
             "gainers": {"allSec": {"data": [{"symbol": "TEST", "ltp": 100, "net_price": 5, "perChange": 5, "trade_quantity": 1000}]}},
             "losers": {"allSec": {"data": [{"symbol": "FAIL", "ltp": 50, "net_price": -2, "perChange": -4, "trade_quantity": 900}]}},
+            "nifty50": {
+                "data": [
+                    {"symbol": "NIFTY 50", "lastPrice": "23,869.45", "pChange": "-1.27"},
+                    {"symbol": "RELIANCE", "lastPrice": 1400, "change": 28, "pChange": 2.0, "totalTradedVolume": 10000, "dayHigh": 1410, "dayLow": 1375},
+                    {"symbol": "TCS", "lastPrice": 3900, "change": -39, "pChange": -1.0, "totalTradedVolume": 8000, "dayHigh": 3950, "dayLow": 3880},
+                ]
+            },
             "mostActive": {"data": [{"symbol": "ACTIVE", "lastPrice": 99, "pChange": 1.2, "totalTradedVolume": 5000}]},
             "weekHighs": {"dataLtpGreater20": [{"symbol": "HIGH", "new52WHL": 120, "ltp": 119, "pChange": 2.1}]},
             "priceBands": {"AllSec": {"count": [{"key": "TOTAL", "value": 3}], "data": [{"symbol": "BAND", "ltp": 10, "priceBand": 5}]}},
@@ -454,8 +513,83 @@ class MarketSnapshotTests(SimpleTestCase):
         self.assertEqual(snapshot["breadth"]["advanceDeclineRatio"], 2.0)
         self.assertEqual(snapshot["indices"][0]["name"], "NIFTY 50")
         self.assertEqual(snapshot["sectorIndices"][0]["name"], "NIFTY IT")
-        self.assertEqual(snapshot["topGainers"][0]["symbol"], "TEST")
+        self.assertEqual(snapshot["topGainers"][0]["symbol"], "RELIANCE")
+        self.assertEqual(snapshot["topLosers"][0]["symbol"], "TCS")
+        self.assertNotIn("TEST", [row["symbol"] for row in snapshot["topGainers"]])
         self.assertEqual(snapshot["priceBands"]["count"][0]["label"], "Total")
+
+    def test_nse_index_movers_only_use_nifty50_constituents(self):
+        payload = {
+            "data": [
+                {"symbol": "NIFTY 50", "lastPrice": 23869, "pChange": 0.5},
+                {"symbol": "AAA", "lastPrice": 100, "change": 3, "pChange": 3, "totalTradedVolume": 1000},
+                {"symbol": "BBB", "lastPrice": 200, "change": 1, "pChange": 1, "totalTradedVolume": 2000},
+                {"symbol": "CCC", "lastPrice": 90, "change": -2, "pChange": -2, "totalTradedVolume": 900},
+                {"symbol": "DDD", "lastPrice": 120, "change": 0, "pChange": 0, "totalTradedVolume": 1200},
+            ]
+        }
+
+        gainers = services.normalize_nse_index_movers(payload, "gainers", limit=10)
+        losers = services.normalize_nse_index_movers(payload, "losers", limit=10)
+
+        self.assertEqual([row["symbol"] for row in gainers], ["AAA", "BBB"])
+        self.assertEqual([row["symbol"] for row in losers], ["CCC"])
+
+    def test_fetch_nse_sector_constituents_finds_best_and_worst_stock(self):
+        payload = {
+            "timestamp": "22-May-2026 10:25",
+            "data": [
+                {"symbol": "NIFTY IT", "lastPrice": 30000, "pChange": 1.2},
+                {"symbol": "AAA", "meta": {"companyName": "AAA Tech"}, "lastPrice": 100, "change": 3, "pChange": 3, "totalTradedVolume": 1000},
+                {"symbol": "BBB", "meta": {"companyName": "BBB Tech"}, "lastPrice": 200, "change": -2, "pChange": -1, "totalTradedVolume": 2000},
+                {"symbol": "CCC", "meta": {"companyName": "CCC Tech"}, "lastPrice": 150, "change": 0, "pChange": 0, "totalTradedVolume": 1500},
+            ],
+        }
+
+        with patch("market.services.fetch_nse_json", return_value=payload):
+            result = services.fetch_nse_sector_constituents("NIFTY IT")
+
+        self.assertEqual(result["symbols"], ["AAA", "BBB", "CCC"])
+        self.assertEqual(result["bestStock"]["symbol"], "AAA")
+        self.assertEqual(result["worstStock"]["symbol"], "BBB")
+        self.assertEqual(result["advance"], 1)
+        self.assertEqual(result["decline"], 1)
+        self.assertEqual(result["unchanged"], 1)
+
+    def test_sector_stock_performance_summarizes_stock_vs_sector(self):
+        nse_snapshot = {
+            "sectorIndices": [
+                {
+                    "name": "NIFTY IT",
+                    "last": 30000,
+                    "change": 300,
+                    "changePercent": 1.0,
+                    "high": 30200,
+                    "low": 29600,
+                    "pe": 28,
+                    "oneMonthChange": 4.5,
+                    "oneYearChange": 12,
+                }
+            ]
+        }
+        sector_performance = {
+            "NIFTY IT": {
+                "stockCount": 3,
+                "advance": 2,
+                "decline": 1,
+                "unchanged": 0,
+                "bestStock": {"symbol": "AAA", "name": "AAA Tech", "price": 100, "changePercent": 3.0},
+                "worstStock": {"symbol": "BBB", "name": "BBB Tech", "price": 200, "changePercent": -1.0},
+            }
+        }
+
+        report = services.build_sector_stock_performance(nse_snapshot, sector_performance)
+        nifty_it = next(row for row in report["rows"] if row["sector"] == "NIFTY IT")
+
+        self.assertTrue(report["available"])
+        self.assertEqual(nifty_it["bestStock"]["symbol"], "AAA")
+        self.assertEqual(nifty_it["worstStock"]["symbol"], "BBB")
+        self.assertIn("AAA outperformed the sector by +2.00 pp", nifty_it["summary"])
 
     def test_build_nifty500_primary_universe_normalizes_index_constituents(self):
         payload = {

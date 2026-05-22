@@ -113,8 +113,8 @@
             <section class="market-signal-grid nse-data-grid" data-monitor-section="primary">
               <article class="analysis-panel panel-accent-emerald">
                 <div class="section-head">
-                  <h3>NSE Top Gainers</h3>
-                  <span id="nseGainerCount" class="pill">Live</span>
+                  <h3>NIFTY 50 Top Gainers</h3>
+                  <span id="nseGainerCount" class="pill">NIFTY 50</span>
                 </div>
                 <div class="table-wrap">
                   <table class="monitor-table nse-mover-table">
@@ -134,8 +134,8 @@
 
               <article class="analysis-panel panel-accent-rose">
                 <div class="section-head">
-                  <h3>NSE Top Losers</h3>
-                  <span id="nseLoserCount" class="pill">Live</span>
+                  <h3>NIFTY 50 Top Losers</h3>
+                  <span id="nseLoserCount" class="pill">NIFTY 50</span>
                 </div>
                 <div class="table-wrap">
                   <table class="monitor-table nse-mover-table">
@@ -149,6 +149,30 @@
                       </tr>
                     </thead>
                     <tbody id="nseLoserRows"></tbody>
+                  </table>
+                </div>
+              </article>
+            </section>
+
+            <section class="wide-grid" data-monitor-section="primary">
+              <article class="analysis-panel panel-accent-cyan sector-stock-performance-panel">
+                <div class="section-head">
+                  <h3>Sector Stock Performance</h3>
+                  <span id="sectorStockPerformanceCount" class="pill">Major sectors</span>
+                </div>
+                <p id="sectorStockPerformanceSummary" class="section-summary"></p>
+                <div class="table-wrap">
+                  <table class="monitor-table sector-stock-performance-table">
+                    <thead>
+                      <tr>
+                        <th>Sector</th>
+                        <th>Sector Performance</th>
+                        <th>Best Stock</th>
+                        <th>Worst Stock</th>
+                        <th>Stock vs Sector Summary</th>
+                      </tr>
+                    </thead>
+                    <tbody id="sectorStockPerformanceRows"></tbody>
                   </table>
                 </div>
               </article>

@@ -92,6 +92,10 @@ let marketClockTimer = null;
 let monitorPollTimer = null;
 let selectedOpenInterestPeriod = "day";
 let selectedMonitorPane = "primary";
+const WATCHLIST_REFRESH_CONCURRENCY = 3;
+const analysisRequestCache = new Map();
+let searchController = null;
+let assetSearchControllers = { etf: null, fund: null };
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -210,6 +214,10 @@ for (const context of Object.values(assetContexts)) {
     clearTimeout(assetSearchTimers[context.prefix]);
     const query = context.input.value.trim();
     if (query.length < 1) {
+      if (assetSearchControllers[context.prefix]) {
+        assetSearchControllers[context.prefix].abort();
+        assetSearchControllers[context.prefix] = null;
+      }
       context.suggestions.innerHTML = "";
       return;
     }
@@ -221,6 +229,10 @@ symbolInput.addEventListener("input", () => {
   clearTimeout(searchTimer);
   const query = symbolInput.value.trim();
   if (query.length < 1) {
+    if (searchController) {
+      searchController.abort();
+      searchController = null;
+    }
     suggestions.innerHTML = "";
     return;
   }
@@ -341,35 +353,63 @@ async function analyzeAsset(context, symbol) {
 }
 
 async function searchSymbols(query) {
+  if (searchController) {
+    searchController.abort();
+  }
+  const controller = new AbortController();
+  searchController = controller;
   try {
-    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
     const payload = await response.json();
-    suggestions.innerHTML = "";
-    for (const item of payload.results || []) {
-      const option = document.createElement("option");
-      option.value = item.symbol;
-      option.label = `${item.name} ${item.exchange ? "- " + item.exchange : ""}`;
-      suggestions.appendChild(option);
+    if (searchController !== controller) {
+      return;
     }
-  } catch {
-    suggestions.innerHTML = "";
+    renderSuggestionOptions(suggestions, payload.results || []);
+  } catch (error) {
+    if (error.name !== "AbortError" && searchController === controller) {
+      suggestions.innerHTML = "";
+    }
+  } finally {
+    if (searchController === controller) {
+      searchController = null;
+    }
   }
 }
 
 async function searchAssets(context, query) {
-  try {
-    const response = await fetch(`/api/search-assets?type=${encodeURIComponent(context.type)}&q=${encodeURIComponent(query)}`);
-    const payload = await response.json();
-    context.suggestions.innerHTML = "";
-    for (const item of payload.results || []) {
-      const option = document.createElement("option");
-      option.value = item.symbol;
-      option.label = `${item.name} ${item.exchange ? "- " + item.exchange : ""}`;
-      context.suggestions.appendChild(option);
-    }
-  } catch {
-    context.suggestions.innerHTML = "";
+  if (assetSearchControllers[context.prefix]) {
+    assetSearchControllers[context.prefix].abort();
   }
+  const controller = new AbortController();
+  assetSearchControllers[context.prefix] = controller;
+  try {
+    const response = await fetch(`/api/search-assets?type=${encodeURIComponent(context.type)}&q=${encodeURIComponent(query)}`, { signal: controller.signal });
+    const payload = await response.json();
+    if (assetSearchControllers[context.prefix] !== controller) {
+      return;
+    }
+    renderSuggestionOptions(context.suggestions, payload.results || []);
+  } catch (error) {
+    if (error.name !== "AbortError" && assetSearchControllers[context.prefix] === controller) {
+      context.suggestions.innerHTML = "";
+    }
+  } finally {
+    if (assetSearchControllers[context.prefix] === controller) {
+      assetSearchControllers[context.prefix] = null;
+    }
+  }
+}
+
+function renderSuggestionOptions(container, results) {
+  container.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+  for (const item of results) {
+    const option = document.createElement("option");
+    option.value = item.symbol;
+    option.label = `${item.name} ${item.exchange ? "- " + item.exchange : ""}`;
+    fragment.appendChild(option);
+  }
+  container.appendChild(fragment);
 }
 
 function showInvalidSearchPopup(payload, query) {
@@ -780,24 +820,30 @@ async function refreshWatchlist(showErrors = false) {
       return;
     }
 
-    const nextItems = [];
-    const failures = [];
-    for (const item of items) {
+    const results = await mapWithConcurrency(items, WATCHLIST_REFRESH_CONCURRENCY, async (item) => {
       try {
         const report = await fetchAnalysisForWatchlist(item.symbol);
-        nextItems.push(buildWatchlistItem(report, {
-          id: item.id,
-          name: item.manualName || "",
-          buyPrice: item.manualBuyPrice,
-          sellPrice: item.manualSellPrice,
-          checkPrice: item.checkPrice
-        }));
+        return {
+          ok: true,
+          item: buildWatchlistItem(report, {
+            id: item.id,
+            name: item.manualName || "",
+            buyPrice: item.manualBuyPrice,
+            sellPrice: item.manualSellPrice,
+            checkPrice: item.checkPrice
+          })
+        };
       } catch (error) {
-        failures.push(`${item.symbol}: ${error.message}`);
-        nextItems.push({ ...item, rowTone: "watch", indicatorLabel: "Refresh failed", reason: error.message });
+        return {
+          ok: false,
+          failure: `${item.symbol}: ${error.message}`,
+          item: { ...item, rowTone: "watch", indicatorLabel: "Refresh failed", reason: error.message }
+        };
       }
-    }
+    });
 
+    const nextItems = results.map((result) => result.item);
+    const failures = results.filter((result) => !result.ok).map((result) => result.failure);
     saveWatchlistItems(nextItems);
     renderWatchlist();
     if (showErrors && failures.length) {
@@ -810,6 +856,21 @@ async function refreshWatchlist(showErrors = false) {
   } finally {
     setWatchlistLoading(false);
   }
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function refreshWatchlistItem(id, showErrors = false) {
@@ -841,15 +902,31 @@ async function refreshWatchlistItem(id, showErrors = false) {
 }
 
 async function fetchAnalysisForWatchlist(symbol) {
-  const response = await fetch(`/api/analyze?symbol=${encodeURIComponent(symbol)}`);
-  const payload = await response.json();
-  if (!response.ok) {
-    if (payload.suggestions) {
-      throw new Error("Choose a specific ticker from the suggestions, then add it to the watchlist.");
-    }
-    throw new Error(payload.error || "Could not refresh stock analysis.");
+  const normalizedSymbol = String(symbol || "").trim().toUpperCase();
+  if (!normalizedSymbol) {
+    throw new Error("Watchlist symbol is missing.");
   }
-  return payload;
+  if (latestReport?.symbol?.toUpperCase() === normalizedSymbol) {
+    return latestReport;
+  }
+  if (!analysisRequestCache.has(normalizedSymbol)) {
+    const request = fetch(`/api/analyze?symbol=${encodeURIComponent(normalizedSymbol)}`)
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) {
+          if (payload.suggestions) {
+            throw new Error("Choose a specific ticker from the suggestions, then add it to the watchlist.");
+          }
+          throw new Error(payload.error || "Could not refresh stock analysis.");
+        }
+        return payload;
+      })
+      .finally(() => {
+        analysisRequestCache.delete(normalizedSymbol);
+      });
+    analysisRequestCache.set(normalizedSymbol, request);
+  }
+  return analysisRequestCache.get(normalizedSymbol);
 }
 
 function buildWatchlistItem(report, overrides = {}) {
@@ -2147,6 +2224,7 @@ function renderMarketMonitor(data) {
   document.querySelector("#catalystCount").textContent = `${(data.orderCatalysts || []).length} found`;
   renderNseSnapshot(data.nseSnapshot || {});
   renderMoneycontrolSectorAnalysis(data.moneycontrolSectorAnalysis || {});
+  renderSectorStockPerformance(data.sectorStockPerformance || {});
   renderCommodities(data.commodities || [], data.usdInr || {});
   renderBreakoutRows(data.breakoutCandidates || []);
   renderHighVolumeRows(data.highVolumeCandidates || []);
@@ -2232,8 +2310,8 @@ function renderNseSnapshot(snapshot) {
   if (!snapshot.available) {
     setText("#nseSnapshotStatus", "Unavailable");
     statusGrid.innerHTML = `<article class="market-mini-card"><span>NSE snapshot</span><strong>Unavailable</strong><small>${escapeHtml(snapshot.error || "NSE did not return market data.")}</small></article>`;
-    emptyTable("#nseGainerRows", 5, "NSE gainers are unavailable.");
-    emptyTable("#nseLoserRows", 5, "NSE losers are unavailable.");
+    emptyTable("#nseGainerRows", 5, "NIFTY 50 gainers are unavailable.");
+    emptyTable("#nseLoserRows", 5, "NIFTY 50 losers are unavailable.");
     emptyTable("#nseActiveRows", 5, "NSE most-active data is unavailable.");
     emptyTable("#nseHighRows", 5, "NSE 52-week high and price-band data is unavailable.");
     return;
@@ -2285,13 +2363,64 @@ function renderNseSnapshot(snapshot) {
     indexGrid.appendChild(card);
   }
 
-  setText("#nseGainerCount", `${(snapshot.topGainers || []).length} shown`);
-  setText("#nseLoserCount", `${(snapshot.topLosers || []).length} shown`);
+  setText("#nseGainerCount", `NIFTY 50 · ${(snapshot.topGainers || []).length} shown`);
+  setText("#nseLoserCount", `NIFTY 50 · ${(snapshot.topLosers || []).length} shown`);
   setText("#nseActiveCount", `${(snapshot.mostActive || []).length} shown`);
-  renderNseMoverRows("#nseGainerRows", snapshot.topGainers || [], "No NSE gainers were returned.");
-  renderNseMoverRows("#nseLoserRows", snapshot.topLosers || [], "No NSE losers were returned.");
+  renderNseMoverRows("#nseGainerRows", snapshot.topGainers || [], "No NIFTY 50 gainers were returned.");
+  renderNseMoverRows("#nseLoserRows", snapshot.topLosers || [], "No NIFTY 50 losers were returned.");
   renderNseActiveRows(snapshot.mostActive || []);
   renderNseHighAndBandRows(snapshot.weekHighs || [], snapshot.priceBands || {});
+}
+
+function renderSectorStockPerformance(report) {
+  const rowsEl = document.querySelector("#sectorStockPerformanceRows");
+  if (!rowsEl) {
+    return;
+  }
+
+  const rows = report.rows || [];
+  setText("#sectorStockPerformanceCount", report.available ? `${rows.length} sectors` : "Unavailable");
+  setText("#sectorStockPerformanceSummary", report.summary || "Sector stock performance is not available yet.");
+  rowsEl.innerHTML = "";
+
+  if (!report.available || !rows.length) {
+    emptyTable("#sectorStockPerformanceRows", 5, report.summary || "Sector stock performance is unavailable.");
+    return;
+  }
+
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>
+        <strong>${escapeHtml(item.sector || "Sector")}</strong>
+        <span>${formatNumber(item.stockCount)} stocks · A/D ${formatNumber(item.advance)} / ${formatNumber(item.decline)}</span>
+      </td>
+      <td>
+        <strong class="${changeClass(item.sectorChangePercent)}">${signed(item.sectorChangePercent)}%</strong>
+        <span>${formatNumber(item.sectorLast)} · H/L ${formatNumber(item.sectorHigh)} / ${formatNumber(item.sectorLow)}</span>
+        <small>1M ${signed(item.oneMonthChange)}% · 1Y ${signed(item.oneYearChange)}% · PE ${formatNumber(item.sectorPe)}</small>
+      </td>
+      <td>${renderSectorStockMover(item.bestStock, item.sectorChangePercent)}</td>
+      <td>${renderSectorStockMover(item.worstStock, item.sectorChangePercent)}</td>
+      <td><span>${escapeHtml(item.summary || "")}</span></td>
+    `;
+    rowsEl.appendChild(row);
+  }
+}
+
+function renderSectorStockMover(stock, sectorChangePercent) {
+  if (!stock || !stock.symbol) {
+    return "<span>n/a</span>";
+  }
+  const spread = Number.isFinite(stock.changePercent) && Number.isFinite(sectorChangePercent)
+    ? stock.changePercent - sectorChangePercent
+    : null;
+  return `
+    <strong>${escapeHtml(stock.symbol)}</strong>
+    <span>${escapeHtml(stock.name || "")}</span>
+    <span class="${changeClass(stock.changePercent)}">${signed(stock.changePercent)}% · ${formatMoney(stock.price, "INR")}</span>
+    <small>vs sector ${Number.isFinite(spread) ? `${spread >= 0 ? "+" : ""}${spread.toFixed(2)} pp` : "n/a"}</small>
+  `;
 }
 
 function renderMoneycontrolSectorAnalysis(snapshot) {
