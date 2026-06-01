@@ -4,10 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;700;800;900&display=swap">
-    <link rel="stylesheet" href="/styles.css?v=20260515-pointer-remove-1">
+    <link rel="stylesheet" href="/styles.css?v=20260601-quality-1">
   </head>
   <body>
     <main class="app-shell">
@@ -52,8 +49,6 @@
           <button class="tab-button" type="button" id="etfTab">ETF Analysis</button>
           <button class="tab-button" type="button" id="fundTab">Mutual Funds</button>
           <button class="tab-button" type="button" id="monitorTab">Market Monitor</button>
-          <button class="tab-button" type="button" id="tradeTab">Trade References</button>
-          <button class="tab-button" type="button" id="searchLogTab">Search Logs</button>
         </nav>
 
         <section id="analysisView" class="tab-view">
@@ -504,6 +499,17 @@
               <div id="commodityGrid" class="monitor-grid"></div>
             </article>
 
+            <section class="wide-grid" data-monitor-section="primary">
+              <article class="analysis-panel panel-accent-slate stock-heatmap-panel">
+                <div class="section-head">
+                  <h3>Mentioned Stock Heatmap</h3>
+                  <span id="stockHeatmapCount" class="pill">Stocks</span>
+                </div>
+                <p id="stockHeatmapSummary" class="section-summary"></p>
+                <div id="stockHeatmapGrid" class="stock-heatmap-grid"></div>
+              </article>
+            </section>
+
             <article class="analysis-panel nse-snapshot-panel panel-accent-blue" data-monitor-section="details">
               <div class="section-head">
                 <h3>NSE Market Snapshot</h3>
@@ -636,6 +642,7 @@
                   <span id="sectorStockPerformanceCount" class="pill">Major sectors</span>
                 </div>
                 <p id="sectorStockPerformanceSummary" class="section-summary"></p>
+                <div id="sectorStockPerformanceHeatmap" class="sector-performance-heatmap"></div>
                 <div class="table-wrap">
                   <table class="monitor-table sector-stock-performance-table">
                     <thead>
@@ -772,121 +779,6 @@
           </section>
         </section>
 
-        <section id="tradeView" class="tab-view is-hidden">
-          <section class="monitor-header">
-            <div>
-              <p class="eyebrow">Trade References</p>
-              <h2>Saved buy and sell levels</h2>
-              <p class="muted">Keep planned buy, sell, and stop levels for review before the next trade.</p>
-            </div>
-            <button type="button" id="useCurrentReport">Use Current Report</button>
-          </section>
-
-          <section id="tradeError" class="error-state is-hidden"></section>
-
-          <section class="trade-grid">
-            <article class="analysis-panel panel-accent-teal">
-              <h3>Add Reference</h3>
-              <form id="tradeForm" class="trade-form">
-                <label>
-                  <span>Symbol</span>
-                  <input id="tradeSymbol" name="symbol" placeholder="ABBOTINDIA.NS" autocomplete="off" required>
-                </label>
-                <label>
-                  <span>Stock name</span>
-                  <input id="tradeStockName" name="stockName" placeholder="Abbott India" autocomplete="off">
-                </label>
-                <label>
-                  <span>Buy price</span>
-                  <input id="tradeBuyPrice" name="buyPrice" type="number" step="0.01" min="0" required>
-                </label>
-                <label>
-                  <span>Sell price</span>
-                  <input id="tradeSellPrice" name="sellPrice" type="number" step="0.01" min="0" required>
-                </label>
-                <label>
-                  <span>Stop loss</span>
-                  <input id="tradeStopLoss" name="stopLoss" type="number" step="0.01" min="0">
-                </label>
-                <label>
-                  <span>Status</span>
-                  <select id="tradeStatus" name="status">
-                    <option value="watch">Watch</option>
-                    <option value="active">Active</option>
-                    <option value="closed">Closed</option>
-                  </select>
-                </label>
-                <label class="trade-note-field">
-                  <span>Note</span>
-                  <textarea id="tradeNote" name="note" rows="3" placeholder="Reason, trigger, result date, or chart condition"></textarea>
-                </label>
-                <button type="submit">Save Reference</button>
-              </form>
-            </article>
-
-            <article class="analysis-panel panel-accent-blue">
-              <div class="section-head">
-                <h3>Saved References</h3>
-                <span id="tradeCount" class="pill">0 saved</span>
-              </div>
-              <section id="tradeLoading" class="loading-state compact is-hidden">
-                <div class="spinner"></div>
-                <p>Loading references...</p>
-              </section>
-              <div class="table-wrap">
-                <table class="monitor-table trade-table">
-                  <thead>
-                    <tr>
-                      <th>Stock</th>
-                      <th>Buy</th>
-                      <th>Sell</th>
-                      <th>Upside</th>
-                      <th>Stop</th>
-                      <th>Status</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody id="tradeRows"></tbody>
-                </table>
-              </div>
-            </article>
-          </section>
-        </section>
-
-        <section id="searchLogView" class="tab-view is-hidden">
-          <section class="monitor-header">
-            <div>
-              <p class="eyebrow">Search Logs</p>
-              <h2>Stock search audit trail</h2>
-              <p class="muted" id="searchLogSummary">Not loaded yet.</p>
-            </div>
-            <button type="button" id="refreshSearchLogs">Refresh Logs</button>
-          </section>
-
-          <section id="searchLogLoading" class="loading-state is-hidden">
-            <div class="spinner"></div>
-            <p>Loading search logs...</p>
-          </section>
-
-          <section id="searchLogError" class="error-state is-hidden"></section>
-
-          <section id="searchLogContent" class="analysis-panel search-log-panel panel-accent-slate is-hidden">
-            <div class="table-wrap">
-              <table class="monitor-table search-log-table">
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Stock</th>
-                    <th>IP address</th>
-                    <th>Device</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody id="searchLogRows"></tbody>
-              </table>
-            </div>
-          </section>
-        </section>
       </section>
     </main>
 

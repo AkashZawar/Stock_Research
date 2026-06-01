@@ -26,6 +26,7 @@ const monitorError = document.querySelector("#monitorError");
 const monitorContent = document.querySelector("#monitorContent");
 const monitorPaneButtons = Array.from(document.querySelectorAll("[data-monitor-pane-button]"));
 const monitorSections = Array.from(document.querySelectorAll("[data-monitor-section]"));
+const stockHeatmapGrid = document.querySelector("#stockHeatmapGrid");
 const refreshSearchLogs = document.querySelector("#refreshSearchLogs");
 const searchLogLoading = document.querySelector("#searchLogLoading");
 const searchLogError = document.querySelector("#searchLogError");
@@ -92,6 +93,9 @@ let marketClockTimer = null;
 let monitorPollTimer = null;
 let selectedOpenInterestPeriod = "day";
 let selectedMonitorPane = "primary";
+let chartRedrawFrame = null;
+let monitorRequestInFlight = false;
+const MONITOR_LIVE_POLL_MS = 1000;
 const WATCHLIST_REFRESH_CONCURRENCY = 3;
 const analysisRequestCache = new Map();
 let searchController = null;
@@ -110,7 +114,7 @@ form.addEventListener("submit", async (event) => {
 analysisTab.addEventListener("click", () => setActiveTab("analysis"));
 etfTab.addEventListener("click", () => setActiveTab("etf"));
 fundTab.addEventListener("click", () => setActiveTab("fund"));
-watchlistTab.addEventListener("click", () => {
+watchlistTab?.addEventListener("click", () => {
   setActiveTab("watchlist");
   if (!latestWatchlistItems) {
     loadWatchlist();
@@ -124,13 +128,13 @@ monitorTab.addEventListener("click", () => {
     loadMarketMonitor(false);
   }
 });
-tradeTab.addEventListener("click", () => {
+tradeTab?.addEventListener("click", () => {
   setActiveTab("trade");
   if (!latestTradeReferences) {
     loadTradeReferences();
   }
 });
-searchLogTab.addEventListener("click", () => {
+searchLogTab?.addEventListener("click", () => {
   setActiveTab("logs");
   if (!latestSearchLogs) {
     loadSearchLogs();
@@ -140,10 +144,10 @@ refreshMonitor.addEventListener("click", () => loadMarketMonitor(true));
 for (const button of monitorPaneButtons) {
   button.addEventListener("click", () => setMonitorPane(button.dataset.monitorPaneButton || "primary"));
 }
-refreshSearchLogs.addEventListener("click", loadSearchLogs);
-useCurrentReport.addEventListener("click", prefillTradeFromReport);
-refreshWatchlistButton.addEventListener("click", () => refreshWatchlist(true));
-useCurrentWatchlistReport.addEventListener("click", () => addCurrentReportToWatchlist());
+refreshSearchLogs?.addEventListener("click", loadSearchLogs);
+useCurrentReport?.addEventListener("click", prefillTradeFromReport);
+refreshWatchlistButton?.addEventListener("click", () => refreshWatchlist(true));
+useCurrentWatchlistReport?.addEventListener("click", () => addCurrentReportToWatchlist());
 chartSupportToggle.addEventListener("change", redrawChart);
 chartResistanceToggle.addEventListener("change", redrawChart);
 expandChartButton.addEventListener("click", openExpandedChart);
@@ -162,12 +166,12 @@ canvas.addEventListener("keydown", (event) => {
   confirmTradingViewRedirect();
 });
 
-tradeForm.addEventListener("submit", async (event) => {
+tradeForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   await saveTradeReference();
 });
 
-tradeRows.addEventListener("click", async (event) => {
+tradeRows?.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-delete-trade]");
   if (!button) {
     return;
@@ -175,12 +179,12 @@ tradeRows.addEventListener("click", async (event) => {
   await deleteTradeReference(button.dataset.deleteTrade);
 });
 
-watchlistForm.addEventListener("submit", async (event) => {
+watchlistForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   await addWatchlistItemFromForm();
 });
 
-watchlistRows.addEventListener("click", async (event) => {
+watchlistRows?.addEventListener("click", async (event) => {
   const deleteButton = event.target.closest("[data-delete-watchlist]");
   if (deleteButton) {
     await deleteWatchlistItem(deleteButton.dataset.deleteWatchlist);
@@ -241,7 +245,7 @@ symbolInput.addEventListener("input", () => {
 
 window.addEventListener("resize", () => {
   if (latestReport && !analysisView.classList.contains("is-hidden")) {
-    redrawChart();
+    scheduleChartRedraw();
   }
 });
 
@@ -273,27 +277,32 @@ document.addEventListener("click", (event) => {
 function setActiveTab(tab) {
   const isEtf = tab === "etf";
   const isFund = tab === "fund";
-  const isWatchlist = tab === "watchlist";
+  const isWatchlist = tab === "watchlist" && Boolean(watchlistView);
   const isMonitor = tab === "monitor";
-  const isTrade = tab === "trade";
-  const isLogs = tab === "logs";
+  const isTrade = tab === "trade" && Boolean(tradeView);
+  const isLogs = tab === "logs" && Boolean(searchLogView);
   const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isTrade && !isLogs;
   analysisTab.classList.toggle("is-active", isAnalysis);
   etfTab.classList.toggle("is-active", isEtf);
   fundTab.classList.toggle("is-active", isFund);
-  watchlistTab.classList.toggle("is-active", isWatchlist);
+  watchlistTab?.classList.toggle("is-active", isWatchlist);
   monitorTab.classList.toggle("is-active", isMonitor);
-  tradeTab.classList.toggle("is-active", isTrade);
-  searchLogTab.classList.toggle("is-active", isLogs);
+  tradeTab?.classList.toggle("is-active", isTrade);
+  searchLogTab?.classList.toggle("is-active", isLogs);
   analysisView.classList.toggle("is-hidden", !isAnalysis);
   etfView.classList.toggle("is-hidden", !isEtf);
   fundView.classList.toggle("is-hidden", !isFund);
-  watchlistView.classList.toggle("is-hidden", !isWatchlist);
+  watchlistView?.classList.toggle("is-hidden", !isWatchlist);
   monitorView.classList.toggle("is-hidden", !isMonitor);
-  tradeView.classList.toggle("is-hidden", !isTrade);
-  searchLogView.classList.toggle("is-hidden", !isLogs);
+  tradeView?.classList.toggle("is-hidden", !isTrade);
+  searchLogView?.classList.toggle("is-hidden", !isLogs);
   if (isAnalysis && latestReport) {
     redrawChart();
+  }
+  if (isMonitor) {
+    scheduleMarketMonitorPoll();
+  } else {
+    clearMarketMonitorPoll();
   }
 }
 
@@ -559,14 +568,21 @@ function normalizeSuggestionGroups(suggestionsPayload) {
 
 async function loadMarketMonitor(forceRefresh, options = {}) {
   const silent = Boolean(options.silent);
+  const live = Boolean(options.live);
+  if (monitorRequestInFlight && silent) {
+    return;
+  }
+  monitorRequestInFlight = true;
   if (!silent) {
     monitorLoading.classList.remove("is-hidden");
     monitorError.classList.add("is-hidden");
-    monitorContent.classList.add("is-hidden");
+    if (!latestMonitor) {
+      monitorContent.classList.add("is-hidden");
+    }
   }
 
   try {
-    const suffix = forceRefresh ? "?refresh=1" : "";
+    const suffix = forceRefresh ? "?refresh=1" : live ? "?live=1" : "";
     const response = await fetch(`/api/market-monitor${suffix}`);
     const payload = await response.json();
     if (!response.ok) {
@@ -576,7 +592,7 @@ async function loadMarketMonitor(forceRefresh, options = {}) {
     renderMarketMonitor(payload);
     setMonitorPane(selectedMonitorPane);
     monitorContent.classList.remove("is-hidden");
-    if (payload.refreshing) {
+    if (!monitorView.classList.contains("is-hidden")) {
       scheduleMarketMonitorPoll();
     } else {
       clearMarketMonitorPoll();
@@ -585,19 +601,26 @@ async function loadMarketMonitor(forceRefresh, options = {}) {
     if (!silent) {
       monitorError.textContent = error.message;
       monitorError.classList.remove("is-hidden");
+    } else if (!monitorView.classList.contains("is-hidden")) {
+      scheduleMarketMonitorPoll(2500);
     }
   } finally {
+    monitorRequestInFlight = false;
     if (!silent) {
       monitorLoading.classList.add("is-hidden");
     }
   }
 }
 
-function scheduleMarketMonitorPoll() {
+function scheduleMarketMonitorPoll(delay = MONITOR_LIVE_POLL_MS) {
+  if (monitorView.classList.contains("is-hidden")) {
+    clearMarketMonitorPoll();
+    return;
+  }
   clearMarketMonitorPoll();
   monitorPollTimer = window.setTimeout(() => {
-    loadMarketMonitor(false, { silent: true });
-  }, 3000);
+    loadMarketMonitor(false, { silent: true, live: true });
+  }, delay);
 }
 
 function clearMarketMonitorPoll() {
@@ -2018,7 +2041,7 @@ function ensureChartDialog() {
   });
   window.addEventListener("resize", () => {
     if (latestReport && chartDialogEl && !chartDialogEl.classList.contains("is-hidden")) {
-      drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels, 0, expandedChartCanvas);
+      scheduleChartRedraw();
     }
   });
   return chartDialogEl;
@@ -2211,8 +2234,9 @@ function tradingViewChartUrl(report) {
 }
 
 function renderMarketMonitor(data) {
-  const refreshText = data.refreshing ? " · full scan refreshing" : "";
-  document.querySelector("#monitorGenerated").textContent = `Generated ${formatDateTime(data.generatedAt)} from ${data.source}${refreshText}`;
+  const refreshText = data.refreshing ? " · detailed scan refreshing" : "";
+  const detailText = data.detailGeneratedAt ? ` · details ${formatDateTime(data.detailGeneratedAt)}` : "";
+  document.querySelector("#monitorGenerated").textContent = `Live ${formatDateTime(data.generatedAt)} from ${data.source}${detailText}${refreshText}`;
   document.querySelector("#monitorNote").textContent = data.note;
   const primaryUniverse = data.primaryScanUniverse || {};
   const primaryLabel = primaryUniverse.label || "Nifty 500 only";
@@ -2226,11 +2250,22 @@ function renderMarketMonitor(data) {
   renderMoneycontrolSectorAnalysis(data.moneycontrolSectorAnalysis || {});
   renderSectorStockPerformance(data.sectorStockPerformance || {});
   renderCommodities(data.commodities || [], data.usdInr || {});
+  renderMentionedStockHeatmap(data || {});
   renderBreakoutRows(data.breakoutCandidates || []);
   renderHighVolumeRows(data.highVolumeCandidates || []);
   renderOrderCatalystRows(data.orderCatalysts || []);
   annotateMonitorTableCells();
   setupMonitorCollapsibles();
+}
+
+function monitorRefreshing() {
+  return Boolean(latestMonitor?.refreshing);
+}
+
+function monitorLoadingText(fallback) {
+  return monitorRefreshing()
+    ? "Refreshing live data; cached details stay visible until this provider returns fresh rows."
+    : fallback;
 }
 
 function setMonitorPane(pane) {
@@ -2308,12 +2343,13 @@ function renderNseSnapshot(snapshot) {
   indexGrid.innerHTML = "";
 
   if (!snapshot.available) {
-    setText("#nseSnapshotStatus", "Unavailable");
-    statusGrid.innerHTML = `<article class="market-mini-card"><span>NSE snapshot</span><strong>Unavailable</strong><small>${escapeHtml(snapshot.error || "NSE did not return market data.")}</small></article>`;
-    emptyTable("#nseGainerRows", 5, "NIFTY 50 gainers are unavailable.");
-    emptyTable("#nseLoserRows", 5, "NIFTY 50 losers are unavailable.");
-    emptyTable("#nseActiveRows", 5, "NSE most-active data is unavailable.");
-    emptyTable("#nseHighRows", 5, "NSE 52-week high and price-band data is unavailable.");
+    const status = monitorRefreshing() ? "Refreshing" : "Unavailable";
+    setText("#nseSnapshotStatus", status);
+    statusGrid.innerHTML = `<article class="market-mini-card"><span>NSE snapshot</span><strong>${status}</strong><small>${escapeHtml(snapshot.error || monitorLoadingText("NSE did not return market data."))}</small></article>`;
+    emptyTable("#nseGainerRows", 5, monitorLoadingText("NIFTY 50 gainers are unavailable."));
+    emptyTable("#nseLoserRows", 5, monitorLoadingText("NIFTY 50 losers are unavailable."));
+    emptyTable("#nseActiveRows", 5, monitorLoadingText("NSE most-active data is unavailable."));
+    emptyTable("#nseHighRows", 5, monitorLoadingText("NSE 52-week high and price-band data is unavailable."));
     return;
   }
 
@@ -2363,30 +2399,50 @@ function renderNseSnapshot(snapshot) {
     indexGrid.appendChild(card);
   }
 
-  setText("#nseGainerCount", `NIFTY 50 · ${(snapshot.topGainers || []).length} shown`);
-  setText("#nseLoserCount", `NIFTY 50 · ${(snapshot.topLosers || []).length} shown`);
+  const topGainers = snapshot.topGainers || [];
+  const topLosers = snapshot.topLosers || [];
+  setText("#nseGainerCount", nseMoverCountLabel(topGainers, "gainers"));
+  setText("#nseLoserCount", nseMoverCountLabel(topLosers, "losers"));
   setText("#nseActiveCount", `${(snapshot.mostActive || []).length} shown`);
-  renderNseMoverRows("#nseGainerRows", snapshot.topGainers || [], "No NIFTY 50 gainers were returned.");
-  renderNseMoverRows("#nseLoserRows", snapshot.topLosers || [], "No NIFTY 50 losers were returned.");
+  renderNseMoverRows(
+    "#nseGainerRows",
+    topGainers,
+    monitorLoadingText("No NIFTY 50 gainers were returned."),
+    snapshot.topGainersNote || ""
+  );
+  renderNseMoverRows(
+    "#nseLoserRows",
+    topLosers,
+    monitorLoadingText("No NIFTY 50 losers were returned."),
+    snapshot.topLosersNote || ""
+  );
   renderNseActiveRows(snapshot.mostActive || []);
   renderNseHighAndBandRows(snapshot.weekHighs || [], snapshot.priceBands || {});
 }
 
+function nseMoverCountLabel(items, label) {
+  return items.length ? `NIFTY 50 · ${items.length} shown` : `NIFTY 50 · no ${label}`;
+}
+
 function renderSectorStockPerformance(report) {
   const rowsEl = document.querySelector("#sectorStockPerformanceRows");
+  const heatmapEl = document.querySelector("#sectorStockPerformanceHeatmap");
   if (!rowsEl) {
     return;
   }
 
   const rows = report.rows || [];
-  setText("#sectorStockPerformanceCount", report.available ? `${rows.length} sectors` : "Unavailable");
-  setText("#sectorStockPerformanceSummary", report.summary || "Sector stock performance is not available yet.");
+  setText("#sectorStockPerformanceCount", report.available ? `${rows.length} sectors` : monitorRefreshing() ? "Refreshing" : "Unavailable");
+  setText("#sectorStockPerformanceSummary", report.summary || monitorLoadingText("Sector stock performance is not available yet."));
   rowsEl.innerHTML = "";
 
   if (!report.available || !rows.length) {
-    emptyTable("#sectorStockPerformanceRows", 5, report.summary || "Sector stock performance is unavailable.");
+    renderSectorStockPerformanceHeatmap(heatmapEl, [], report.summary || monitorLoadingText("Sector stock performance is unavailable."));
+    emptyTable("#sectorStockPerformanceRows", 5, report.summary || monitorLoadingText("Sector stock performance is unavailable."));
     return;
   }
+
+  renderSectorStockPerformanceHeatmap(heatmapEl, rows);
 
   for (const item of rows) {
     const row = document.createElement("tr");
@@ -2408,6 +2464,80 @@ function renderSectorStockPerformance(report) {
   }
 }
 
+function renderSectorStockPerformanceHeatmap(container, rows, emptyMessage = "") {
+  if (!container) {
+    return;
+  }
+  container.innerHTML = "";
+
+  if (!rows.length) {
+    container.innerHTML = `<article class="sector-heatmap-empty">${escapeHtml(emptyMessage || "No sector heatmap data available.")}</article>`;
+    return;
+  }
+
+  const orderedRows = [...rows].sort((a, b) => {
+    const aMove = stockHeatmapNumber(a.sectorChangePercent);
+    const bMove = stockHeatmapNumber(b.sectorChangePercent);
+    if (Number.isFinite(aMove) && Number.isFinite(bMove) && aMove !== bMove) {
+      return bMove - aMove;
+    }
+    return String(a.sector || "").localeCompare(String(b.sector || ""));
+  });
+  const moves = orderedRows
+    .map((item) => Math.abs(stockHeatmapNumber(item.sectorChangePercent) ?? 0))
+    .filter((value) => Number.isFinite(value));
+  const maxMove = Math.max(1, ...moves);
+
+  for (const item of orderedRows) {
+    const move = stockHeatmapNumber(item.sectorChangePercent);
+    const breadth = sectorBreadthPercent(item);
+    const tile = document.createElement("article");
+    tile.className = `sector-heatmap-tile ${stockHeatmapTone(move)}`;
+    const moveOpacity = Number.isFinite(move) ? 0.08 + (Math.min(Math.abs(move) / maxMove, 1) * 0.22) : 0.08;
+    tile.style.setProperty("--sector-move-opacity", moveOpacity.toFixed(2));
+    tile.style.setProperty("--sector-breadth", Number.isFinite(breadth) ? `${breadth}%` : "0%");
+    tile.innerHTML = `
+      <div class="sector-heatmap-main">
+        <strong>${escapeHtml(item.sector || "Sector")}</strong>
+        <em>${Number.isFinite(move) ? `${signed(move)}%` : "n/a"}</em>
+      </div>
+      <div class="sector-heatmap-meta">
+        <span>${formatNumber(item.stockCount)} stocks</span>
+        <span>A/D ${formatNumber(item.advance)} / ${formatNumber(item.decline)}</span>
+      </div>
+      <div class="sector-heatmap-breadth" aria-label="Advance breadth">
+        <span></span>
+      </div>
+      <div class="sector-heatmap-movers">
+        ${sectorHeatmapMover("Best", item.bestStock)}
+        ${sectorHeatmapMover("Worst", item.worstStock)}
+      </div>
+    `;
+    container.appendChild(tile);
+  }
+}
+
+function sectorHeatmapMover(label, stock) {
+  if (!stock || !stock.symbol) {
+    return `<span><small>${label}</small><strong>n/a</strong><em></em></span>`;
+  }
+  return `
+    <span>
+      <small>${escapeHtml(label)}</small>
+      <strong>${escapeHtml(stock.symbol)}</strong>
+      <em class="${changeClass(stock.changePercent)}">${signed(stock.changePercent)}%</em>
+    </span>
+  `;
+}
+
+function sectorBreadthPercent(item) {
+  const advances = stockHeatmapNumber(item.advance) || 0;
+  const declines = stockHeatmapNumber(item.decline) || 0;
+  const unchanged = stockHeatmapNumber(item.unchanged) || 0;
+  const total = advances + declines + unchanged;
+  return total > 0 ? Math.round((advances / total) * 100) : null;
+}
+
 function renderSectorStockMover(stock, sectorChangePercent) {
   if (!stock || !stock.symbol) {
     return "<span>n/a</span>";
@@ -2423,6 +2553,249 @@ function renderSectorStockMover(stock, sectorChangePercent) {
   `;
 }
 
+function renderMentionedStockHeatmap(data) {
+  const grid = stockHeatmapGrid;
+  if (!grid) {
+    return;
+  }
+
+  const stocks = collectMentionedStocks(data);
+  grid.innerHTML = "";
+  setText("#stockHeatmapCount", stocks.length ? `${stocks.length} stocks` : "No stocks");
+
+  if (!stocks.length) {
+    setText("#stockHeatmapSummary", "No stock mentions are available in the current monitor payload.");
+    grid.innerHTML = `<article class="stock-heatmap-empty">No stocks to map.</article>`;
+    return;
+  }
+
+  const movedStocks = stocks.filter((stock) => Number.isFinite(stock.changePercent));
+  const positive = movedStocks.filter((stock) => stock.changePercent > 0.05).length;
+  const negative = movedStocks.filter((stock) => stock.changePercent < -0.05).length;
+  const neutral = stocks.length - positive - negative;
+  const best = movedStocks.reduce((current, stock) => (
+    !current || stock.changePercent > current.changePercent ? stock : current
+  ), null);
+  const weakest = movedStocks.reduce((current, stock) => (
+    !current || stock.changePercent < current.changePercent ? stock : current
+  ), null);
+  const summaryParts = [`${positive} positive`, `${negative} negative`, `${neutral} flat or no live move`];
+  if (best) {
+    summaryParts.push(`best ${best.symbol} ${signed(best.changePercent)}%`);
+  }
+  if (weakest && weakest !== best) {
+    summaryParts.push(`weakest ${weakest.symbol} ${signed(weakest.changePercent)}%`);
+  }
+  setText("#stockHeatmapSummary", summaryParts.join(" · "));
+
+  for (const stock of stocks) {
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = `stock-heatmap-tile ${stockHeatmapTone(stock.changePercent)}`;
+    tile.setAttribute("aria-label", `Analyze ${stock.symbol}`);
+    tile.addEventListener("click", () => analyzeStockFromHeatmap(stock.analysisSymbol || stock.symbol));
+    const sources = stock.sources.slice(0, 3).join(" / ");
+    const moreSources = stock.sources.length > 3 ? ` +${stock.sources.length - 3}` : "";
+    tile.innerHTML = `
+      <div>
+        <strong>${escapeHtml(stock.symbol)}</strong>
+        <span class="stock-heatmap-name">${escapeHtml(stock.name || "Tracked stock")}</span>
+      </div>
+      <div class="stock-heatmap-move">
+        <span>${formatMoney(stock.price, "INR")}</span>
+        <em>${Number.isFinite(stock.changePercent) ? `${signed(stock.changePercent)}%` : "n/a"}</em>
+      </div>
+      <small>${escapeHtml(sources + moreSources)}</small>
+    `;
+    grid.appendChild(tile);
+  }
+}
+
+async function analyzeStockFromHeatmap(symbol) {
+  const targetSymbol = String(symbol || "").trim();
+  if (!targetSymbol) {
+    return;
+  }
+  symbolInput.value = targetSymbol;
+  suggestions.innerHTML = "";
+  setActiveTab("analysis");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  await analyze(targetSymbol);
+}
+
+function collectMentionedStocks(data) {
+  const stocks = new Map();
+  const snapshot = data.nseSnapshot || {};
+  addStockMentions(stocks, snapshot.topGainers, "NIFTY 50 gainers");
+  addStockMentions(stocks, snapshot.topLosers, "NIFTY 50 losers");
+  addStockMentions(stocks, snapshot.mostActive, "NSE active");
+  addStockMentions(stocks, snapshot.weekHighs, "52W highs");
+  addStockMentions(stocks, snapshot.priceBands?.rows, "Price bands");
+
+  addStockMentions(stocks, data.breakoutCandidates, "Primary 50");
+  addStockMentions(stocks, data.highVolumeCandidates, "High volume");
+  addStockMentions(stocks, data.orderCatalysts, "Catalysts");
+
+  for (const group of data.impacted || []) {
+    addStockMentions(stocks, group.stocks, `${group.commodity || "Commodity"} impact`);
+  }
+
+  for (const row of (data.sectorStockPerformance?.rows || [])) {
+    addStockMention(stocks, row.bestStock, `${row.sector || "Sector"} best`);
+    addStockMention(stocks, row.worstStock, `${row.sector || "Sector"} worst`);
+  }
+
+  const sectorSnapshot = data.moneycontrolSectorAnalysis || {};
+  for (const group of ["topPerforming", "underPerforming", "sectors"]) {
+    for (const sector of sectorSnapshot[group] || []) {
+      addStockMentions(stocks, sector.topStocks, sector.sector || "Moneycontrol sector");
+    }
+  }
+  for (const sector of (sectorSnapshot.sectorOpenInterest?.rows || [])) {
+    addStockMentions(stocks, sector.topStocks, `${sector.sector || "Sector"} OI`);
+  }
+
+  return Array.from(stocks.values())
+    .map((stock) => ({ ...stock, sources: Array.from(stock.sources) }))
+    .sort((a, b) => {
+      const aMoved = Number.isFinite(a.changePercent);
+      const bMoved = Number.isFinite(b.changePercent);
+      if (aMoved && bMoved && a.changePercent !== b.changePercent) {
+        return b.changePercent - a.changePercent;
+      }
+      if (aMoved !== bMoved) {
+        return aMoved ? -1 : 1;
+      }
+      return a.symbol.localeCompare(b.symbol);
+    });
+}
+
+function addStockMentions(map, items, source) {
+  for (const item of items || []) {
+    addStockMention(map, item, source);
+  }
+}
+
+function addStockMention(map, item, source) {
+  if (!item || !item.symbol) {
+    return;
+  }
+  const key = stockHeatmapKey(item.symbol);
+  if (!key || key === "N/A") {
+    return;
+  }
+  const displaySymbol = stockHeatmapSymbol(item.symbol);
+  const analysisSymbol = stockHeatmapAnalysisSymbol(item.symbol);
+  const price = stockHeatmapNumber(item.price, item.last, item.lastPrice, item.nsePrice, item.regularMarketPrice);
+  const changePercent = stockHeatmapNumber(
+    item.changePercent,
+    item.percentChange,
+    item.pChange,
+    item.regularMarketChangePercent,
+  );
+  const volume = stockHeatmapNumber(item.volume, item.totalTradedVolume, item.tradedQuantity);
+  const score = stockHeatmapNumber(item.score, item.volumeRatio);
+  const existing = map.get(key) || {
+    symbol: displaySymbol,
+    analysisSymbol: analysisSymbol || displaySymbol,
+    name: "",
+    price: null,
+    changePercent: null,
+    volume: null,
+    score: null,
+    sources: new Set(),
+  };
+
+  if (existing.symbol.endsWith(".NS") || displaySymbol.length < existing.symbol.length) {
+    existing.symbol = displaySymbol;
+  }
+  if (analysisSymbol && shouldReplaceHeatmapAnalysisSymbol(existing.analysisSymbol, analysisSymbol)) {
+    existing.analysisSymbol = analysisSymbol;
+  }
+  existing.name = existing.name || item.name || item.companyName || item.securityName || "";
+  if (Number.isFinite(price)) {
+    existing.price = price;
+  }
+  if (Number.isFinite(changePercent)) {
+    existing.changePercent = changePercent;
+  }
+  if (Number.isFinite(volume)) {
+    existing.volume = Math.max(Number.isFinite(existing.volume) ? existing.volume : 0, volume);
+  }
+  if (Number.isFinite(score)) {
+    existing.score = Math.max(Number.isFinite(existing.score) ? existing.score : 0, score);
+  }
+  if (source) {
+    existing.sources.add(source);
+  }
+  map.set(key, existing);
+}
+
+function stockHeatmapKey(symbol) {
+  return String(symbol || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\.(NS|BO)$/u, "");
+}
+
+function stockHeatmapSymbol(symbol) {
+  return String(symbol || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\.NS$/u, "");
+}
+
+function stockHeatmapAnalysisSymbol(symbol) {
+  return String(symbol || "")
+    .trim()
+    .toUpperCase();
+}
+
+function shouldReplaceHeatmapAnalysisSymbol(currentSymbol, nextSymbol) {
+  const current = String(currentSymbol || "");
+  const next = String(nextSymbol || "");
+  if (!current) {
+    return true;
+  }
+  const currentHasExchange = /\.(NS|BO)$/u.test(current);
+  const nextHasExchange = /\.(NS|BO)$/u.test(next);
+  return !currentHasExchange && nextHasExchange;
+}
+
+function stockHeatmapNumber(...values) {
+  for (const value of values) {
+    if (Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value.replace(/[,％%]/gu, ""));
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+}
+
+function stockHeatmapTone(value) {
+  if (!Number.isFinite(value)) {
+    return "is-neutral";
+  }
+  if (value >= 3) {
+    return "is-strong-positive";
+  }
+  if (value > 0.05) {
+    return "is-positive";
+  }
+  if (value <= -3) {
+    return "is-strong-negative";
+  }
+  if (value < -0.05) {
+    return "is-negative";
+  }
+  return "is-flat";
+}
+
 function renderMoneycontrolSectorAnalysis(snapshot) {
   const summary = document.querySelector("#moneycontrolSectorSummary");
   if (!summary) {
@@ -2432,10 +2805,11 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
   renderSectorOpenInterest(snapshot.sectorOpenInterest || {});
 
   if (!snapshot.available) {
-    setText("#moneycontrolSectorStatus", "Unavailable");
-    summary.innerHTML = `<article class="market-mini-card"><span>Moneycontrol</span><strong>Unavailable</strong><small>${escapeHtml(snapshot.error || "Sector analysis could not be loaded.")}</small></article>`;
-    emptyTable("#moneycontrolSectorRows", 9, "Moneycontrol sector analysis is unavailable.");
-    emptyTable("#moneycontrolIndexRows", 4, "Moneycontrol sectoral indices are unavailable.");
+    const status = snapshot.loading || monitorRefreshing() ? "Refreshing" : "Unavailable";
+    setText("#moneycontrolSectorStatus", status);
+    summary.innerHTML = `<article class="market-mini-card"><span>Moneycontrol</span><strong>${status}</strong><small>${escapeHtml(snapshot.error || snapshot.summary || monitorLoadingText("Sector analysis could not be loaded."))}</small></article>`;
+    emptyTable("#moneycontrolSectorRows", 9, monitorLoadingText("Moneycontrol sector analysis is unavailable."));
+    emptyTable("#moneycontrolIndexRows", 4, monitorLoadingText("Moneycontrol sectoral indices are unavailable."));
     return;
   }
 
@@ -2503,7 +2877,7 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
 
 function renderMoneycontrolSectorStocks(stocks, nseSector) {
   if (!stocks.length) {
-    return `<span>${nseSector ? "No stock movers returned." : "No NSE sector match."}</span>`;
+    return `<span>${escapeHtml(monitorLoadingText(nseSector ? "No stock movers returned." : "No NSE sector match."))}</span>`;
   }
   return `
     ${nseSector ? `<span>${escapeHtml(nseSector)}</span>` : ""}
@@ -2525,15 +2899,16 @@ function renderSectorOpenInterest(openInterest) {
   rows.innerHTML = "";
 
   if (!openInterest.available) {
-    setText("#sectorOiStatus", "OI unavailable");
+    const status = openInterest.loading || monitorRefreshing() ? "OI refreshing" : "OI unavailable";
+    setText("#sectorOiStatus", status);
     summary.innerHTML = `
       <article class="market-mini-card">
         <span>Sector OI</span>
-        <strong>Unavailable</strong>
-        <small>${escapeHtml(openInterest.error || openInterest.summary || "NSE sector-wise OI could not be loaded.")}</small>
+        <strong>${escapeHtml(status)}</strong>
+        <small>${escapeHtml(openInterest.error || openInterest.summary || monitorLoadingText("NSE sector-wise OI could not be loaded."))}</small>
       </article>
     `;
-    emptyTable("#sectorOiRows", 6, "Sector-wise OI is unavailable.");
+    emptyTable("#sectorOiRows", 6, monitorLoadingText("Sector-wise OI is unavailable."));
     return;
   }
 
@@ -2559,7 +2934,7 @@ function renderSectorOpenInterest(openInterest) {
   }
 
   if (!sectorRows.length) {
-    emptyTable("#sectorOiRows", 6, "No sector-wise OI rows were returned.");
+    emptyTable("#sectorOiRows", 6, monitorLoadingText("No sector-wise OI rows were returned."));
     return;
   }
 
@@ -2609,11 +2984,11 @@ function summarizedMoneycontrolSectors(snapshot) {
   return rows.slice(0, 8);
 }
 
-function renderNseMoverRows(selector, items, emptyMessage) {
+function renderNseMoverRows(selector, items, emptyMessage, sectionNote = "") {
   const body = document.querySelector(selector);
   body.innerHTML = "";
   if (!items.length) {
-    emptyTable(selector, 5, emptyMessage);
+    emptyTable(selector, 5, sectionNote || emptyMessage);
     return;
   }
   for (const item of items) {
@@ -2627,13 +3002,19 @@ function renderNseMoverRows(selector, items, emptyMessage) {
     `;
     body.appendChild(row);
   }
+  if (sectionNote) {
+    const noteRow = document.createElement("tr");
+    noteRow.className = "is-info-row";
+    noteRow.innerHTML = `<td colspan="5">${escapeHtml(sectionNote)}</td>`;
+    body.appendChild(noteRow);
+  }
 }
 
 function renderNseActiveRows(items) {
   const body = document.querySelector("#nseActiveRows");
   body.innerHTML = "";
   if (!items.length) {
-    emptyTable("#nseActiveRows", 5, "No NSE most-active rows were returned.");
+    emptyTable("#nseActiveRows", 5, monitorLoadingText("No NSE most-active rows were returned."));
     return;
   }
   for (const item of items) {
@@ -2664,7 +3045,7 @@ function renderNseHighAndBandRows(highs, priceBands) {
   ].slice(0, 12);
 
   if (!rows.length) {
-    emptyTable("#nseHighRows", 5, "No NSE 52-week high or price-band rows were returned.");
+    emptyTable("#nseHighRows", 5, monitorLoadingText("No NSE 52-week high or price-band rows were returned."));
     return;
   }
 
@@ -2684,7 +3065,8 @@ function renderNseHighAndBandRows(highs, priceBands) {
 function emptyTable(selector, colspan, message) {
   const body = document.querySelector(selector);
   if (body) {
-    body.innerHTML = `<tr><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
+    const rowClass = monitorRefreshing() ? " class=\"is-refreshing-row\"" : "";
+    body.innerHTML = `<tr${rowClass}><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
   }
 }
 
@@ -2710,7 +3092,7 @@ function renderCommodities(items, usdInr) {
     `;
     container.appendChild(fxCard);
   } else {
-    setText("#usdInrStatus", "USD/INR n/a");
+    setText("#usdInrStatus", monitorRefreshing() ? "USD/INR refreshing" : "USD/INR n/a");
   }
 
   for (const item of items) {
@@ -2726,6 +3108,17 @@ function renderCommodities(items, usdInr) {
     `;
     container.appendChild(card);
   }
+
+  if (!items.length && !usdInr?.available) {
+    const card = document.createElement("article");
+    card.className = "commodity-card is-loading";
+    card.innerHTML = `
+      <span>Live refresh</span>
+      <strong>${monitorRefreshing() ? "Refreshing" : "Unavailable"}</strong>
+      <p>${escapeHtml(monitorLoadingText("Commodity and USD/INR data is unavailable."))}</p>
+    `;
+    container.appendChild(card);
+  }
 }
 
 function renderBreakoutRows(items) {
@@ -2733,7 +3126,7 @@ function renderBreakoutRows(items) {
   body.innerHTML = "";
 
   if (!items.length) {
-    body.innerHTML = "<tr><td colspan=\"7\">No high, breakout, or reversal candidates found in the current scan.</td></tr>";
+    emptyTable("#breakoutRows", 7, monitorLoadingText("No high, breakout, or reversal candidates found in the current scan."));
     return;
   }
 
@@ -2766,7 +3159,7 @@ function renderHighVolumeRows(items) {
   body.innerHTML = "";
 
   if (!items.length) {
-    body.innerHTML = "<tr><td colspan=\"6\">No high-volume upside candidates passed the current filters.</td></tr>";
+    emptyTable("#highVolumeRows", 6, monitorLoadingText("No high-volume upside candidates passed the current filters."));
     return;
   }
 
@@ -2789,7 +3182,7 @@ function renderOrderCatalystRows(items) {
   body.innerHTML = "";
 
   if (!items.length) {
-    body.innerHTML = "<tr><td colspan=\"5\">No order or contract catalyst headlines were found in the current scan.</td></tr>";
+    emptyTable("#orderCatalystRows", 5, monitorLoadingText("No order or contract catalyst headlines were found in the current scan."));
     return;
   }
 
@@ -3263,7 +3656,18 @@ function redrawChart() {
   if (!latestReport) {
     return;
   }
-  requestAnimationFrame(() => {
+  scheduleChartRedraw();
+}
+
+function scheduleChartRedraw() {
+  if (!latestReport) {
+    return;
+  }
+  if (chartRedrawFrame) {
+    window.cancelAnimationFrame(chartRedrawFrame);
+  }
+  chartRedrawFrame = window.requestAnimationFrame(() => {
+    chartRedrawFrame = null;
     drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels, 0, canvas);
     if (expandedChartCanvas && chartDialogEl && !chartDialogEl.classList.contains("is-hidden")) {
       drawChart(latestReport.series, latestReport.currency, latestReport.technical.levels, 0, expandedChartCanvas);
@@ -3734,5 +4138,7 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-renderWatchlist();
+if (watchlistRows) {
+  renderWatchlist();
+}
 showState("empty");

@@ -5,10 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;700;800;900&display=swap">
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260519-watchlist-2">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260601-quality-1">
   </head>
   <body>
     <main class="app-shell">
@@ -42,21 +39,15 @@
           <button class="tab-button" type="button" id="monitorTab">Market Monitor</button>
           <button class="tab-button" type="button" id="etfTab">ETF Analysis</button>
           <button class="tab-button" type="button" id="fundTab">Mutual Funds</button>
-          <button class="tab-button" type="button" id="watchlistTab">Watchlist</button>
-          <button class="tab-button" type="button" id="tradeTab">Trade References</button>
-          <button class="tab-button" type="button" id="searchLogTab">Search Logs</button>
         </nav>
 
         {% include "market/tabs/stock_analysis.html" %}
         {% include "market/tabs/market_monitor.html" %}
         {% include "market/tabs/etf_analysis.html" %}
         {% include "market/tabs/mutual_funds.html" %}
-        {% include "market/tabs/watchlist.html" %}
-        {% include "market/tabs/trade_references.html" %}
-        {% include "market/tabs/search_logs.html" %}
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260519-watchlist-2"></script>
+    <script src="{% static 'app.js' %}?v=20260601-quality-1"></script>
   </body>
 </html>

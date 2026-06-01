@@ -23,6 +23,8 @@ SEC_CACHE_TTL_SECONDS = 24 * 60 * 60
 MARKET_MONITOR_CACHE_SECONDS = 10 * 60
 FAST_MARKET_MONITOR_CACHE_SECONDS = 15
 NSE_MARKET_SNAPSHOT_CACHE_SECONDS = 60
+LIVE_MARKET_MONITOR_CACHE_SECONDS = 1
+LIVE_NSE_MARKET_SNAPSHOT_CACHE_SECONDS = 1
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
@@ -116,6 +118,8 @@ NSE_SNAPSHOT_ENDPOINTS = {
     "marketStatus": "/api/marketStatus",
     "allIndices": "/api/allIndices",
     "nifty50": f"/api/equity-stockIndices?index={quote(NIFTY_50_INDEX_NAME)}",
+    "gainers": "/api/live-analysis-variations?index=gainers",
+    "losers": "/api/live-analysis-variations?index=loosers",
     "mostActive": "/api/live-analysis-most-active-securities?index=volume",
     "weekHighs": "/api/live-analysis-52Week?index=high",
     "priceBands": "/api/live-analysis-price-band-hitter?index=upper",
@@ -571,19 +575,19 @@ def build_nse_market_snapshot():
     if not payloads:
         raise RuntimeError("NSE India market snapshot is temporarily unavailable.")
 
-    snapshot = build_nse_market_snapshot_from_payloads(payloads)
+    snapshot = build_nse_market_snapshot_from_payloads(payloads, endpoint_errors=endpoint_errors)
     snapshot["endpointErrors"] = endpoint_errors
     if endpoint_errors:
         snapshot["note"] = "Some NSE snapshot blocks could not be refreshed; visible data uses the endpoints that responded."
     return snapshot
 
 
-def safe_nse_market_snapshot():
+def safe_nse_market_snapshot(cache_seconds=NSE_MARKET_SNAPSHOT_CACHE_SECONDS, cache_key="nse-market-snapshot"):
     try:
         return cached(
-            "nse-market-snapshot",
+            cache_key,
             build_nse_market_snapshot,
-            NSE_MARKET_SNAPSHOT_CACHE_SECONDS,
+            cache_seconds,
         )
     except Exception as error:
         return {
@@ -596,13 +600,16 @@ def safe_nse_market_snapshot():
             "sectorIndices": [],
             "topGainers": [],
             "topLosers": [],
+            "topGainersNote": "NIFTY 50 gainer feed is temporarily unavailable.",
+            "topLosersNote": "NIFTY 50 loser feed is temporarily unavailable.",
             "mostActive": [],
             "weekHighs": [],
             "priceBands": {"rows": [], "count": []},
         }
 
 
-def build_nse_market_snapshot_from_payloads(payloads):
+def build_nse_market_snapshot_from_payloads(payloads, endpoint_errors=None):
+    endpoint_errors = endpoint_errors or {}
     market_status_payload = payloads.get("marketStatus") or {}
     all_indices_payload = payloads.get("allIndices") or {}
     market_status = normalize_nse_market_status(market_status_payload)
@@ -611,6 +618,8 @@ def build_nse_market_snapshot_from_payloads(payloads):
     breadth = normalize_nse_breadth(all_indices_payload)
     indices = normalize_nse_indices(all_indices_payload, NSE_KEY_INDICES)
     sector_indices = normalize_nse_sector_indices(all_indices_payload)
+    top_gainers = normalize_nse_nifty_movers(payloads, "gainers", limit=10)
+    top_losers = normalize_nse_nifty_movers(payloads, "losers", limit=10)
 
     return {
         "available": True,
@@ -624,8 +633,10 @@ def build_nse_market_snapshot_from_payloads(payloads):
         "breadth": breadth,
         "indices": indices,
         "sectorIndices": sector_indices,
-        "topGainers": normalize_nse_index_movers(payloads.get("nifty50"), "gainers", limit=10),
-        "topLosers": normalize_nse_index_movers(payloads.get("nifty50"), "losers", limit=10),
+        "topGainers": top_gainers,
+        "topLosers": top_losers,
+        "topGainersNote": nse_nifty_mover_note(top_gainers, "gainers", endpoint_errors),
+        "topLosersNote": nse_nifty_mover_note(top_losers, "losers", endpoint_errors),
         "mostActive": normalize_nse_most_active(payloads.get("mostActive"), limit=8),
         "weekHighs": normalize_nse_52_week_highs(payloads.get("weekHighs"), limit=8),
         "priceBands": normalize_nse_price_bands(payloads.get("priceBands"), limit=8),
@@ -747,20 +758,25 @@ def normalize_nse_index(item):
     }
 
 
-def normalize_nse_variation(payload, limit=8):
-    rows = nse_group_data(payload, "allSec")
+def normalize_nse_variation(payload, limit=8, group_key="allSec", direction=None):
+    rows = nse_group_data(payload, group_key)
     normalized = []
-    for item in rows[:limit]:
-        symbol = nse_text(item.get("symbol"))
+    for item in rows:
+        symbol = nse_text(item.get("symbol")).upper()
         if not symbol:
             continue
         corporate_action = nse_text(item.get("ca_purpose"))
+        change_percent = nse_round(item.get("perChange"))
+        if direction == "gainers" and (change_percent is None or change_percent <= 0):
+            continue
+        if direction == "losers" and (change_percent is None or change_percent >= 0):
+            continue
         normalized.append({
             "symbol": symbol,
             "series": nse_text(item.get("series")),
             "price": nse_round(item.get("ltp")),
             "change": nse_round(item.get("net_price")),
-            "changePercent": nse_round(item.get("perChange")),
+            "changePercent": change_percent,
             "open": nse_round(item.get("open_price")),
             "high": nse_round(item.get("high_price")),
             "low": nse_round(item.get("low_price")),
@@ -769,7 +785,41 @@ def normalize_nse_variation(payload, limit=8):
             "turnoverLakhs": nse_round(item.get("turnover")),
             "corporateAction": "" if corporate_action in {"-", "--"} else corporate_action,
         })
-    return normalized
+    if direction in {"gainers", "losers"}:
+        normalized = sorted(
+            normalized,
+            key=lambda item: item["changePercent"] if item["changePercent"] is not None else 0,
+            reverse=(direction == "gainers"),
+        )
+    return normalized[:limit]
+
+
+def normalize_nse_nifty_movers(payloads, direction, limit=8):
+    variation_rows = normalize_nse_variation(
+        payloads.get(direction),
+        limit=limit,
+        group_key="NIFTY",
+        direction=direction,
+    )
+    if variation_rows:
+        return variation_rows
+    return normalize_nse_index_movers(payloads.get("nifty50"), direction, limit=limit)
+
+
+def nse_nifty_mover_note(rows, direction, endpoint_errors=None):
+    endpoint_errors = endpoint_errors or {}
+    if len(rows) >= 5:
+        return ""
+    noun = "gainer" if direction == "gainers" else "loser"
+    plural = "gainers" if direction == "gainers" else "losers"
+    movement = "positive" if direction == "gainers" else "negative"
+    if not rows:
+        if endpoint_errors.get(direction) and endpoint_errors.get("nifty50"):
+            return f"NIFTY 50 {noun} feed is temporarily unavailable."
+        return f"NIFTY 50 is not showing {movement} movers in the live feed right now."
+    unit = noun if len(rows) == 1 else plural
+    verb = "is" if len(rows) == 1 else "are"
+    return f"Only {len(rows)} NIFTY 50 {unit} {verb} available in the live feed right now."
 
 
 def normalize_nse_index_movers(payload, direction, limit=8):
@@ -2359,6 +2409,97 @@ def build_market_monitor():
     }
 
 
+def build_live_market_monitor(base_payload=None, refreshing=False):
+    nse_snapshot = safe_nse_market_snapshot(
+        cache_seconds=LIVE_NSE_MARKET_SNAPSHOT_CACHE_SECONDS,
+        cache_key="nse-market-snapshot-live",
+    )
+    detail_payload = base_payload if isinstance(base_payload, dict) else {}
+    detail_generated_at = detail_payload.get("detailGeneratedAt") or detail_payload.get("generatedAt") or ""
+
+    payload = {
+        **empty_market_monitor_details(refreshing),
+        **detail_payload,
+        "generatedAt": iso_now(),
+        "source": "Live NSE snapshot with cached detailed monitor scan",
+        "note": live_market_monitor_note(detail_payload, refreshing),
+        "refreshing": refreshing,
+        "liveMode": True,
+        "detailGeneratedAt": detail_generated_at,
+        "nseSnapshot": nse_snapshot,
+    }
+    if not detail_payload:
+        payload["fastMode"] = True
+    return payload
+
+
+def empty_market_monitor_details(refreshing=False):
+    loading_text = "Detailed monitor scan is running; this section will fill as provider data returns."
+    unavailable_text = "Detailed monitor data has not loaded yet."
+    summary = loading_text if refreshing else unavailable_text
+    return {
+        "fastMode": True,
+        "moneycontrolSectorAnalysis": {
+            "available": False,
+            "loading": refreshing,
+            "summary": summary,
+            "sectors": [],
+            "topPerforming": [],
+            "underPerforming": [],
+            "sectorIndices": [],
+            "sectorOpenInterest": {
+                "available": False,
+                "loading": refreshing,
+                "summary": summary,
+                "stockMoversBySector": {},
+            },
+        },
+        "sectorStockPerformance": {
+            "available": False,
+            "loading": refreshing,
+            "source": "NSE India sectoral index constituents",
+            "summary": summary,
+            "rows": [],
+        },
+        "commodities": [],
+        "usdInr": {"available": False, "loading": refreshing},
+        "breakoutCandidates": [],
+        "highVolumeCandidates": [],
+        "orderCatalysts": [],
+        "impacted": [],
+        "scannedCount": 0,
+        "primaryScanUniverse": {
+            "label": "Nifty 500 only",
+            "count": 0,
+            "scanned": 0,
+            "scanLimit": NIFTY_500_PRIMARY_SCAN_LIMIT,
+            "available": False,
+        },
+        "activityScannedCount": 0,
+        "catalystScannedCount": 0,
+    }
+
+
+def live_market_monitor_note(detail_payload, refreshing):
+    if detail_payload and refreshing:
+        detail_time = detail_payload.get("generatedAt")
+        detail_suffix = f" from {detail_time}" if detail_time else ""
+        return (
+            "Live NSE snapshot refreshes every second in the browser. "
+            f"Showing the last detailed scan{detail_suffix} "
+            "while a fresh full scan runs in the background."
+        )
+    if detail_payload:
+        return (
+            "Live NSE snapshot refreshes every second in the browser. "
+            "Detailed scan sections are cached because they use slower public provider endpoints."
+        )
+    return (
+        "Live NSE snapshot is available now. Detailed sections are loading in the background and will appear "
+        "without clearing the dashboard."
+    )
+
+
 def build_fast_market_monitor(refreshing=True):
     with ThreadPoolExecutor(max_workers=2) as executor:
         nse_snapshot_future = executor.submit(safe_nse_market_snapshot)
@@ -2488,6 +2629,10 @@ def start_market_monitor_refresh():
     thread = threading.Thread(target=refresh_market_monitor_cache, daemon=True)
     thread.start()
     return True
+
+
+def is_market_monitor_refreshing():
+    return _market_monitor_refreshing
 
 
 def refresh_market_monitor_cache():
@@ -3319,7 +3464,8 @@ def watchlist_name(symbol):
 def resolve_symbol_input(value):
     normalized = normalize_symbol(value)
     if normalized:
-        return normalized
+        local_symbol = local_symbol_match(normalized)
+        return local_symbol or normalized
 
     results = search_symbols(value)
     best = choose_search_result(results, value)
@@ -3416,11 +3562,35 @@ def resolve_asset_input(value, asset_type):
     normalized_asset_type = normalize_asset_type(asset_type)
     normalized = normalize_symbol(value)
     if normalized:
-        return normalized
+        local_symbol = local_asset_symbol_match(normalized, normalized_asset_type)
+        return local_symbol or normalized
 
     results = search_assets(value, normalized_asset_type)
     best = choose_asset_search_result(results, value, normalized_asset_type)
     return best["symbol"] if best else ""
+
+
+def local_symbol_match(symbol):
+    normalized = str(symbol or "").strip().upper()
+    if not normalized or "." in normalized or normalized.startswith("^") or "=" in normalized:
+        return ""
+
+    for stock in local_search_universe():
+        local_symbol = stock["symbol"].upper()
+        if local_symbol.split(".", 1)[0] == normalized:
+            return stock["symbol"]
+    return ""
+
+
+def local_asset_symbol_match(symbol, asset_type):
+    normalized = str(symbol or "").strip().upper()
+    if not normalized or "." in normalized or normalized.startswith("^") or "=" in normalized:
+        return ""
+
+    for item_symbol, _name, _exchange, _tags in ASSET_TYPE_CONFIG[asset_type]["universe"]:
+        if item_symbol.upper().split(".", 1)[0] == normalized:
+            return item_symbol
+    return ""
 
 
 def search_assets(query, asset_type):
@@ -6104,6 +6274,75 @@ def build_outlook(overall_score, technical_score, fundamental_score, event_risk)
     return {"label": label, "summary": summary}
 
 
+def market_data_freshness(candles, quote_data, now=None):
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+
+    latest_candle_date = parse_candle_date((candles or [{}])[-1].get("date") if candles else None)
+    quote_time = parse_provider_datetime(
+        (quote_data or {}).get("regularMarketTime")
+        or (quote_data or {}).get("marketTime")
+    )
+    chart_age_days = (now.date() - latest_candle_date).days if latest_candle_date else None
+    quote_age_minutes = (
+        round((now - quote_time).total_seconds() / 60)
+        if quote_time and quote_time <= now
+        else None
+    )
+    return {
+        "latestCandleDate": latest_candle_date.isoformat() if latest_candle_date else "",
+        "chartAgeDays": chart_age_days,
+        "quoteTime": iso_from_datetime(quote_time) if quote_time else None,
+        "quoteAgeMinutes": quote_age_minutes,
+    }
+
+
+def parse_candle_date(value):
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).date() if value.tzinfo else value.date()
+    if isinstance(value, date):
+        return value
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text.title(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_provider_datetime(value):
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromtimestamp(float(text), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def build_quality_report(data):
     metric_names = [
         "marketCap",
@@ -6124,6 +6363,7 @@ def build_quality_report(data):
     is_indian_symbol = symbol.endswith(".NS") or symbol.endswith(".BO")
     ownership = data.get("ownership") or {}
     relative_strength = data.get("relativeStrength") or {}
+    freshness = market_data_freshness(data["candles"], data.get("quote") or {}, data.get("now"))
     warnings = []
     strengths = []
     score = 55
@@ -6173,9 +6413,30 @@ def build_quality_report(data):
         score -= 6
         warnings.append("Benchmark-relative strength could not be calculated from the available data.")
 
-    if not data["quote"].get("regularMarketTime"):
+    if freshness["chartAgeDays"] is None:
+        score -= 6
+        warnings.append("Latest chart candle date was not available from the provider.")
+    elif freshness["chartAgeDays"] <= 4:
+        score += 5
+        strengths.append(f"Latest chart candle is recent: {freshness['latestCandleDate']}.")
+    elif freshness["chartAgeDays"] <= 10:
+        score -= 4
+        warnings.append(f"Latest chart candle is {freshness['chartAgeDays']} days old; check a live chart before acting.")
+    else:
+        score -= 12
+        warnings.append(f"Latest chart candle appears stale ({freshness['latestCandleDate']}).")
+
+    if freshness["quoteAgeMinutes"] is None:
         score -= 4
         warnings.append("Provider did not return an official market timestamp for the quote.")
+    elif freshness["quoteAgeMinutes"] <= 90:
+        score += 4
+        strengths.append("Quote timestamp is recent.")
+    elif freshness["quoteAgeMinutes"] > 3 * 24 * 60:
+        score -= 8
+        warnings.append("Quote timestamp is more than three days old.")
+    else:
+        warnings.append("Quote timestamp is older than a normal intraday quote; verify live price.")
 
     if data["eventRisk"]["score"] >= 65:
         score -= 12
@@ -6206,16 +6467,18 @@ def build_quality_report(data):
         ),
         "chartPoints": chart_points,
         "availableFundamentalMetrics": available_metrics,
+        "freshness": freshness,
         "dataSources": data["source"],
-        "checks": build_accuracy_checks(data, ownership, relative_strength),
+        "checks": build_accuracy_checks(data, ownership, relative_strength, freshness),
         "strengths": strengths,
         "warnings": warnings,
     }
 
 
-def build_accuracy_checks(data, ownership, relative_strength):
+def build_accuracy_checks(data, ownership, relative_strength, freshness=None):
     symbol = data.get("symbol") or ""
     is_indian_symbol = symbol.endswith(".NS") or symbol.endswith(".BO")
+    freshness = freshness or market_data_freshness(data["candles"], data.get("quote") or {}, data.get("now"))
     checks = []
 
     checks.append({
@@ -6223,6 +6486,19 @@ def build_accuracy_checks(data, ownership, relative_strength):
         "status": "Available" if len(data["candles"]) >= 200 else "Partial",
         "tone": "positive" if len(data["candles"]) >= 200 else "warning",
         "detail": f"{len(data['candles'])} daily candles loaded for the setup.",
+    })
+
+    chart_age = freshness.get("chartAgeDays")
+    quote_age = freshness.get("quoteAgeMinutes")
+    checks.append({
+        "label": "Data freshness",
+        "status": "Fresh" if chart_age is not None and chart_age <= 4 and quote_age is not None and quote_age <= 90 else "Verify",
+        "tone": "positive" if chart_age is not None and chart_age <= 4 else "warning",
+        "detail": (
+            f"Latest candle {freshness.get('latestCandleDate') or 'n/a'}; "
+            f"quote age {quote_age} minutes." if quote_age is not None
+            else f"Latest candle {freshness.get('latestCandleDate') or 'n/a'}; quote timestamp unavailable."
+        ),
     })
 
     checks.append({
@@ -6763,9 +7039,9 @@ def cached(key, loader, ttl=CACHE_TTL_SECONDS):
     return data
 
 
-def get_cached(key):
+def get_cached(key, include_expired=False):
     cached_value = _cache.get(key)
-    if cached_value and cached_value["expiresAt"] > time.time():
+    if cached_value and (include_expired or cached_value["expiresAt"] > time.time()):
         return cached_value["data"]
     return None
 

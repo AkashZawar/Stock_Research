@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -274,27 +274,28 @@ class MarketMonitorEndpointTests(TestCase):
     def tearDown(self):
         services._cache.clear()
 
-    def test_market_monitor_reuses_cached_fast_payload_while_refreshing(self):
-        fast_payload = {
+    def test_market_monitor_reuses_cached_live_payload_while_refreshing(self):
+        live_payload = {
             "generatedAt": "2026-05-22T10:00:00+05:30",
             "refreshing": True,
-            "fastMode": True,
+            "liveMode": True,
             "breakoutCandidates": [],
         }
 
         with (
             patch("market.views.services.start_market_monitor_refresh") as start_refresh,
-            patch("market.views.services.build_fast_market_monitor", return_value=fast_payload) as build_fast,
+            patch("market.views.services.is_market_monitor_refreshing", side_effect=[False, True]),
+            patch("market.views.services.build_live_market_monitor", return_value=live_payload) as build_live,
         ):
-            first = self.client.get("/api/market-monitor")
-            second = self.client.get("/api/market-monitor")
+            first = self.client.get("/api/market-monitor?live=1")
+            second = self.client.get("/api/market-monitor?live=1")
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(first.json(), fast_payload)
-        self.assertEqual(second.json(), fast_payload)
+        self.assertEqual(first.json(), live_payload)
+        self.assertEqual(second.json(), live_payload)
         self.assertEqual(start_refresh.call_count, 1)
-        self.assertEqual(build_fast.call_count, 1)
+        self.assertEqual(build_live.call_count, 1)
 
 
 class OpenInterestTests(SimpleTestCase):
@@ -493,8 +494,14 @@ class MarketSnapshotTests(SimpleTestCase):
                     },
                 ],
             },
-            "gainers": {"allSec": {"data": [{"symbol": "TEST", "ltp": 100, "net_price": 5, "perChange": 5, "trade_quantity": 1000}]}},
-            "losers": {"allSec": {"data": [{"symbol": "FAIL", "ltp": 50, "net_price": -2, "perChange": -4, "trade_quantity": 900}]}},
+            "gainers": {
+                "NIFTY": {"data": [{"symbol": "TECHM", "ltp": 1550, "net_price": 45, "perChange": 3, "trade_quantity": 1000}]},
+                "allSec": {"data": [{"symbol": "TEST", "ltp": 100, "net_price": 5, "perChange": 5, "trade_quantity": 1000}]},
+            },
+            "losers": {
+                "NIFTY": {"data": [{"symbol": "TITAN", "ltp": 3200, "net_price": -64, "perChange": -2, "trade_quantity": 900}]},
+                "allSec": {"data": [{"symbol": "FAIL", "ltp": 50, "net_price": -2, "perChange": -4, "trade_quantity": 900}]},
+            },
             "nifty50": {
                 "data": [
                     {"symbol": "NIFTY 50", "lastPrice": "23,869.45", "pChange": "-1.27"},
@@ -513,10 +520,42 @@ class MarketSnapshotTests(SimpleTestCase):
         self.assertEqual(snapshot["breadth"]["advanceDeclineRatio"], 2.0)
         self.assertEqual(snapshot["indices"][0]["name"], "NIFTY 50")
         self.assertEqual(snapshot["sectorIndices"][0]["name"], "NIFTY IT")
-        self.assertEqual(snapshot["topGainers"][0]["symbol"], "RELIANCE")
-        self.assertEqual(snapshot["topLosers"][0]["symbol"], "TCS")
+        self.assertEqual(snapshot["topGainers"][0]["symbol"], "TECHM")
+        self.assertEqual(snapshot["topLosers"][0]["symbol"], "TITAN")
         self.assertNotIn("TEST", [row["symbol"] for row in snapshot["topGainers"]])
         self.assertEqual(snapshot["priceBands"]["count"][0]["label"], "Total")
+
+    def test_nse_movers_fall_back_to_nifty50_index_constituents(self):
+        payloads = {
+            "gainers": {"allSec": {"data": [{"symbol": "OUTSIDE", "ltp": 100, "net_price": 5, "perChange": 5}]}},
+            "losers": {"NIFTY": {"data": []}},
+            "nifty50": {
+                "data": [
+                    {"symbol": "NIFTY 50", "lastPrice": 23869, "pChange": 0.5},
+                    {"symbol": "AAA", "lastPrice": 100, "change": 3, "pChange": 3, "totalTradedVolume": 1000},
+                    {"symbol": "BBB", "lastPrice": 200, "change": -4, "pChange": -2, "totalTradedVolume": 2000},
+                ]
+            },
+        }
+
+        snapshot = services.build_nse_market_snapshot_from_payloads(payloads)
+
+        self.assertEqual([row["symbol"] for row in snapshot["topGainers"]], ["AAA"])
+        self.assertEqual([row["symbol"] for row in snapshot["topLosers"]], ["BBB"])
+
+    def test_nse_mover_notes_explain_when_nifty_is_not_moving_that_direction(self):
+        payloads = {
+            "gainers": {"NIFTY": {"data": []}},
+            "losers": {"NIFTY": {"data": []}},
+            "nifty50": {"data": [{"symbol": "NIFTY 50", "lastPrice": 23869, "pChange": 0.5}]},
+        }
+
+        snapshot = services.build_nse_market_snapshot_from_payloads(payloads)
+
+        self.assertEqual(snapshot["topGainers"], [])
+        self.assertEqual(snapshot["topLosers"], [])
+        self.assertIn("not showing positive movers", snapshot["topGainersNote"])
+        self.assertIn("not showing negative movers", snapshot["topLosersNote"])
 
     def test_nse_index_movers_only_use_nifty50_constituents(self):
         payload = {
@@ -664,6 +703,28 @@ class MarketSnapshotTests(SimpleTestCase):
         self.assertTrue(report["fastMode"])
         self.assertEqual(report["breakoutCandidates"][0]["symbol"], "LEADER.NS")
         self.assertIn("chart scan pending", report["breakoutCandidates"][0]["signal"])
+
+    def test_live_market_monitor_preserves_cached_detailed_sections(self):
+        cached_detail = {
+            "generatedAt": "2026-05-22T10:00:00Z",
+            "source": "Detailed scan",
+            "nseSnapshot": {"available": True, "timestamp": "old"},
+            "orderCatalysts": [{"symbol": "HAL.NS", "headline": "Order win"}],
+            "breakoutCandidates": [{"symbol": "LEADER.NS"}],
+            "highVolumeCandidates": [{"symbol": "TCS.NS"}],
+            "moneycontrolSectorAnalysis": {"available": True, "sectors": [{"sector": "IT"}]},
+        }
+        live_snapshot = {"available": True, "timestamp": "live", "mostActive": [{"symbol": "IDEA"}]}
+
+        with patch("market.services.safe_nse_market_snapshot", return_value=live_snapshot):
+            report = services.build_live_market_monitor(cached_detail, refreshing=True)
+
+        self.assertTrue(report["liveMode"])
+        self.assertTrue(report["refreshing"])
+        self.assertEqual(report["detailGeneratedAt"], "2026-05-22T10:00:00Z")
+        self.assertEqual(report["nseSnapshot"], live_snapshot)
+        self.assertEqual(report["orderCatalysts"][0]["symbol"], "HAL.NS")
+        self.assertEqual(report["breakoutCandidates"][0]["symbol"], "LEADER.NS")
 
     def test_market_monitor_primary_scan_uses_nifty500_universe_only(self):
         primary_universe = [{"symbol": "RELIANCE.NS", "name": "Reliance Industries", "tags": ["Nifty 500"]}]
@@ -876,6 +937,71 @@ class SearchSuggestionTests(SimpleTestCase):
         ], "rel")
 
         self.assertEqual([item["symbol"] for item in results], ["RELIANCE.NS", "RELIANCE.BO", "RELIANCE"])
+
+    def test_resolve_symbol_prefers_local_nse_match_when_suffix_is_omitted(self):
+        self.assertEqual(services.resolve_symbol_input("RELIANCE"), "RELIANCE.NS")
+
+    def test_resolve_symbol_keeps_unknown_us_style_ticker(self):
+        self.assertEqual(services.resolve_symbol_input("AAPL"), "AAPL")
+
+    def test_resolve_asset_prefers_local_exchange_suffix_when_omitted(self):
+        self.assertEqual(services.resolve_asset_input("NIFTYBEES", "etf"), "NIFTYBEES.NS")
+        self.assertEqual(services.resolve_asset_input("QQQ", "etf"), "QQQ")
+
+
+class QualityReportTests(SimpleTestCase):
+    def test_quality_report_flags_stale_chart_and_quote_data(self):
+        now = datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+        old_quote_time = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc).timestamp()
+        data = {
+            "candles": [{"date": "2026-05-20"} for _index in range(210)],
+            "quote": {"regularMarketTime": old_quote_time},
+            "fundamentals": {
+                "marketCap": 1000.0,
+                "trailingPE": 20.0,
+                "priceToBook": 3.0,
+                "profitMargins": 0.1,
+                "returnOnEquity": 0.15,
+                "returnOnCapitalEmployed": 0.16,
+                "revenueGrowth": 0.08,
+                "earningsGrowth": 0.09,
+                "debtToEquity": 0.4,
+                "dividendYield": 0.01,
+                "targetMeanPrice": 120.0,
+                "dataSource": "Yahoo Finance",
+            },
+            "technical": {"score": 70},
+            "fundamental": {"score": 70},
+            "eventRisk": {"score": 20},
+            "supportResistance": {
+                "supportZones": [{"price": 90.0}, {"price": 85.0}],
+                "resistanceZones": [{"price": 110.0}, {"price": 120.0}],
+            },
+            "source": "Yahoo Finance public endpoints",
+            "symbol": "RELIANCE.NS",
+            "ownership": {
+                "source": "Screener.in shareholding",
+                "rows": [
+                    {"name": "Promoters", "quarters": [{"period": "Mar 2026", "value": 0.5}]},
+                    {"name": "FIIs", "quarters": [{"period": "Mar 2026", "value": 0.18}]},
+                    {"name": "DIIs", "quarters": [{"period": "Mar 2026", "value": 0.2}]},
+                ],
+            },
+            "relativeStrength": {
+                "available": True,
+                "benchmarkName": "Nifty 50",
+                "averageSpread": 1.2,
+                "label": "Outperforming",
+                "summary": "Stock is ahead of benchmark.",
+            },
+            "now": now,
+        }
+
+        quality = services.build_quality_report(data)
+
+        self.assertEqual(quality["freshness"]["chartAgeDays"], 12)
+        self.assertTrue(any("stale" in warning.lower() for warning in quality["warnings"]))
+        self.assertTrue(any(check["label"] == "Data freshness" and check["status"] == "Verify" for check in quality["checks"]))
 
 
 class StockSearchLogTests(TestCase):

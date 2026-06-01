@@ -29,6 +29,17 @@
               <div id="commodityGrid" class="monitor-grid"></div>
             </article>
 
+            <section class="wide-grid" data-monitor-section="primary">
+              <article class="analysis-panel panel-accent-slate stock-heatmap-panel">
+                <div class="section-head">
+                  <h3>Mentioned Stock Heatmap</h3>
+                  <span id="stockHeatmapCount" class="pill">Stocks</span>
+                </div>
+                <p id="stockHeatmapSummary" class="section-summary"></p>
+                <div id="stockHeatmapGrid" class="stock-heatmap-grid"></div>
+              </article>
+            </section>
+
             <article class="analysis-panel nse-snapshot-panel panel-accent-blue" data-monitor-section="details">
               <div class="section-head">
                 <h3>NSE Market Snapshot</h3>
@@ -161,6 +172,7 @@
                   <span id="sectorStockPerformanceCount" class="pill">Major sectors</span>
                 </div>
                 <p id="sectorStockPerformanceSummary" class="section-summary"></p>
+                <div id="sectorStockPerformanceHeatmap" class="sector-performance-heatmap"></div>
                 <div class="table-wrap">
                   <table class="monitor-table sector-stock-performance-table">
                     <thead>
