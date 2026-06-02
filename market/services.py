@@ -25,6 +25,10 @@ FAST_MARKET_MONITOR_CACHE_SECONDS = 15
 NSE_MARKET_SNAPSHOT_CACHE_SECONDS = 60
 LIVE_MARKET_MONITOR_CACHE_SECONDS = 1
 LIVE_NSE_MARKET_SNAPSHOT_CACHE_SECONDS = 1
+RECOMMENDATION_CACHE_SECONDS = 30 * 60
+RECOMMENDATION_SCAN_LIMIT = 18
+RECOMMENDATION_RESULT_LIMIT = 14
+RECOMMENDATION_MIN_UPSIDE_PERCENT = 4
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
@@ -469,6 +473,31 @@ COMMODITY_IMPACT_GROUPS = [
         "pressuredWhenUp": ["TATASTEEL.NS", "HINDALCO.NS", "ULTRACEMCO.NS"],
     },
 ]
+
+RECOMMENDATION_FALLBACK_UNIVERSE = (
+    ("RELIANCE.NS", "Reliance Industries", ("Large cap", "Index leader")),
+    ("TCS.NS", "Tata Consultancy Services", ("Large cap", "IT")),
+    ("INFY.NS", "Infosys", ("Large cap", "IT")),
+    ("HDFCBANK.NS", "HDFC Bank", ("Large cap", "Banking")),
+    ("ICICIBANK.NS", "ICICI Bank", ("Large cap", "Banking")),
+    ("LT.NS", "Larsen & Toubro", ("Infrastructure", "Capital goods")),
+    ("SBIN.NS", "State Bank of India", ("Banking", "PSU")),
+    ("BHARTIARTL.NS", "Bharti Airtel", ("Telecom", "Large cap")),
+    ("AXISBANK.NS", "Axis Bank", ("Banking", "Large cap")),
+    ("MARUTI.NS", "Maruti Suzuki India", ("Auto", "Large cap")),
+    ("SUNPHARMA.NS", "Sun Pharmaceutical", ("Pharma", "Large cap")),
+    ("HAL.NS", "Hindustan Aeronautics", ("Defence", "PSU")),
+)
+
+BULLISH_RECOMMENDATION_KEYS = {"buy", "strong_buy", "strongbuy", "outperform", "overweight", "add", "accumulate"}
+RECOMMENDATION_GROUP_LABELS = {
+    "FIIs": "Foreign institutional investor group",
+    "DIIs": "Domestic institutional investor group",
+}
+RECOMMENDATION_GROUP_DETAILS = {
+    "FIIs": "Foreign portfolio investors, overseas institutions, and related public shareholding categories.",
+    "DIIs": "Domestic institutions such as mutual funds, insurers, banks, and other Indian institutional holders.",
+}
 
 
 def analyze_symbol(symbol):
@@ -2642,6 +2671,383 @@ def refresh_market_monitor_cache():
     finally:
         with _market_monitor_refresh_lock:
             _market_monitor_refreshing = False
+
+
+def get_recommendations():
+    return cached("recommendations", build_recommendations, RECOMMENDATION_CACHE_SECONDS)
+
+
+def build_recommendations():
+    universe = recommendation_universe()
+    results = settle_map(universe, build_recommendation_candidate, 4)
+    rows = [
+        value
+        for ok, value in results
+        if ok and value
+    ]
+    rows = sorted(
+        rows,
+        key=lambda item: (
+            item.get("score") or 0,
+            item.get("upsidePercent") if is_finite(item.get("upsidePercent")) else -1000,
+        ),
+        reverse=True,
+    )[:RECOMMENDATION_RESULT_LIMIT]
+
+    return {
+        "generatedAt": iso_now(),
+        "source": "Yahoo Finance analyst consensus/actions, public shareholding data, NSE/Yahoo prices",
+        "note": (
+            "Rows qualify only when public analyst data is constructive or when FIIs/DIIs have accumulated "
+            "meaningfully in the latest available shareholding trend. Buy, sell, and stop levels are generated "
+            "from the latest public price/chart data and must be verified before trading."
+        ),
+        "summary": summarize_recommendations(rows),
+        "scannedCount": len(universe),
+        "results": rows,
+    }
+
+
+def recommendation_universe():
+    stocks = []
+    nse_universe = safe_nifty500_primary_universe()
+    if nse_universe:
+        stocks.extend(primary_scan_candidates_from_nifty500(nse_universe)[:12])
+
+    stocks.extend([
+        {"symbol": symbol, "name": name, "tags": list(tags)}
+        for symbol, name, tags in RECOMMENDATION_FALLBACK_UNIVERSE
+    ])
+
+    by_symbol = {}
+    for stock in stocks:
+        symbol = normalize_symbol(stock.get("symbol"))
+        if not symbol:
+            continue
+        by_symbol.setdefault(symbol, {**stock, "symbol": symbol})
+    return list(by_symbol.values())[:RECOMMENDATION_SCAN_LIMIT]
+
+
+def build_recommendation_candidate(stock):
+    symbol = normalize_symbol(stock.get("symbol"))
+    if not symbol:
+        return None
+
+    quote_data = safe_provider_call(lambda: get_quote(symbol), {})
+    summary = safe_provider_call(lambda: get_summary(symbol), {})
+    chart = safe_provider_call(lambda: get_chart_range(symbol, "6mo", "1d"), {})
+    candles = chart.get("candles") or []
+
+    long_name = first_present(
+        stock.get("name"),
+        quote_data.get("longName"),
+        quote_data.get("shortName"),
+        raw((summary.get("price") or {}).get("longName")),
+        raw((summary.get("price") or {}).get("shortName")),
+        symbol,
+    )
+    ownership = {}
+    if symbol.endswith((".NS", ".BO")):
+        screener = safe_provider_call(lambda: get_screener_fundamentals(symbol), {})
+        screener = ensure_shareholding_data(symbol, long_name, screener)
+        ownership = build_ownership_trend(screener.get("shareholding"), {})
+
+    return build_recommendation_from_inputs(stock, quote_data, summary, candles, ownership)
+
+
+def build_recommendation_from_inputs(stock, quote_data=None, summary=None, candles=None, ownership=None):
+    quote_data = quote_data or {}
+    summary = summary or {}
+    candles = candles or []
+    ownership = ownership or {}
+    symbol = normalize_symbol(stock.get("symbol"))
+    if not symbol:
+        return None
+
+    financial = summary.get("financialData") or {}
+    price_module = summary.get("price") or {}
+    current = finite_or(
+        raw(financial.get("currentPrice")),
+        raw(price_module.get("regularMarketPrice")),
+        quote_data.get("regularMarketPrice"),
+        stock.get("nsePrice"),
+        candles[-1]["close"] if candles else None,
+    )
+    if not is_finite(current) or current <= 0:
+        return None
+
+    target_mean = finite_or(raw(financial.get("targetMeanPrice")), quote_data.get("targetMeanPrice"))
+    target_high = finite_or(raw(financial.get("targetHighPrice")), quote_data.get("targetHighPrice"))
+    recommendation_mean = finite_or(raw(financial.get("recommendationMean")), quote_data.get("recommendationMean"))
+    analyst_count = finite_or(raw(financial.get("numberOfAnalystOpinions")), quote_data.get("numberOfAnalystOpinions"))
+    recommendation_key = normalize_recommendation_grade(financial.get("recommendationKey") or quote_data.get("recommendationKey"))
+    latest_action = latest_analyst_action(summary)
+    ownership_sources = recommendation_ownership_sources(ownership)
+
+    analyst_upside = (
+        safe_divide(target_mean - current, current) * 100
+        if is_finite(target_mean)
+        else None
+    )
+    analyst_signal = (
+        (is_finite(recommendation_mean) and recommendation_mean <= 2.6)
+        or recommendation_key in BULLISH_RECOMMENDATION_KEYS
+        or (is_finite(analyst_upside) and analyst_upside >= RECOMMENDATION_MIN_UPSIDE_PERCENT)
+        or is_bullish_analyst_action(latest_action)
+    )
+    if not analyst_signal and not ownership_sources:
+        return None
+
+    atr_value = last(atr(candles, 14)) if len(candles) >= 15 else None
+    entry_low, entry_high = recommendation_entry_range(current, candles, atr_value)
+    sell_price = recommendation_sell_price(current, entry_high, target_mean, target_high, candles, atr_value)
+    if not is_finite(sell_price) or sell_price <= entry_high:
+        return None
+
+    upside_percent = safe_divide(sell_price - entry_high, entry_high) * 100
+    if not ownership_sources and upside_percent < RECOMMENDATION_MIN_UPSIDE_PERCENT:
+        return None
+
+    stop_loss = recommendation_stop_loss(entry_high, candles, atr_value)
+    risk_percent = safe_divide(entry_high - stop_loss, entry_high) * 100 if is_finite(stop_loss) else None
+    recommended_by = recommendation_recommender(latest_action, analyst_signal, ownership_sources)
+    recommender_details = recommendation_recommender_details(latest_action, analyst_signal, ownership_sources, ownership)
+    source_type = recommendation_source_type(analyst_signal, ownership_sources)
+    reason = recommendation_reason(
+        recommendation_mean,
+        recommendation_key,
+        analyst_upside,
+        analyst_count,
+        ownership_sources,
+    )
+
+    return {
+        "symbol": symbol,
+        "analysisSymbol": symbol,
+        "name": first_present(stock.get("name"), quote_data.get("longName"), quote_data.get("shortName"), symbol),
+        "recommendedBy": recommended_by,
+        "recommenderDetails": recommender_details,
+        "fundGroup": recommendation_group_summary(recommender_details),
+        "sourceType": source_type,
+        "sourceDetail": recommendation_source_detail(latest_action, ownership),
+        "buyPrice": round_or_none(entry_high),
+        "buyRange": {"low": round_or_none(entry_low), "high": round_or_none(entry_high)},
+        "sellPrice": round_or_none(sell_price),
+        "stopLoss": round_or_none(stop_loss),
+        "duration": recommendation_duration(analyst_signal, ownership_sources),
+        "currentPrice": round_or_none(current),
+        "upsidePercent": round_or_none(upside_percent),
+        "riskPercent": round_or_none(risk_percent),
+        "score": recommendation_score(recommendation_mean, analyst_upside, analyst_count, ownership_sources),
+        "analyst": {
+            "recommendationMean": round_or_none(recommendation_mean),
+            "recommendationKey": recommendation_key,
+            "targetMeanPrice": round_or_none(target_mean),
+            "analystCount": round(analyst_count) if is_finite(analyst_count) else None,
+        },
+        "ownershipSignals": ownership_sources,
+        "reason": reason,
+    }
+
+
+def safe_provider_call(loader, fallback):
+    try:
+        return loader()
+    except Exception:
+        return fallback
+
+
+def latest_analyst_action(summary):
+    history = arrayify((summary.get("upgradeDowngradeHistory") or {}).get("history"))
+    if not history:
+        return {}
+    return sorted(history, key=lambda item: item.get("epochGradeDate") or 0, reverse=True)[0] or {}
+
+
+def is_bullish_analyst_action(action):
+    grade = normalize_recommendation_grade(action.get("toGrade"))
+    action_name = normalize_recommendation_grade(action.get("action"))
+    return grade in BULLISH_RECOMMENDATION_KEYS or action_name in {"up", "upgrade", "initiated"}
+
+
+def normalize_recommendation_grade(value):
+    return re.sub(r"[^a-z_]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def recommendation_ownership_sources(ownership):
+    rows = ownership.get("rows") or []
+    signals = []
+    for name in ["FIIs", "DIIs"]:
+        row = next((item for item in rows if item.get("name") == name), None)
+        if not row:
+            continue
+        quarter_change = row.get("quarterChangePoints")
+        available_change = row.get("changePoints")
+        qualifies_quarter = is_finite(quarter_change) and quarter_change >= 0.5
+        qualifies_available = is_finite(available_change) and available_change >= 1.0
+        if not qualifies_quarter and not qualifies_available:
+            continue
+        signals.append({
+            "name": name,
+            "groupLabel": RECOMMENDATION_GROUP_LABELS.get(name, name),
+            "groupDetail": RECOMMENDATION_GROUP_DETAILS.get(name, ""),
+            "changePoints": round_or_none(quarter_change if qualifies_quarter else available_change),
+            "period": row.get("latestPeriod") or "latest period",
+            "basis": "latest quarter" if qualifies_quarter else "available quarters",
+            "latestHolding": round_ratio_or_none(row.get("latest")),
+        })
+    return signals
+
+
+def recommendation_entry_range(current, candles, atr_value):
+    entry_high = current
+    fallback_width = current * 0.025
+    width = atr_value * 0.45 if is_finite(atr_value) and atr_value > 0 else fallback_width
+    recent_low = min([candle["low"] for candle in candles[-20:]], default=None)
+    entry_low = current - width
+    if is_finite(recent_low) and current * 0.9 <= recent_low <= current:
+        entry_low = max(entry_low, recent_low)
+    entry_low = min(entry_low, entry_high)
+    return round2(max(entry_low, current * 0.82)), round2(entry_high)
+
+
+def recommendation_sell_price(current, entry_high, target_mean, target_high, candles, atr_value):
+    if is_finite(target_mean) and target_mean > entry_high * 1.02:
+        return target_mean
+    if is_finite(target_high) and target_high > entry_high * 1.04:
+        return target_high
+
+    recent_high = max([candle["high"] for candle in candles[-60:]], default=None)
+    atr_target = current + (atr_value * 2.2 if is_finite(atr_value) and atr_value > 0 else current * 0.08)
+    if is_finite(recent_high) and recent_high > entry_high * 1.03:
+        return max(recent_high, atr_target)
+    return atr_target
+
+
+def recommendation_stop_loss(entry_high, candles, atr_value):
+    recent_low = min([candle["low"] for candle in candles[-20:]], default=None)
+    atr_stop = entry_high - (atr_value * 1.4 if is_finite(atr_value) and atr_value > 0 else entry_high * 0.07)
+    if is_finite(recent_low) and recent_low < entry_high:
+        return round2(max(min(atr_stop, recent_low * 0.99), entry_high * 0.78))
+    return round2(max(atr_stop, entry_high * 0.78))
+
+
+def recommendation_recommender(action, analyst_signal, ownership_sources):
+    parts = []
+    if analyst_signal:
+        firm = str(action.get("firm") or "").strip()
+        if firm and is_bullish_analyst_action(action):
+            grade = str(action.get("toGrade") or "").strip()
+            parts.append(f"{firm}{f' ({grade})' if grade else ''}")
+        else:
+            parts.append("Analyst consensus")
+    if ownership_sources:
+        parts.append(" / ".join(item["name"] for item in ownership_sources))
+    return " + ".join(parts) or "Public data signal"
+
+
+def recommendation_recommender_details(action, analyst_signal, ownership_sources, ownership):
+    details = []
+    if analyst_signal:
+        firm = str(action.get("firm") or "").strip()
+        grade = str(action.get("toGrade") or "").strip()
+        action_date = to_date(action.get("epochGradeDate")) if action.get("epochGradeDate") else ""
+        details.append({
+            "type": "Analyst",
+            "name": firm or "Analyst consensus",
+            "group": grade or "Broker / analyst coverage",
+            "detail": " ".join([str(action.get("action") or "").strip(), action_date]).strip(),
+        })
+
+    source = ownership.get("source") or ""
+    for signal in ownership_sources:
+        latest_holding = signal.get("latestHolding")
+        details.append({
+            "type": "Institutional ownership",
+            "name": signal.get("name") or "",
+            "group": signal.get("groupLabel") or signal.get("name") or "",
+            "detail": (
+                f"{signal.get('groupDetail') or ''} Added {abs(signal.get('changePoints') or 0):.2f} pp "
+                f"over the {signal.get('basis') or 'available period'}"
+                f"{f'; latest holding {latest_holding * 100:.2f}%' if is_finite(latest_holding) else ''}."
+                f"{f' Source: {source}.' if source else ''}"
+            ).strip(),
+        })
+    return details
+
+
+def recommendation_group_summary(details):
+    groups = [item.get("group") for item in details or [] if item.get("group")]
+    return " / ".join(dict.fromkeys(groups))
+
+
+def recommendation_source_type(analyst_signal, ownership_sources):
+    parts = []
+    if analyst_signal:
+        parts.append("Analyst")
+    if ownership_sources:
+        parts.append("FII/DII")
+    return " + ".join(parts)
+
+
+def recommendation_source_detail(action, ownership):
+    details = []
+    if action.get("firm"):
+        action_date = to_date(action.get("epochGradeDate")) if action.get("epochGradeDate") else ""
+        details.append(" ".join([str(action.get("firm") or ""), str(action.get("action") or ""), str(action.get("toGrade") or ""), action_date]).strip())
+    source = ownership.get("source")
+    if source:
+        details.append(source)
+    return " | ".join(details) or "Public market data"
+
+
+def recommendation_reason(recommendation_mean, recommendation_key, analyst_upside, analyst_count, ownership_sources):
+    parts = []
+    if is_finite(recommendation_mean):
+        label = recommendation_key.replace("_", " ") if recommendation_key else "consensus"
+        parts.append(f"Analyst mean {recommendation_mean:.2f} ({label}).")
+    if is_finite(analyst_upside):
+        parts.append(f"Target upside {analyst_upside:.2f}%.")
+    if is_finite(analyst_count):
+        parts.append(f"{round(analyst_count)} analyst opinions.")
+    for signal in ownership_sources:
+        parts.append(
+            f"{signal['name']} added {abs(signal['changePoints']):.2f} pp over the {signal['basis']}."
+        )
+    return " ".join(parts) or "Constructive public recommendation signal."
+
+
+def recommendation_duration(analyst_signal, ownership_sources):
+    if analyst_signal and ownership_sources:
+        return "6-12 months"
+    if analyst_signal:
+        return "3-6 months"
+    return "1-2 quarters"
+
+
+def recommendation_score(recommendation_mean, analyst_upside, analyst_count, ownership_sources):
+    score = 45
+    if is_finite(recommendation_mean):
+        score += clamp((3.2 - recommendation_mean) * 15, -12, 28)
+    if is_finite(analyst_upside):
+        score += clamp(analyst_upside * 0.9, 0, 24)
+    if is_finite(analyst_count):
+        score += clamp(analyst_count, 0, 20) * 0.4
+    for signal in ownership_sources:
+        score += clamp(signal.get("changePoints") or 0, 0, 4) * 4
+    return round(clamp(score, 0, 100))
+
+
+def summarize_recommendations(rows):
+    if not rows:
+        return "No analyst or FII/DII recommendation candidates passed the current filters."
+    analyst_count = sum(1 for row in rows if "Analyst" in row.get("sourceType", ""))
+    ownership_count = sum(1 for row in rows if "FII/DII" in row.get("sourceType", ""))
+    top = rows[0]
+    return (
+        f"{len(rows)} ideas from {analyst_count} analyst-backed and {ownership_count} FII/DII-backed signals. "
+        f"Top score: {top.get('symbol')} at {top.get('score')}/100."
+    )
 
 
 def safe_usd_inr_snapshot():

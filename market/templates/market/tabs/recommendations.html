@@ -1,0 +1,45 @@
+        <section id="recommendationsView" class="tab-view is-hidden">
+          <section class="monitor-header">
+            <div>
+              <p class="eyebrow">Recomendations</p>
+              <h2>Analyst and FII/DII backed stock ideas</h2>
+              <p class="muted" id="recommendationsGenerated">Not loaded yet.</p>
+            </div>
+            <button type="button" id="refreshRecommendations">Refresh List</button>
+          </section>
+
+          <section id="recommendationsLoading" class="loading-state is-hidden">
+            <div class="spinner"></div>
+            <p>Loading recommendations...</p>
+          </section>
+
+          <section id="recommendationsError" class="error-state is-hidden"></section>
+
+          <section id="recommendationsContent" class="recommendations-content is-hidden">
+            <article class="analysis-panel panel-accent-blue recommendation-panel">
+              <div class="section-head">
+                <h3>Recommendation Heatmap & List</h3>
+                <span id="recommendationsCount" class="pill">Ideas</span>
+              </div>
+              <p id="recommendationsSummary" class="section-summary"></p>
+              <div class="table-wrap">
+                <table class="monitor-table recommendation-table">
+                  <thead>
+                    <tr>
+                      <th>Stock</th>
+                      <th>Who / Fund Group</th>
+                      <th>Buy Price</th>
+                      <th>Sell Price</th>
+                      <th>Stop Loss</th>
+                      <th>Hold Duration</th>
+                      <th>Upside</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="recommendationRows"></tbody>
+                </table>
+              </div>
+              <p class="muted recommendation-note" id="recommendationsSource">Public data</p>
+            </article>
+          </section>
+        </section>

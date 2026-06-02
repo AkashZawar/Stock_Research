@@ -181,6 +181,15 @@ def market_monitor(request):
         return JsonResponse({"error": str(error)}, status=500)
 
 
+def recommendations(request):
+    try:
+        if request.GET.get("refresh") == "1":
+            services.clear_cache("recommendations")
+        return JsonResponse(services.get_recommendations())
+    except Exception as error:
+        return JsonResponse({"error": str(error)}, status=500)
+
+
 def cache_live_market_monitor(cached_payload=None, refreshing=False, stale=False):
     live_payload = services.get_cached("market-monitor-live")
     if live_payload and live_payload.get("refreshing") == refreshing:

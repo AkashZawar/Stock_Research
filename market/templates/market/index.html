@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260601-quality-1">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260602-recommendations-1">
   </head>
   <body>
     <main class="app-shell">
@@ -36,18 +36,20 @@
 
         <nav class="tabs" aria-label="Workspace tabs">
           <button class="tab-button is-active" type="button" id="analysisTab">Stock Analysis</button>
+          <button class="tab-button" type="button" id="recommendationsTab">Recomendations</button>
           <button class="tab-button" type="button" id="monitorTab">Market Monitor</button>
           <button class="tab-button" type="button" id="etfTab">ETF Analysis</button>
           <button class="tab-button" type="button" id="fundTab">Mutual Funds</button>
         </nav>
 
         {% include "market/tabs/stock_analysis.html" %}
+        {% include "market/tabs/recommendations.html" %}
         {% include "market/tabs/market_monitor.html" %}
         {% include "market/tabs/etf_analysis.html" %}
         {% include "market/tabs/mutual_funds.html" %}
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260601-quality-1"></script>
+    <script src="{% static 'app.js' %}?v=20260602-recommendations-1"></script>
   </body>
 </html>

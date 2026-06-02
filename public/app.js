@@ -7,6 +7,7 @@ const errorState = document.querySelector("#errorState");
 const reportEl = document.querySelector("#report");
 const canvas = document.querySelector("#priceChart");
 const analysisTab = document.querySelector("#analysisTab");
+const recommendationsTab = document.querySelector("#recommendationsTab");
 const etfTab = document.querySelector("#etfTab");
 const fundTab = document.querySelector("#fundTab");
 const watchlistTab = document.querySelector("#watchlistTab");
@@ -14,6 +15,7 @@ const monitorTab = document.querySelector("#monitorTab");
 const tradeTab = document.querySelector("#tradeTab");
 const searchLogTab = document.querySelector("#searchLogTab");
 const analysisView = document.querySelector("#analysisView");
+const recommendationsView = document.querySelector("#recommendationsView");
 const etfView = document.querySelector("#etfView");
 const fundView = document.querySelector("#fundView");
 const watchlistView = document.querySelector("#watchlistView");
@@ -27,6 +29,11 @@ const monitorContent = document.querySelector("#monitorContent");
 const monitorPaneButtons = Array.from(document.querySelectorAll("[data-monitor-pane-button]"));
 const monitorSections = Array.from(document.querySelectorAll("[data-monitor-section]"));
 const stockHeatmapGrid = document.querySelector("#stockHeatmapGrid");
+const refreshRecommendations = document.querySelector("#refreshRecommendations");
+const recommendationsLoading = document.querySelector("#recommendationsLoading");
+const recommendationsError = document.querySelector("#recommendationsError");
+const recommendationsContent = document.querySelector("#recommendationsContent");
+const recommendationRows = document.querySelector("#recommendationRows");
 const refreshSearchLogs = document.querySelector("#refreshSearchLogs");
 const searchLogLoading = document.querySelector("#searchLogLoading");
 const searchLogError = document.querySelector("#searchLogError");
@@ -80,6 +87,7 @@ const assetContexts = {
 
 let latestReport = null;
 let latestMonitor = null;
+let latestRecommendations = null;
 let latestTradeReferences = null;
 let latestWatchlistItems = null;
 let latestSearchLogs = null;
@@ -112,6 +120,12 @@ form.addEventListener("submit", async (event) => {
 });
 
 analysisTab.addEventListener("click", () => setActiveTab("analysis"));
+recommendationsTab?.addEventListener("click", () => {
+  setActiveTab("recommendations");
+  if (!latestRecommendations) {
+    loadRecommendations(false);
+  }
+});
 etfTab.addEventListener("click", () => setActiveTab("etf"));
 fundTab.addEventListener("click", () => setActiveTab("fund"));
 watchlistTab?.addEventListener("click", () => {
@@ -141,6 +155,7 @@ searchLogTab?.addEventListener("click", () => {
   }
 });
 refreshMonitor.addEventListener("click", () => loadMarketMonitor(true));
+refreshRecommendations?.addEventListener("click", () => loadRecommendations(true));
 for (const button of monitorPaneButtons) {
   button.addEventListener("click", () => setMonitorPane(button.dataset.monitorPaneButton || "primary"));
 }
@@ -177,6 +192,14 @@ tradeRows?.addEventListener("click", async (event) => {
     return;
   }
   await deleteTradeReference(button.dataset.deleteTrade);
+});
+
+recommendationRows?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-recommendation-symbol]");
+  if (!button) {
+    return;
+  }
+  await analyzeStockFromRecommendation(button.dataset.recommendationSymbol);
 });
 
 watchlistForm?.addEventListener("submit", async (event) => {
@@ -279,10 +302,12 @@ function setActiveTab(tab) {
   const isFund = tab === "fund";
   const isWatchlist = tab === "watchlist" && Boolean(watchlistView);
   const isMonitor = tab === "monitor";
+  const isRecommendations = tab === "recommendations" && Boolean(recommendationsView);
   const isTrade = tab === "trade" && Boolean(tradeView);
   const isLogs = tab === "logs" && Boolean(searchLogView);
-  const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isTrade && !isLogs;
+  const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isRecommendations && !isTrade && !isLogs;
   analysisTab.classList.toggle("is-active", isAnalysis);
+  recommendationsTab?.classList.toggle("is-active", isRecommendations);
   etfTab.classList.toggle("is-active", isEtf);
   fundTab.classList.toggle("is-active", isFund);
   watchlistTab?.classList.toggle("is-active", isWatchlist);
@@ -290,6 +315,7 @@ function setActiveTab(tab) {
   tradeTab?.classList.toggle("is-active", isTrade);
   searchLogTab?.classList.toggle("is-active", isLogs);
   analysisView.classList.toggle("is-hidden", !isAnalysis);
+  recommendationsView?.classList.toggle("is-hidden", !isRecommendations);
   etfView.classList.toggle("is-hidden", !isEtf);
   fundView.classList.toggle("is-hidden", !isFund);
   watchlistView?.classList.toggle("is-hidden", !isWatchlist);
@@ -628,6 +654,138 @@ function clearMarketMonitorPoll() {
     window.clearTimeout(monitorPollTimer);
     monitorPollTimer = null;
   }
+}
+
+async function loadRecommendations(forceRefresh) {
+  if (!recommendationsLoading || !recommendationsError || !recommendationsContent) {
+    return;
+  }
+
+  recommendationsLoading.classList.remove("is-hidden");
+  recommendationsError.classList.add("is-hidden");
+  if (!latestRecommendations) {
+    recommendationsContent.classList.add("is-hidden");
+  }
+
+  try {
+    const suffix = forceRefresh ? "?refresh=1" : "";
+    const response = await fetch(`/api/recommendations${suffix}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Could not load recommendations.");
+    }
+    latestRecommendations = payload;
+    renderRecommendations(payload);
+    recommendationsContent.classList.remove("is-hidden");
+  } catch (error) {
+    recommendationsError.textContent = error.message;
+    recommendationsError.classList.remove("is-hidden");
+  } finally {
+    recommendationsLoading.classList.add("is-hidden");
+  }
+}
+
+function renderRecommendations(payload) {
+  const items = payload.results || [];
+  setText("#recommendationsGenerated", `Generated ${formatDateTime(payload.generatedAt)} from ${payload.source || "public data"}`);
+  setText("#recommendationsSource", `${payload.scannedCount || 0} scanned · ${payload.note || ""}`);
+  setText("#recommendationsCount", items.length ? `${items.length} ideas` : "No ideas");
+  setText("#recommendationsSummary", payload.summary || "");
+  renderRecommendationRows(items);
+  annotateRecommendationTableCells();
+}
+
+function renderRecommendationRows(items) {
+  if (!recommendationRows) {
+    return;
+  }
+  recommendationRows.innerHTML = "";
+  if (!items.length) {
+    recommendationRows.innerHTML = "<tr><td colspan=\"8\">No analyst or FII/DII backed recommendations passed the current filters.</td></tr>";
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.className = `recommendation-row ${recommendationTone(item.score)}`;
+    row.innerHTML = `
+      <td>
+        <div class="recommendation-stock-head">
+          <span class="recommendation-heat">${Number.isFinite(item.score) ? Math.round(item.score) : "n/a"}</span>
+          <div>
+            <strong>${escapeHtml(item.name || item.symbol)}</strong>
+            <span>${escapeHtml(item.symbol || "")} · ${escapeHtml(item.sourceType || "Public signal")}</span>
+          </div>
+        </div>
+        <small>${escapeHtml(item.reason || "")}</small>
+      </td>
+      <td>
+        <strong>${escapeHtml(item.recommendedBy || "Public signal")}</strong>
+        <span>${escapeHtml(item.fundGroup || "Source group unavailable")}</span>
+        ${renderRecommenderDetails(item)}
+      </td>
+      <td>
+        <strong>${formatRecommendationBuy(item)}</strong>
+        <span>Current ${formatMoney(item.currentPrice, "INR")}</span>
+      </td>
+      <td>${formatMoney(item.sellPrice, "INR")}</td>
+      <td>
+        <strong>${formatMoney(item.stopLoss, "INR")}</strong>
+        <span>Risk ${formatPercentValue(item.riskPercent)}</span>
+      </td>
+      <td>${escapeHtml(item.duration || "n/a")}</td>
+      <td><span class="${changeClass(item.upsidePercent)}">${formatPercentValue(item.upsidePercent)}</span></td>
+      <td><button class="link-button" type="button" data-recommendation-symbol="${escapeHtml(item.analysisSymbol || item.symbol || "")}">Analyze</button></td>
+    `;
+    recommendationRows.appendChild(row);
+  }
+}
+
+function renderRecommenderDetails(item) {
+  const details = item.recommenderDetails || [];
+  if (!details.length) {
+    return item.sourceDetail ? `<small>${escapeHtml(item.sourceDetail)}</small>` : "";
+  }
+  return `
+    <div class="recommender-detail-list">
+      ${details.map((detail) => `
+        <small>
+          <b>${escapeHtml(detail.name || detail.type || "Source")}</b>
+          ${escapeHtml(detail.group ? ` · ${detail.group}` : "")}
+          ${escapeHtml(detail.detail ? ` · ${detail.detail}` : "")}
+        </small>
+      `).join("")}
+    </div>
+  `;
+}
+
+function formatRecommendationBuy(item) {
+  const low = item.buyRange?.low;
+  const high = item.buyRange?.high ?? item.buyPrice;
+  if (Number.isFinite(low) && Number.isFinite(high) && Math.abs(high - low) > 0.01) {
+    return `${formatMoney(low, "INR")} - ${formatMoney(high, "INR")}`;
+  }
+  return formatMoney(high, "INR");
+}
+
+function recommendationTone(score) {
+  if (!Number.isFinite(score)) {
+    return "is-neutral";
+  }
+  if (score >= 82) {
+    return "is-strong-positive";
+  }
+  if (score >= 68) {
+    return "is-positive";
+  }
+  if (score >= 55) {
+    return "is-flat";
+  }
+  return "is-neutral";
+}
+
+async function analyzeStockFromRecommendation(symbol) {
+  await analyzeStockFromHeatmap(symbol);
 }
 
 async function loadTradeReferences() {
@@ -2313,7 +2471,15 @@ function setMonitorPanelCollapsed(panel, button, collapsed) {
 }
 
 function annotateMonitorTableCells() {
-  document.querySelectorAll("#monitorContent .monitor-table").forEach((table) => {
+  annotateTableCells("#monitorContent .monitor-table");
+}
+
+function annotateRecommendationTableCells() {
+  annotateTableCells("#recommendationsContent .monitor-table");
+}
+
+function annotateTableCells(selector) {
+  document.querySelectorAll(selector).forEach((table) => {
     const headers = Array.from(table.querySelectorAll("thead th")).map((header) => header.textContent.trim());
     table.querySelectorAll("tbody tr").forEach((row) => {
       const cells = Array.from(row.querySelectorAll("td"));

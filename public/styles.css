@@ -2304,6 +2304,100 @@ h3 {
   color: var(--muted);
 }
 
+.recommendations-content {
+  display: grid;
+  gap: 10px;
+}
+
+.recommendation-panel .section-summary {
+  color: var(--muted);
+}
+
+.recommendation-note {
+  margin: 10px 0 0;
+  font-size: 0.78rem;
+}
+
+.recommendation-stock-head {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+
+.recommendation-heat {
+  display: inline-grid;
+  flex: 0 0 42px;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  background: var(--slate-accent);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+#recommendationsContent .recommendation-row.is-strong-positive td {
+  background: #ecfdf5;
+}
+
+#recommendationsContent .recommendation-row.is-positive td {
+  background: #f0fdf4;
+}
+
+#recommendationsContent .recommendation-row.is-flat td {
+  background: #fffaf0;
+}
+
+#recommendationsContent .recommendation-row.is-neutral td {
+  background: #f8fafc;
+}
+
+#recommendationsContent .recommendation-row.is-strong-positive td:first-child {
+  border-left: 5px solid #047857;
+}
+
+#recommendationsContent .recommendation-row.is-positive td:first-child {
+  border-left: 5px solid var(--green);
+}
+
+#recommendationsContent .recommendation-row.is-flat td:first-child {
+  border-left: 5px solid var(--gold);
+}
+
+#recommendationsContent .recommendation-row.is-neutral td:first-child {
+  border-left: 5px solid var(--slate-accent);
+}
+
+#recommendationsContent .recommendation-row .recommendation-heat {
+  display: inline-grid;
+  margin-top: 0;
+  color: #ffffff;
+}
+
+#recommendationsContent .recommendation-row.is-strong-positive .recommendation-heat {
+  background: #047857;
+}
+
+#recommendationsContent .recommendation-row.is-positive .recommendation-heat {
+  background: var(--green);
+}
+
+#recommendationsContent .recommendation-row.is-flat .recommendation-heat {
+  background: var(--gold);
+}
+
+.recommender-detail-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.recommender-detail-list b {
+  color: var(--ink);
+}
+
 .stock-heatmap-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 132px), 1fr));
@@ -2638,7 +2732,8 @@ h3 {
 .sector-oi-table,
 .nse-mover-table,
 .nse-active-table,
-.nse-high-table {
+.nse-high-table,
+.recommendation-table {
   min-width: 860px;
 }
 

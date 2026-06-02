@@ -168,6 +168,81 @@ class GrowthDriverTests(SimpleTestCase):
         self.assertIn("FIIs accumulation", titles)
 
 
+class RecommendationFeedTests(SimpleTestCase):
+    def test_build_recommendation_uses_analyst_and_fii_signals(self):
+        candles = [
+            {"high": 96 + index, "low": 90 + index * 0.6, "close": 92 + index * 0.25}
+            for index in range(35)
+        ]
+        summary = {
+            "financialData": {
+                "currentPrice": {"raw": 100.0},
+                "targetMeanPrice": {"raw": 125.0},
+                "targetHighPrice": {"raw": 136.0},
+                "recommendationMean": {"raw": 1.8},
+                "recommendationKey": "buy",
+                "numberOfAnalystOpinions": {"raw": 18},
+            },
+            "upgradeDowngradeHistory": {
+                "history": [
+                    {
+                        "firm": "Goldman Sachs",
+                        "action": "up",
+                        "toGrade": "Buy",
+                        "epochGradeDate": 1770000000,
+                    }
+                ]
+            },
+        }
+        ownership = {
+            "source": "Screener.in shareholding",
+            "rows": [
+                {
+                    "name": "FIIs",
+                    "latest": 0.132,
+                    "changePoints": 1.2,
+                    "quarterChangePoints": 0.8,
+                    "latestPeriod": "Mar 2026",
+                }
+            ],
+        }
+
+        row = services.build_recommendation_from_inputs(
+            {"symbol": "ABC.NS", "name": "ABC Ltd"},
+            {},
+            summary,
+            candles,
+            ownership,
+        )
+
+        self.assertEqual(row["symbol"], "ABC.NS")
+        self.assertEqual(row["sourceType"], "Analyst + FII/DII")
+        self.assertIn("Goldman Sachs", row["recommendedBy"])
+        self.assertIn("Foreign institutional investor group", row["fundGroup"])
+        self.assertEqual(row["recommenderDetails"][1]["name"], "FIIs")
+        self.assertIn("mutual funds", services.RECOMMENDATION_GROUP_DETAILS["DIIs"])
+        self.assertEqual(row["sellPrice"], 125.0)
+        self.assertEqual(row["duration"], "6-12 months")
+        self.assertGreater(row["score"], 70)
+
+    def test_build_recommendation_rejects_weak_analyst_signal_without_ownership(self):
+        row = services.build_recommendation_from_inputs(
+            {"symbol": "WEAK.NS", "name": "Weak Ltd", "nsePrice": 100.0},
+            {},
+            {
+                "financialData": {
+                    "targetMeanPrice": {"raw": 101.0},
+                    "recommendationMean": {"raw": 3.9},
+                    "recommendationKey": "sell",
+                }
+            },
+            [],
+            {"rows": []},
+        )
+
+        self.assertIsNone(row)
+
+
 class RelativeStrengthTests(SimpleTestCase):
     def test_build_relative_strength_compares_stock_with_benchmark(self):
         candles = [{"close": 100 + index * 1.0} for index in range(130)]
