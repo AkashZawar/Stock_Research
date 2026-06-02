@@ -701,7 +701,7 @@ function renderRecommendationRows(items) {
   }
   recommendationRows.innerHTML = "";
   if (!items.length) {
-    recommendationRows.innerHTML = "<tr><td colspan=\"8\">No analyst or FII/DII backed recommendations passed the current filters.</td></tr>";
+    recommendationRows.innerHTML = "<tr><td colspan=\"9\">No analyst or FII/DII backed recommendations passed the current filters.</td></tr>";
     return;
   }
 
@@ -713,7 +713,7 @@ function renderRecommendationRows(items) {
         <div class="recommendation-stock-head">
           <span class="recommendation-heat">${Number.isFinite(item.score) ? Math.round(item.score) : "n/a"}</span>
           <div>
-            <strong>${escapeHtml(item.name || item.symbol)}</strong>
+            <button class="recommendation-stock-link" type="button" data-recommendation-symbol="${escapeHtml(item.analysisSymbol || item.symbol || "")}">${escapeHtml(item.name || item.symbol)}</button>
             <span>${escapeHtml(item.symbol || "")} · ${escapeHtml(item.sourceType || "Public signal")}</span>
           </div>
         </div>
@@ -724,6 +724,7 @@ function renderRecommendationRows(items) {
         <span>${escapeHtml(item.fundGroup || "Source group unavailable")}</span>
         ${renderRecommenderDetails(item)}
       </td>
+      <td>${renderQuarterlyResults(item)}</td>
       <td>
         <strong>${formatRecommendationBuy(item)}</strong>
         <span>Current ${formatMoney(item.currentPrice, "INR")}</span>
@@ -756,6 +757,18 @@ function renderRecommenderDetails(item) {
         </small>
       `).join("")}
     </div>
+  `;
+}
+
+function renderQuarterlyResults(item) {
+  const result = item.quarterlyResults || {};
+  if (!result.available) {
+    return `<span>Latest quarterly result summary unavailable</span><small>Open the stock analysis page and cross-check exchange filings.</small>`;
+  }
+  return `
+    <strong>${escapeHtml(result.period || "Latest quarter")}</strong>
+    <span>${escapeHtml(result.summary || "Quarterly result data available.")}</span>
+    <small>${escapeHtml(result.source || "")}</small>
   `;
 }
 

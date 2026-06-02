@@ -29,6 +29,7 @@ RECOMMENDATION_CACHE_SECONDS = 30 * 60
 RECOMMENDATION_SCAN_LIMIT = 18
 RECOMMENDATION_RESULT_LIMIT = 14
 RECOMMENDATION_MIN_UPSIDE_PERCENT = 4
+RECOMMENDATION_PROVIDER_CONCURRENCY = 4
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
@@ -44,6 +45,7 @@ MODULES = ",".join([
     "financialData",
     "price",
     "calendarEvents",
+    "earnings",
     "earningsTrend",
     "recommendationTrend",
     "upgradeDowngradeHistory",
@@ -2733,9 +2735,18 @@ def build_recommendation_candidate(stock):
     if not symbol:
         return None
 
-    quote_data = safe_provider_call(lambda: get_quote(symbol), {})
-    summary = safe_provider_call(lambda: get_summary(symbol), {})
-    chart = safe_provider_call(lambda: get_chart_range(symbol, "6mo", "1d"), {})
+    loaders = {
+        "quote": lambda: get_quote(symbol),
+        "summary": lambda: get_summary(symbol),
+        "chart": lambda: get_chart_range(symbol, "6mo", "1d"),
+    }
+    if symbol.endswith((".NS", ".BO")):
+        loaders["screener"] = lambda: get_screener_fundamentals(symbol)
+
+    results = settle_named_loaders(loaders, RECOMMENDATION_PROVIDER_CONCURRENCY)
+    quote_data = results.get("quote") or {}
+    summary = results.get("summary") or {}
+    chart = results.get("chart") or {}
     candles = chart.get("candles") or []
 
     long_name = first_present(
@@ -2747,19 +2758,22 @@ def build_recommendation_candidate(stock):
         symbol,
     )
     ownership = {}
+    quarterly_results = {}
     if symbol.endswith((".NS", ".BO")):
-        screener = safe_provider_call(lambda: get_screener_fundamentals(symbol), {})
+        screener = results.get("screener") or {}
         screener = ensure_shareholding_data(symbol, long_name, screener)
         ownership = build_ownership_trend(screener.get("shareholding"), {})
+        quarterly_results = screener.get("quarterlyResults") or {}
 
-    return build_recommendation_from_inputs(stock, quote_data, summary, candles, ownership)
+    return build_recommendation_from_inputs(stock, quote_data, summary, candles, ownership, quarterly_results)
 
 
-def build_recommendation_from_inputs(stock, quote_data=None, summary=None, candles=None, ownership=None):
+def build_recommendation_from_inputs(stock, quote_data=None, summary=None, candles=None, ownership=None, quarterly_results=None):
     quote_data = quote_data or {}
     summary = summary or {}
     candles = candles or []
     ownership = ownership or {}
+    quarterly_results = quarterly_results or latest_quarterly_results_summary(summary)
     symbol = normalize_symbol(stock.get("symbol"))
     if not symbol:
         return None
@@ -2846,15 +2860,24 @@ def build_recommendation_from_inputs(stock, quote_data=None, summary=None, candl
             "analystCount": round(analyst_count) if is_finite(analyst_count) else None,
         },
         "ownershipSignals": ownership_sources,
+        "quarterlyResults": quarterly_results,
         "reason": reason,
     }
 
 
-def safe_provider_call(loader, fallback):
-    try:
-        return loader()
-    except Exception:
-        return fallback
+def settle_named_loaders(loaders, concurrency=4):
+    results = {}
+    if not loaders:
+        return results
+    with ThreadPoolExecutor(max_workers=min(concurrency, len(loaders))) as executor:
+        futures = {executor.submit(loader): key for key, loader in loaders.items()}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                results[key] = future.result()
+            except Exception:
+                results[key] = {}
+    return results
 
 
 def latest_analyst_action(summary):
@@ -5042,6 +5065,7 @@ def extract_screener_metrics(page):
             "debtToEquity": debt_to_equity,
         },
         "shareholding": extract_screener_shareholding(page),
+        "quarterlyResults": extract_screener_quarterly_results(page),
         "events": extract_screener_events(page),
     }
 
@@ -5952,6 +5976,188 @@ def extract_screener_shareholding(page):
         "rows": rows,
         "source": "Screener.in shareholding",
     }
+
+
+def extract_screener_quarterly_results(page):
+    block = match_first(page, r"<section[^>]*id=\"quarters\"[^>]*>([\s\S]*?)</section>")
+    if not block:
+        return {}
+
+    table = match_first(block, r"<table[^>]*>([\s\S]*?)</table>")
+    if not table:
+        return {}
+
+    headers = [
+        clean_html(match.group(1))
+        for match in re.finditer(r"<th[^>]*>([\s\S]*?)</th>", table, flags=re.IGNORECASE)
+    ]
+    periods = [
+        header
+        for header in headers
+        if re.search(r"\b(?:Mar|Jun|Sep|Dec)\s+\d{4}\b", header, flags=re.IGNORECASE)
+    ]
+    if not periods:
+        return {}
+
+    row_values = {}
+    for match in re.finditer(r"<tr[\s\S]*?</tr>", table, flags=re.IGNORECASE):
+        cells = [
+            clean_html(cell_match.group(1))
+            for cell_match in re.finditer(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", match.group(0), flags=re.IGNORECASE)
+        ]
+        if len(cells) < len(periods) + 1:
+            continue
+
+        metric = normalize_quarterly_metric(cells[0])
+        if not metric:
+            continue
+        values = [parse_quarterly_number(value) for value in cells[1:1 + len(periods)]]
+        row_values[metric] = values
+
+    if not row_values:
+        return {}
+
+    latest_index = latest_quarter_index(row_values, periods)
+    if latest_index is None:
+        return {}
+
+    sales = quarterly_value(row_values, "sales", latest_index)
+    net_profit = quarterly_value(row_values, "netProfit", latest_index)
+    operating_profit = quarterly_value(row_values, "operatingProfit", latest_index)
+    opm_percent = quarterly_value(row_values, "opmPercent", latest_index)
+    eps = quarterly_value(row_values, "eps", latest_index)
+    summary = quarterly_result_text(
+        periods[latest_index],
+        sales,
+        net_profit,
+        operating_profit,
+        opm_percent,
+        eps,
+        quarterly_change(row_values, "sales", latest_index, 1),
+        quarterly_change(row_values, "netProfit", latest_index, 1),
+        quarterly_change(row_values, "sales", latest_index, 4),
+        quarterly_change(row_values, "netProfit", latest_index, 4),
+        "INR crore",
+    )
+
+    return {
+        "available": True,
+        "period": periods[latest_index],
+        "source": "Screener.in quarterly results",
+        "currency": "INR crore",
+        "sales": round_or_none(sales),
+        "netProfit": round_or_none(net_profit),
+        "operatingProfit": round_or_none(operating_profit),
+        "opmPercent": round_or_none(opm_percent),
+        "eps": round_or_none(eps),
+        "salesQoqPercent": round_or_none(quarterly_change(row_values, "sales", latest_index, 1)),
+        "netProfitQoqPercent": round_or_none(quarterly_change(row_values, "netProfit", latest_index, 1)),
+        "salesYoyPercent": round_or_none(quarterly_change(row_values, "sales", latest_index, 4)),
+        "netProfitYoyPercent": round_or_none(quarterly_change(row_values, "netProfit", latest_index, 4)),
+        "summary": summary,
+    }
+
+
+def normalize_quarterly_metric(value):
+    text = clean_html(value).replace("+", "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    if text in {"sales", "revenue"}:
+        return "sales"
+    if text == "operating profit":
+        return "operatingProfit"
+    if text in {"opm %", "operating profit margin %"}:
+        return "opmPercent"
+    if text == "net profit":
+        return "netProfit"
+    if text.startswith("eps"):
+        return "eps"
+    return ""
+
+
+def parse_quarterly_number(value):
+    if str(value or "").strip() in {"", "-", "--"}:
+        return None
+    return parse_loose_number(value)
+
+
+def latest_quarter_index(row_values, periods):
+    for index in range(len(periods) - 1, -1, -1):
+        if is_finite(quarterly_value(row_values, "sales", index)) or is_finite(quarterly_value(row_values, "netProfit", index)):
+            return index
+    return None
+
+
+def quarterly_value(row_values, key, index):
+    values = row_values.get(key) or []
+    return values[index] if 0 <= index < len(values) and is_finite(values[index]) else None
+
+
+def quarterly_change(row_values, key, latest_index, offset):
+    current = quarterly_value(row_values, key, latest_index)
+    previous = quarterly_value(row_values, key, latest_index - offset)
+    if not is_finite(current) or not is_finite(previous) or previous == 0:
+        return None
+    return safe_divide(current - previous, abs(previous)) * 100
+
+
+def latest_quarterly_results_summary(summary):
+    earnings = (summary or {}).get("earnings") or {}
+    chart = earnings.get("financialsChart") or {}
+    rows = arrayify(chart.get("quarterly"))
+    if not rows:
+        return {}
+    latest = rows[-1]
+    period = str(latest.get("date") or "Latest quarter")
+    sales = raw(latest.get("revenue"))
+    net_profit = raw(latest.get("earnings"))
+    summary_text = quarterly_result_text(period, sales, net_profit, None, None, None, None, None, None, None, "")
+    return {
+        "available": True,
+        "period": period,
+        "source": "Yahoo Finance earnings",
+        "currency": "",
+        "sales": round_or_none(sales),
+        "netProfit": round_or_none(net_profit),
+        "summary": summary_text,
+    }
+
+
+def quarterly_result_text(period, sales, net_profit, operating_profit, opm_percent, eps, sales_qoq, profit_qoq, sales_yoy, profit_yoy, currency):
+    parts = [f"{period} results"]
+    if is_finite(sales):
+        parts.append(f"sales {format_quarterly_money(sales, currency)}")
+        sales_changes = format_quarterly_changes(sales_qoq, sales_yoy)
+        if sales_changes:
+            parts[-1] += f" ({sales_changes})"
+    if is_finite(net_profit):
+        parts.append(f"net profit {format_quarterly_money(net_profit, currency)}")
+        profit_changes = format_quarterly_changes(profit_qoq, profit_yoy)
+        if profit_changes:
+            parts[-1] += f" ({profit_changes})"
+    if is_finite(operating_profit):
+        parts.append(f"operating profit {format_quarterly_money(operating_profit, currency)}")
+    if is_finite(opm_percent):
+        parts.append(f"OPM {opm_percent:.2f}%")
+    if is_finite(eps):
+        parts.append(f"EPS {eps:.2f}")
+    return "; ".join(parts) + "."
+
+
+def format_quarterly_money(value, currency):
+    if not is_finite(value):
+        return "n/a"
+    if currency == "INR crore":
+        return f"INR {value:,.0f} cr"
+    return f"{value:,.0f}"
+
+
+def format_quarterly_changes(qoq, yoy):
+    changes = []
+    if is_finite(qoq):
+        changes.append(f"QoQ {qoq:+.2f}%")
+    if is_finite(yoy):
+        changes.append(f"YoY {yoy:+.2f}%")
+    return ", ".join(changes)
 
 
 def normalize_shareholder_name(value):

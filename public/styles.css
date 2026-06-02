@@ -2324,6 +2324,28 @@ h3 {
   align-items: flex-start;
 }
 
+.recommendation-stock-link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  font-weight: 900;
+  line-height: 1.25;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: rgba(15, 118, 110, 0.35);
+  text-underline-offset: 3px;
+}
+
+.recommendation-stock-link:hover,
+.recommendation-stock-link:focus {
+  color: var(--teal);
+  outline: none;
+  text-decoration-color: currentColor;
+}
+
 .recommendation-heat {
   display: inline-grid;
   flex: 0 0 42px;

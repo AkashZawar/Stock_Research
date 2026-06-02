@@ -169,6 +169,36 @@ class GrowthDriverTests(SimpleTestCase):
 
 
 class RecommendationFeedTests(SimpleTestCase):
+    def test_extract_screener_quarterly_results_summarizes_latest_quarter(self):
+        html = """
+        <section id="quarters">
+          <table>
+            <thead>
+              <tr>
+                <th></th><th>Jun 2025</th><th>Sep 2025</th><th>Dec 2025</th><th>Mar 2026</th><th>Jun 2026</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Sales +</td><td>1,000</td><td>1,100</td><td>1,150</td><td>1,250</td><td>1,400</td></tr>
+              <tr><td>Operating Profit</td><td>200</td><td>230</td><td>240</td><td>260</td><td>310</td></tr>
+              <tr><td>OPM %</td><td>20%</td><td>21%</td><td>21%</td><td>21%</td><td>22%</td></tr>
+              <tr><td>Net Profit +</td><td>100</td><td>120</td><td>130</td><td>150</td><td>180</td></tr>
+              <tr><td>EPS in Rs</td><td>10.0</td><td>12.0</td><td>13.0</td><td>15.0</td><td>18.0</td></tr>
+            </tbody>
+          </table>
+        </section>
+        """
+
+        result = services.extract_screener_quarterly_results(html)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["period"], "Jun 2026")
+        self.assertEqual(result["sales"], 1400.0)
+        self.assertEqual(result["netProfit"], 180.0)
+        self.assertEqual(result["salesQoqPercent"], 12.0)
+        self.assertEqual(result["netProfitYoyPercent"], 80.0)
+        self.assertIn("Jun 2026 results", result["summary"])
+
     def test_build_recommendation_uses_analyst_and_fii_signals(self):
         candles = [
             {"high": 96 + index, "low": 90 + index * 0.6, "close": 92 + index * 0.25}
@@ -213,6 +243,7 @@ class RecommendationFeedTests(SimpleTestCase):
             summary,
             candles,
             ownership,
+            {"available": True, "period": "Jun 2026", "summary": "Jun 2026 results; sales INR 1,400 cr.", "source": "Screener.in quarterly results"},
         )
 
         self.assertEqual(row["symbol"], "ABC.NS")
@@ -223,6 +254,7 @@ class RecommendationFeedTests(SimpleTestCase):
         self.assertIn("mutual funds", services.RECOMMENDATION_GROUP_DETAILS["DIIs"])
         self.assertEqual(row["sellPrice"], 125.0)
         self.assertEqual(row["duration"], "6-12 months")
+        self.assertEqual(row["quarterlyResults"]["period"], "Jun 2026")
         self.assertGreater(row["score"], 70)
 
     def test_build_recommendation_rejects_weak_analyst_signal_without_ownership(self):
