@@ -5,19 +5,59 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260602-recommendations-1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260611-sneat-1">
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace">
+      <aside class="layout-menu" aria-label="Primary navigation">
+        <a class="app-brand" href="/">
+          <span class="brand-logo" aria-hidden="true">BP</span>
+          <span>
+            <strong>The Big Picture</strong>
+            <small>Investment desk</small>
+          </span>
+        </a>
 
+        <nav class="tabs menu-list" aria-label="Workspace tabs">
+          <button class="tab-button is-active" type="button" id="analysisTab">
+            <i class="bx bx-line-chart" aria-hidden="true"></i>
+            <span>Stock Analysis</span>
+          </button>
+          <button class="tab-button" type="button" id="recommendationsTab">
+            <i class="bx bx-bulb" aria-hidden="true"></i>
+            <span>Recommendations</span>
+          </button>
+          <button class="tab-button" type="button" id="monitorTab">
+            <i class="bx bx-grid-alt" aria-hidden="true"></i>
+            <span>Market Monitor</span>
+          </button>
+          <button class="tab-button" type="button" id="etfTab">
+            <i class="bx bx-layer" aria-hidden="true"></i>
+            <span>ETF Analysis</span>
+          </button>
+          <button class="tab-button" type="button" id="fundTab">
+            <i class="bx bx-pie-chart-alt-2" aria-hidden="true"></i>
+            <span>Mutual Funds</span>
+          </button>
+        </nav>
+
+        <section class="menu-card">
+          <span>Research mode</span>
+          <strong>Public data checks</strong>
+          <small>Verify levels and risk before acting.</small>
+        </section>
+      </aside>
+
+      <section class="layout-page">
         <header class="topbar">
           <div class="hero-content">
-            <p class="eyebrow"></p>
+            <p class="eyebrow">By Akash Zawar</p>
             <h1>The Big Picture Investment</h1>
-            <p class="hero-byline">By Akash Zawar</p>
-            <p class="hero-copy">A sharper dashboard for swing setups, ownership trends, catalysts, risk levels, and market context across Indian and global equities.</p>
-            
+            <p class="hero-copy">Swing setups, ownership trends, catalysts, risk levels, and market context across Indian and global equities.</p>
           </div>
           <form class="search-form hero-search" id="analysisForm">
             <strong class="search-card-title">Analyze a stock</strong>
@@ -25,31 +65,28 @@
             <div class="search-row">
               <input id="symbolInput" name="symbol" list="symbolSuggestions" placeholder="RELIANCE, TCS, HAL.NS" autocomplete="off" required>
               <datalist id="symbolSuggestions"></datalist>
-              <button type="submit">Analyze</button>
+              <button type="submit">
+                <i class="bx bx-search" aria-hidden="true"></i>
+                <span>Analyze</span>
+              </button>
             </div>
           </form>
         </header>
-      
+
         <section class="notice">
           Research output only. This app does not provide personalized financial advice. Verify data, manage risk, and consult a licensed advisor before trading.
         </section>
 
-        <nav class="tabs" aria-label="Workspace tabs">
-          <button class="tab-button is-active" type="button" id="analysisTab">Stock Analysis</button>
-          <button class="tab-button" type="button" id="recommendationsTab">Recomendations</button>
-          <button class="tab-button" type="button" id="monitorTab">Market Monitor</button>
-          <button class="tab-button" type="button" id="etfTab">ETF Analysis</button>
-          <button class="tab-button" type="button" id="fundTab">Mutual Funds</button>
-        </nav>
-
-        {% include "market/tabs/stock_analysis.html" %}
-        {% include "market/tabs/recommendations.html" %}
-        {% include "market/tabs/market_monitor.html" %}
-        {% include "market/tabs/etf_analysis.html" %}
-        {% include "market/tabs/mutual_funds.html" %}
+        <section class="workspace">
+          {% include "market/tabs/stock_analysis.html" %}
+          {% include "market/tabs/recommendations.html" %}
+          {% include "market/tabs/market_monitor.html" %}
+          {% include "market/tabs/etf_analysis.html" %}
+          {% include "market/tabs/mutual_funds.html" %}
+        </section>
       </section>
     </main>
 
-    <script src="{% static 'app.js' %}?v=20260602-recommendations-1"></script>
+    <script src="{% static 'app.js' %}?v=20260611-sneat-1"></script>
   </body>
 </html>

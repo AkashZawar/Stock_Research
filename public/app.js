@@ -2189,12 +2189,12 @@ function ensureChartDialog() {
     <article class="chart-modal">
       <div class="chart-modal-head">
         <div>
-          <p class="eyebrow">One-year candlestick chart</p>
+          <p class="eyebrow">Available daily chart · max 1 year</p>
           <h3 id="chartDialogTitle">Expanded Chart</h3>
         </div>
         <button type="button" id="chartDialogClose" class="suggestion-close">Close</button>
       </div>
-      <canvas id="expandedPriceChart" aria-label="Expanded one-year candlestick price chart" tabindex="0"></canvas>
+      <canvas id="expandedPriceChart" aria-label="Expanded available daily candlestick chart, capped at one year" tabindex="0"></canvas>
     </article>
   `;
   document.body.appendChild(chartDialogEl);
@@ -2250,6 +2250,7 @@ function renderAssetReport(prefix, report) {
 
   renderAssetProfile(prefix, report);
   renderAssetPerformance(prefix, report);
+  renderAssetAnnualReturns(prefix, report.annualReturns);
   renderAssetPlan(prefix, report.plan);
   renderAssetHoldings(prefix, report.holdings);
   renderList(`#${prefix}Checks`, [
@@ -2285,6 +2286,91 @@ function renderAssetPerformance(prefix, report) {
     ["SMA 200", formatMoney(report.momentum.sma200, report.currency)]
   );
   renderTable(`#${prefix}PerformanceMetrics`, rows);
+}
+
+function renderAssetAnnualReturns(prefix, annualReturns) {
+  const panel = document.querySelector(`#${prefix}AnnualPanel`);
+  if (!panel) {
+    return;
+  }
+
+  const rows = annualReturns?.comparisonRows || [];
+  if (!annualReturns?.available || !rows.length) {
+    panel.classList.add("is-hidden");
+    return;
+  }
+
+  panel.classList.remove("is-hidden");
+  setText(`#${prefix}AnnualSummary`, annualReturns.summary || "AdvisorKhoj annual returns are available for this fund category.");
+
+  const source = document.querySelector(`#${prefix}AnnualSource`);
+  if (source) {
+    source.href = annualReturns.sourceUrl || source.href;
+    source.querySelector("span").textContent = [
+      annualReturns.category,
+      annualReturns.planType,
+      annualReturns.returnsAsOn ? `as on ${annualReturns.returnsAsOn}` : ""
+    ].filter(Boolean).join(" · ");
+  }
+
+  const meta = document.querySelector(`#${prefix}AnnualMeta`);
+  if (meta) {
+    meta.innerHTML = "";
+    const cards = [
+      ["Category", annualReturns.category || "n/a", annualReturns.planType || ""],
+      ["Returns date", annualReturns.returnsAsOn || "n/a", annualReturns.source || ""],
+      ["Matched fund", annualReturns.matched ? "Yes" : "No", annualReturns.matchedFund?.label || "Showing category peers"]
+    ];
+    for (const [label, value, detail] of cards) {
+      const card = document.createElement("article");
+      card.className = "market-mini-card";
+      card.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small>`;
+      meta.appendChild(card);
+    }
+  }
+
+  const years = annualReturns.years || [];
+  const head = document.querySelector(`#${prefix}AnnualHead`);
+  if (head) {
+    head.innerHTML = `
+      <tr>
+        <th>Fund / comparator</th>
+        <th>Type</th>
+        <th>Avg</th>
+        <th>TER</th>
+        <th>AUM</th>
+        ${years.map((year) => `<th>${escapeHtml(String(year))}</th>`).join("")}
+      </tr>
+    `;
+  }
+
+  const body = document.querySelector(`#${prefix}AnnualRows`);
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    row.className = item.type === "Selected fund" ? "is-selected-row" : "";
+    row.innerHTML = `
+      <td>
+        <strong>${escapeHtml(item.label || "n/a")}</strong>
+        <span>${escapeHtml(item.amc || "")}${item.rank ? ` · Rank ${escapeHtml(String(item.rank))}` : ""}</span>
+      </td>
+      <td>${escapeHtml(item.type || "Comparator")}</td>
+      <td class="${changeClass(item.averageReturn)}">${formatPercentValue(item.averageReturn)}</td>
+      <td>${Number.isFinite(item.terPercent) ? `${item.terPercent.toFixed(2)}%` : "n/a"}</td>
+      <td>${Number.isFinite(item.aumCrore) ? `${formatNumber(item.aumCrore)} cr` : "n/a"}</td>
+      ${years.map((year) => annualReturnCell(item, year)).join("")}
+    `;
+    body.appendChild(row);
+  }
+}
+
+function annualReturnCell(item, year) {
+  const yearly = (item.returns || []).find((entry) => entry.year === year);
+  const value = yearly ? yearly.return : null;
+  return `<td class="${changeClass(value)}">${formatPercentValue(value)}</td>`;
 }
 
 function renderAssetPlan(prefix, plan) {
@@ -3641,7 +3727,7 @@ function renderQuality(quality) {
   document.querySelector("#qualityText").textContent = quality.summary;
   renderTable("#qualityMetrics", [
     ["Confidence", `${quality.score}/100 (${quality.label})`],
-    ["Chart candles", formatNumber(quality.chartPoints)],
+    ["Chart candles", `${formatNumber(quality.chartPoints)} (max 1Y)`],
     ["Data sources", quality.dataSources || "n/a"]
   ]);
   renderAccuracyChecks(quality.checks || []);

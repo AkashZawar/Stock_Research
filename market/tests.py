@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -986,6 +986,40 @@ class AssetAnalysisTests(SimpleTestCase):
         self.assertIn("NIFTYBEES.NS", symbols)
         self.assertTrue(all(item["type"] == "ETF" for item in results if item["symbol"].endswith(".NS")))
 
+    def test_parse_advisorkhoj_annual_returns_infers_current_year_columns(self):
+        html = """
+        <table id="tbl_scheme_returns">
+          <thead>
+            <tr><th>Scheme Name</th><th>AMC Name</th><th>Launch Date</th><th>AUM (Crore)</th><th>TER (%)</th><th>Returns as on - 05-06-2026 in %</th></tr>
+            <tr><th class="th_yr_1">2021</th><th class="th_yr_2">2020</th><th class="th_yr_3">2019</th><th class="th_yr_4">2018</th><th class="th_yr_5">2017</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><a>Parag Parikh Flexi Cap Dir Gr</a> | <a>Invest Online</a></td>
+              <td><a>PPFASMF</a></td><td>13-05-2013</td><td>90,123.45</td><td>0.63</td>
+              <td>-3.21</td><td>10.5</td><td>24.25</td><td>31.1</td><td>-1.8</td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr><td>Category Average</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-2.0</td><td>8.0</td><td>20.0</td><td>28.0</td><td>-4.0</td></tr>
+            <tr><td>NIFTY 500 TRI</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-1.5</td><td>9.0</td><td>21.0</td><td>29.0</td><td>-3.0</td></tr>
+          </tfoot>
+        </table>
+        """
+
+        result = services.parse_advisorkhoj_annual_returns(html, "Equity: Flexi Cap", "Direct")
+        matched = services.match_advisorkhoj_fund_row(
+            result["funds"],
+            "Parag Parikh Flexi Cap Fund Direct Plan Growth",
+        )
+
+        self.assertEqual(result["returnsAsOn"], "05-06-2026")
+        self.assertEqual(result["years"], [2026, 2025, 2024, 2023, 2022])
+        self.assertEqual(result["funds"][0]["label"], "Parag Parikh Flexi Cap Dir Gr")
+        self.assertEqual(result["funds"][0]["returns"][0]["return"], -3.21)
+        self.assertEqual(result["categoryAverage"]["latestReturn"], -2.0)
+        self.assertEqual(matched["amc"], "PPFASMF")
+
     def test_build_asset_report_includes_profile_risk_and_plan(self):
         candles = [
             {
@@ -1021,6 +1055,69 @@ class AssetAnalysisTests(SimpleTestCase):
         self.assertTrue(report["plan"]["items"])
         self.assertGreaterEqual(report["scores"]["confidence"], 75)
 
+    @patch("market.services.get_advisorkhoj_annual_returns")
+    def test_build_mutual_fund_report_includes_advisorkhoj_comparison(self, annual_returns):
+        annual_returns.return_value = {
+            "available": True,
+            "source": "AdvisorKhoj annual returns",
+            "sourceUrl": "https://example.test/annual",
+            "category": "Equity: Flexi Cap",
+            "planType": "Direct",
+            "returnsAsOn": "05-06-2026",
+            "years": [2026, 2025],
+            "funds": [
+                {
+                    "label": "Parag Parikh Flexi Cap Dir Gr",
+                    "scheme": "Parag Parikh Flexi Cap Dir Gr",
+                    "type": "Fund",
+                    "amc": "PPFASMF",
+                    "launchDate": "13-05-2013",
+                    "aumCrore": 90123.45,
+                    "terPercent": 0.63,
+                    "returns": [{"year": 2026, "return": -3.21}, {"year": 2025, "return": 10.5}],
+                    "latestReturn": -3.21,
+                    "averageReturn": 3.65,
+                    "rank": 3,
+                }
+            ],
+            "categoryAverage": {
+                "label": "Category Average",
+                "type": "Comparator",
+                "returns": [{"year": 2026, "return": -2.0}, {"year": 2025, "return": 8.0}],
+                "latestReturn": -2.0,
+                "averageReturn": 3.0,
+            },
+            "benchmark": None,
+        }
+        candles = [
+            {
+                "date": f"2025-01-{(index % 28) + 1:02d}",
+                "open": 100 + index * 0.1,
+                "high": 101 + index * 0.1,
+                "low": 99 + index * 0.1,
+                "close": 100 + index * 0.1,
+                "volume": 100000 + index,
+            }
+            for index in range(260)
+        ]
+
+        report = services.build_asset_report(
+            "TEST",
+            "mutual-fund",
+            {"currency": "INR"},
+            candles,
+            {"quoteType": "MUTUALFUND", "longName": "Parag Parikh Flexi Cap Fund Direct Plan Growth"},
+            {
+                "price": {"longName": "Parag Parikh Flexi Cap Fund Direct Plan Growth", "currency": "INR"},
+                "fundProfile": {"categoryName": "Flexi Cap", "family": "PPFAS"},
+            },
+        )
+
+        self.assertTrue(report["annualReturns"]["available"])
+        self.assertTrue(report["annualReturns"]["matched"])
+        self.assertEqual(report["annualReturns"]["comparisonRows"][0]["type"], "Selected fund")
+        self.assertIn("AdvisorKhoj annual return comparison was available.", report["confidence"]["checks"])
+
 
 class SearchSuggestionTests(SimpleTestCase):
     def test_local_suggestions_include_initial_character_matches(self):
@@ -1054,6 +1151,65 @@ class SearchSuggestionTests(SimpleTestCase):
     def test_resolve_asset_prefers_local_exchange_suffix_when_omitted(self):
         self.assertEqual(services.resolve_asset_input("NIFTYBEES", "etf"), "NIFTYBEES.NS")
         self.assertEqual(services.resolve_asset_input("QQQ", "etf"), "QQQ")
+
+
+class StockHistoryWindowTests(SimpleTestCase):
+    def make_candles(self, count):
+        start = date(2025, 1, 1)
+        candles = []
+        for index in range(count):
+            close = 100 + index * 0.35
+            candles.append({
+                "date": (start + timedelta(days=index)).isoformat(),
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 100_000 + index,
+            })
+        return candles
+
+    def test_analyze_symbol_accepts_short_history(self):
+        candles = self.make_candles(45)
+        with (
+            patch("market.services.get_chart", return_value={"meta": {"currency": "USD"}, "candles": candles}),
+            patch("market.services.get_quote", return_value={"currency": "USD", "longName": "Short History Inc"}),
+            patch("market.services.get_summary", return_value={}),
+            patch("market.services.get_sec_fundamentals", return_value={}),
+            patch("market.services.get_screener_fundamentals", return_value={}),
+            patch("market.services.get_stock_open_interest", return_value=services.open_interest_unavailable("SHORT")),
+            patch("market.services.get_benchmark_chart", return_value={"symbol": "^GSPC", "name": "S&P 500", "candles": candles}),
+        ):
+            report = services._analyze_symbol("SHORT")
+
+        self.assertEqual(len(report["series"]), 45)
+        self.assertEqual(report["history"]["chartCandles"], 45)
+        self.assertEqual(report["history"]["analysisCandles"], 45)
+        self.assertEqual(report["quality"]["checks"][0]["status"], "Partial")
+        self.assertIn("available history", " ".join(report["quality"]["warnings"]).lower())
+
+    def test_build_report_caps_chart_to_one_year_with_extra_quarter_buffer(self):
+        candles = self.make_candles(330)
+        candles[-300]["high"] = 999.0
+
+        report = services.build_report(
+            "BUFFER",
+            {"currency": "USD"},
+            candles,
+            {"currency": "USD", "longName": "Buffered Window Inc"},
+            {},
+            {},
+            {},
+            benchmark={"symbol": "^GSPC", "name": "S&P 500", "candles": candles},
+            open_interest=services.open_interest_unavailable("BUFFER"),
+        )
+
+        self.assertEqual(len(report["series"]), services.STOCK_REPORT_MAX_SESSIONS)
+        self.assertEqual(report["history"]["analysisCandles"], services.STOCK_ANALYSIS_MAX_SESSIONS)
+        self.assertEqual(report["history"]["analysisBufferSessions"], services.STOCK_ANALYSIS_BUFFER_SESSIONS)
+        self.assertEqual(report["series"][0]["date"], candles[-services.STOCK_REPORT_MAX_SESSIONS]["date"])
+        self.assertNotEqual(report["quote"]["range"]["high52w"], 999.0)
+        self.assertIsNotNone(report["series"][-1]["sma200"])
 
 
 class QualityReportTests(SimpleTestCase):

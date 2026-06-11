@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from difflib import SequenceMatcher
+from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -30,6 +31,12 @@ RECOMMENDATION_SCAN_LIMIT = 18
 RECOMMENDATION_RESULT_LIMIT = 14
 RECOMMENDATION_MIN_UPSIDE_PERCENT = 4
 RECOMMENDATION_PROVIDER_CONCURRENCY = 4
+STOCK_REPORT_MAX_SESSIONS = 252
+STOCK_ANALYSIS_BUFFER_SESSIONS = 63
+STOCK_ANALYSIS_MAX_SESSIONS = STOCK_REPORT_MAX_SESSIONS + STOCK_ANALYSIS_BUFFER_SESSIONS
+STOCK_MIN_ANALYSIS_CANDLES = 2
+ADVISORKHOJ_ANNUAL_RETURNS_CACHE_SECONDS = 24 * 60 * 60
+ADVISORKHOJ_ANNUAL_RETURNS_URL = "https://www.advisorkhoj.com/mutual-funds-research/mutual-fund-annual-returns"
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
@@ -543,8 +550,8 @@ def _analyze_symbol(symbol):
         raise RuntimeError(str(chart))
 
     candles = chart["candles"]
-    if len(candles) < 80:
-        raise RuntimeError("Not enough one-year daily data was returned for this symbol.")
+    if len(candles) < STOCK_MIN_ANALYSIS_CANDLES:
+        raise RuntimeError("Not enough daily data was returned for this symbol.")
 
     quote_data = results.get("quote", (False, {}))[1] if results.get("quote", (False,))[0] else {}
     summary = results.get("summary", (False, {}))[1] if results.get("summary", (False,))[0] else {}
@@ -4264,7 +4271,19 @@ def fuzzy_candidate_score(compact_query, values):
 
 
 def get_chart(symbol):
-    return get_chart_range(symbol, "1y", "1d")
+    chart = get_chart_range(symbol, "2y", "1d")
+    return {
+        **chart,
+        "candles": stock_analysis_window(chart.get("candles") or []),
+    }
+
+
+def stock_analysis_window(candles):
+    return (candles or [])[-STOCK_ANALYSIS_MAX_SESSIONS:]
+
+
+def stock_report_window(candles):
+    return (candles or [])[-STOCK_REPORT_MAX_SESSIONS:]
 
 
 def benchmark_symbol_for(symbol):
@@ -4429,10 +4448,13 @@ def get_screener_fundamentals(symbol):
 
 
 def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benchmark=None, open_interest=None):
-    closes = [item["close"] for item in candles]
-    volumes = [item.get("volume") or 0 for item in candles]
+    analysis_candles = stock_analysis_window(candles)
+    report_candles = stock_report_window(analysis_candles)
+    closes = [item["close"] for item in report_candles]
+    analysis_closes = [item["close"] for item in analysis_candles]
+    analysis_volumes = [item.get("volume") or 0 for item in analysis_candles]
     current = closes[-1]
-    previous = closes[-2]
+    previous = closes[-2] if len(closes) > 1 else current
     currency = first_present(
         quote_data.get("currency"),
         meta.get("currency"),
@@ -4450,26 +4472,26 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
     )
     screener = ensure_shareholding_data(symbol, long_name, screener)
 
-    sma20 = sma(closes, 20)
-    sma50 = sma(closes, 50)
-    sma200 = sma(closes, 200)
-    ema12 = ema(closes, 12)
-    ema26 = ema(closes, 26)
-    rsi14 = rsi(closes, 14)
-    macd_data = macd(closes)
-    atr14 = atr(candles, 14)
-    bands = bollinger(closes, 20, 2)
-    avg_volume_20 = last(sma(volumes, 20))
-    volume_ratio = (volumes[-1] or 0) / avg_volume_20 if avg_volume_20 else None
-    year_high = max(item["high"] for item in candles)
-    year_low = min(item["low"] for item in candles)
-    support_resistance = find_levels(candles, current, last(atr14))
+    sma20 = sma(analysis_closes, 20)
+    sma50 = sma(analysis_closes, 50)
+    sma200 = sma(analysis_closes, 200)
+    ema12 = ema(analysis_closes, 12)
+    ema26 = ema(analysis_closes, 26)
+    rsi14 = rsi(analysis_closes, 14)
+    macd_data = macd(analysis_closes)
+    atr14 = atr(analysis_candles, 14)
+    bands = bollinger(analysis_closes, 20, 2)
+    avg_volume_20 = last(sma(analysis_volumes, 20))
+    volume_ratio = (analysis_volumes[-1] or 0) / avg_volume_20 if avg_volume_20 else None
+    year_high = max(item["high"] for item in report_candles)
+    year_low = min(item["low"] for item in report_candles)
+    support_resistance = find_levels(report_candles, current, last(atr14))
     fundamentals = extract_fundamentals(summary, quote_data, meta, sec, screener, current)
     events = extract_events(summary, screener)
     sector_analysis = stock_sector_analysis(fundamentals)
     growth_drivers = build_growth_drivers(symbol, long_name, fundamentals, screener, sector_analysis)
-    relative_strength = build_relative_strength(candles, benchmark)
-    latest_candle = analyze_latest_candle(candles)
+    relative_strength = build_relative_strength(report_candles, benchmark)
+    latest_candle = analyze_latest_candle(report_candles)
     technical = score_technical({
         "current": current,
         "yearHigh": year_high,
@@ -4504,7 +4526,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
     source = build_source_label(sec, screener)
     market_clock = build_market_clock(symbol, quote_data, meta)
     quality = build_quality_report({
-        "candles": candles,
+        "candles": report_candles,
         "quote": quote_data,
         "fundamentals": fundamentals,
         "technical": technical,
@@ -4563,7 +4585,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
             "sma50": round_or_none(sma50[index]),
             "sma200": round_or_none(sma200[index]),
         }
-        for index, item in enumerate(candles)
+        for index, item in enumerate(report_candles, start=len(analysis_candles) - len(report_candles))
     ]
 
     return {
@@ -4573,6 +4595,12 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
         "source": source,
         "generatedAt": iso_now(),
         "marketClock": market_clock,
+        "history": {
+            "chartCandles": len(report_candles),
+            "analysisCandles": len(analysis_candles),
+            "maxChartSessions": STOCK_REPORT_MAX_SESSIONS,
+            "analysisBufferSessions": max(0, len(analysis_candles) - len(report_candles)),
+        },
         "quote": {
             "price": round2(current),
             "previousClose": round2(previous),
@@ -4676,9 +4704,10 @@ def build_asset_report(symbol, asset_type, meta, candles, quote_data, summary):
     top_holdings = extract_asset_holdings(summary)
     sectors = extract_sector_weightings(summary)
     performance = build_asset_performance(closes)
+    annual_returns = build_mutual_fund_annual_return_report(long_name, profile) if asset_type == "mutual-fund" else unavailable_annual_returns(asset_type)
     risk = build_asset_risk_report(closes)
     momentum = build_asset_momentum_report(current, sma50_value, sma200_value, performance)
-    confidence = build_asset_confidence_report(candles, profile, top_holdings, summary)
+    confidence = build_asset_confidence_report(candles, profile, top_holdings, summary, annual_returns)
     plan = build_asset_plan(asset_type, current, currency, levels, performance, risk, profile)
     suitability_score = score_asset_suitability(momentum, risk, confidence, profile)
     references = build_asset_references(symbol, long_name, quote_data, meta, asset_type)
@@ -4721,6 +4750,7 @@ def build_asset_report(symbol, asset_type, meta, candles, quote_data, summary):
         "summary": summarize_asset_report(asset_label, suitability_score, momentum, risk, profile),
         "profile": profile,
         "performance": performance,
+        "annualReturns": annual_returns,
         "risk": risk,
         "momentum": momentum,
         "confidence": confidence,
@@ -4811,6 +4841,393 @@ def build_asset_performance(closes):
     }
 
 
+class AdvisorkhojAnnualReturnsParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.in_table = False
+        self.section = ""
+        self.in_row = False
+        self.in_cell = False
+        self.rows = {"thead": [], "tbody": [], "tfoot": []}
+        self.current_row = []
+        self.current_row_section = ""
+        self.current_cell_text = []
+        self.current_anchor_text = None
+        self.first_anchor_text = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "table" and attrs.get("id") == "tbl_scheme_returns":
+            self.in_table = True
+            return
+        if not self.in_table:
+            return
+        if tag in {"thead", "tbody", "tfoot"}:
+            self.section = tag
+        elif tag == "tr":
+            self.in_row = True
+            self.current_row = []
+            self.current_row_section = self.section or "tbody"
+        elif self.in_row and tag in {"th", "td"}:
+            self.in_cell = True
+            self.current_cell_text = []
+            self.current_anchor_text = None
+            self.first_anchor_text = ""
+        elif self.in_cell and tag == "a" and not self.first_anchor_text:
+            self.current_anchor_text = []
+
+    def handle_data(self, data):
+        if not self.in_cell:
+            return
+        self.current_cell_text.append(data)
+        if self.current_anchor_text is not None:
+            self.current_anchor_text.append(data)
+
+    def handle_endtag(self, tag):
+        if not self.in_table:
+            return
+        if self.in_cell and tag == "a" and self.current_anchor_text is not None:
+            self.first_anchor_text = clean_advisorkhoj_text(" ".join(self.current_anchor_text))
+            self.current_anchor_text = None
+        elif self.in_cell and tag in {"th", "td"}:
+            cell_text = self.first_anchor_text or clean_advisorkhoj_text(" ".join(self.current_cell_text))
+            self.current_row.append(cell_text)
+            self.in_cell = False
+            self.current_cell_text = []
+            self.current_anchor_text = None
+            self.first_anchor_text = ""
+        elif self.in_row and tag == "tr":
+            if self.current_row:
+                self.rows.setdefault(self.current_row_section, []).append(self.current_row)
+            self.in_row = False
+            self.current_row = []
+            self.current_row_section = ""
+        elif tag in {"thead", "tbody", "tfoot"}:
+            self.section = ""
+        elif tag == "table":
+            self.in_table = False
+
+
+ADVISORKHOJ_CATEGORY_RULES = (
+    ("balanced advantage", "Hybrid: Dynamic Asset Allocation"),
+    ("dynamic asset allocation", "Hybrid: Dynamic Asset Allocation"),
+    ("aggressive hybrid", "Hybrid: Aggressive Hybrid"),
+    ("equity savings", "Hybrid: Equity Savings"),
+    ("multi asset", "Hybrid: Multi Asset Allocation"),
+    ("large and mid cap", "Equity: Large and Mid Cap"),
+    ("large mid cap", "Equity: Large and Mid Cap"),
+    ("flexi cap", "Equity: Flexi Cap"),
+    ("flexicap", "Equity: Flexi Cap"),
+    ("multi cap", "Equity: Multi Cap"),
+    ("multicap", "Equity: Multi Cap"),
+    ("large cap", "Equity: Large Cap"),
+    ("bluechip", "Equity: Large Cap"),
+    ("mid cap", "Equity: Mid Cap"),
+    ("midcap", "Equity: Mid Cap"),
+    ("small cap", "Equity: Small Cap"),
+    ("smallcap", "Equity: Small Cap"),
+    ("value", "Equity: Value"),
+    ("contra", "Equity: Contra"),
+    ("focused", "Equity: Focused"),
+    ("elss", "Equity: ELSS"),
+    ("tax saver", "Equity: ELSS"),
+    ("dividend yield", "Equity: Dividend Yield"),
+    ("banking and financial", "Equity: Sectoral-Banking and Financial Services"),
+    ("technology", "Equity: Sectoral-Technology"),
+    ("pharma", "Equity: Sectoral-Pharma and Healthcare"),
+    ("healthcare", "Equity: Sectoral-Pharma and Healthcare"),
+    ("infrastructure", "Equity: Sectoral-Infrastructure"),
+    ("consumption", "Equity: Thematic-Consumption"),
+)
+
+
+def build_mutual_fund_annual_return_report(fund_name, profile):
+    category = infer_advisorkhoj_category(fund_name, profile)
+    plan_type = infer_advisorkhoj_plan_type(fund_name)
+    try:
+        annual_data = get_advisorkhoj_annual_returns(category, plan_type)
+    except Exception as error:
+        return unavailable_annual_returns(
+            "mutual-fund",
+            category=category,
+            plan_type=plan_type,
+            error=str(error),
+        )
+
+    matched = match_advisorkhoj_fund_row(annual_data.get("funds") or [], fund_name)
+    comparison_rows = build_annual_comparison_rows(matched, annual_data)
+    if not comparison_rows:
+        return unavailable_annual_returns(
+            "mutual-fund",
+            category=category,
+            plan_type=plan_type,
+            error="AdvisorKhoj annual return table did not return comparable rows.",
+        )
+
+    summary = summarize_annual_return_comparison(matched, annual_data)
+    return {
+        "available": True,
+        "source": annual_data.get("source") or "AdvisorKhoj annual returns",
+        "sourceUrl": annual_data.get("sourceUrl") or advisorkhoj_annual_returns_url(category, plan_type),
+        "category": annual_data.get("category") or category,
+        "planType": annual_data.get("planType") or plan_type,
+        "returnsAsOn": annual_data.get("returnsAsOn") or "",
+        "years": annual_data.get("years") or [],
+        "matched": bool(matched),
+        "matchedFund": matched,
+        "categoryAverage": annual_data.get("categoryAverage"),
+        "benchmark": annual_data.get("benchmark"),
+        "comparisonRows": comparison_rows,
+        "summary": summary,
+    }
+
+
+def unavailable_annual_returns(asset_type, category="", plan_type="", error=""):
+    return {
+        "available": False,
+        "source": "AdvisorKhoj annual returns" if asset_type == "mutual-fund" else "",
+        "sourceUrl": advisorkhoj_annual_returns_url(category, plan_type) if category else ADVISORKHOJ_ANNUAL_RETURNS_URL,
+        "category": category,
+        "planType": plan_type,
+        "returnsAsOn": "",
+        "years": [],
+        "matched": False,
+        "matchedFund": None,
+        "categoryAverage": None,
+        "benchmark": None,
+        "comparisonRows": [],
+        "summary": error or "AdvisorKhoj annual return comparison is available only for mutual fund reports.",
+    }
+
+
+def get_advisorkhoj_annual_returns(category="Equity: Multi Cap", plan_type="Regular"):
+    normalized_category = category or "Equity: Multi Cap"
+    normalized_plan = "Direct" if str(plan_type or "").strip().lower() == "direct" else "Regular"
+    cache_key = f"advisorkhoj-mf-annual:{normalized_category}:{normalized_plan}"
+    url = advisorkhoj_annual_returns_url(normalized_category, normalized_plan)
+    return cached(
+        cache_key,
+        lambda: parse_advisorkhoj_annual_returns(fetch_text(url), normalized_category, normalized_plan, url),
+        ADVISORKHOJ_ANNUAL_RETURNS_CACHE_SECONDS,
+    )
+
+
+def advisorkhoj_annual_returns_url(category="", plan_type=""):
+    if not category:
+        return ADVISORKHOJ_ANNUAL_RETURNS_URL
+    plan = plan_type or "Regular"
+    return f"{ADVISORKHOJ_ANNUAL_RETURNS_URL}?category={quote(category)}&scheme_plan_type={quote(plan)}"
+
+
+def parse_advisorkhoj_annual_returns(page, category="Equity: Multi Cap", plan_type="Regular", source_url=""):
+    parser = AdvisorkhojAnnualReturnsParser()
+    parser.feed(page or "")
+    header_text = " ".join(" ".join(row) for row in parser.rows.get("thead", []))
+    returns_as_on = parse_advisorkhoj_returns_as_on(header_text)
+    years = advisorkhoj_return_years(returns_as_on)
+    funds = [
+        row
+        for row in (parse_advisorkhoj_return_row(cells, years, "Fund") for cells in parser.rows.get("tbody", []))
+        if row
+    ]
+    footer_rows = [
+        row
+        for row in (parse_advisorkhoj_return_row(cells, years, "Comparator") for cells in parser.rows.get("tfoot", []))
+        if row
+    ]
+    category_average = next((row for row in footer_rows if "category average" in row["label"].lower()), None)
+    benchmark = next((row for row in footer_rows if row is not category_average), None)
+
+    ranked_funds = sorted(
+        funds,
+        key=lambda row: row["averageReturn"] if is_finite(row.get("averageReturn")) else -999,
+        reverse=True,
+    )
+    for index, row in enumerate(ranked_funds, start=1):
+        row["rank"] = index
+
+    if not funds and not footer_rows:
+        raise RuntimeError("AdvisorKhoj annual return table was not found.")
+
+    return {
+        "available": True,
+        "source": "AdvisorKhoj annual returns",
+        "sourceUrl": source_url or advisorkhoj_annual_returns_url(category, plan_type),
+        "category": category,
+        "planType": plan_type,
+        "returnsAsOn": returns_as_on,
+        "years": years,
+        "funds": ranked_funds,
+        "categoryAverage": category_average,
+        "benchmark": benchmark,
+    }
+
+
+def parse_advisorkhoj_return_row(cells, years, row_type):
+    if len(cells) < 5:
+        return None
+    label = clean_advisorkhoj_text(cells[0])
+    if not label:
+        return None
+    returns = []
+    for index, year in enumerate(years):
+        returns.append({
+            "year": year,
+            "return": round_or_none(parse_advisorkhoj_number(array_get(cells, 5 + index))),
+        })
+    usable_returns = [item["return"] for item in returns if is_finite(item.get("return"))]
+    average_return = sum(usable_returns) / len(usable_returns) if usable_returns else None
+    return {
+        "label": label,
+        "scheme": label if row_type == "Fund" else "",
+        "type": row_type,
+        "amc": clean_advisorkhoj_text(array_get(cells, 1)),
+        "launchDate": clean_advisorkhoj_text(array_get(cells, 2)),
+        "aumCrore": round_or_none(parse_advisorkhoj_number(array_get(cells, 3))),
+        "terPercent": round_or_none(parse_advisorkhoj_number(array_get(cells, 4))),
+        "returns": returns,
+        "latestReturn": returns[0]["return"] if returns else None,
+        "averageReturn": round_or_none(average_return),
+    }
+
+
+def parse_advisorkhoj_returns_as_on(header_text):
+    match = re.search(r"Returns\s+as\s+on\s*-\s*(\d{2}-\d{2}-\d{4})", header_text or "", flags=re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def advisorkhoj_return_years(returns_as_on):
+    try:
+        as_on_date = datetime.strptime(returns_as_on, "%d-%m-%Y").date()
+    except (TypeError, ValueError):
+        as_on_date = date.today()
+    anchor_year = as_on_date.year - 1 if as_on_date.month == 1 and as_on_date.day == 1 else as_on_date.year
+    return [anchor_year - index for index in range(5)]
+
+
+def parse_advisorkhoj_number(value):
+    text = clean_advisorkhoj_text(value).replace("%", "")
+    if text in {"", "-", "--", "n/a", "N/A"}:
+        return None
+    return parse_loose_number(text)
+
+
+def clean_advisorkhoj_text(value):
+    text = html.unescape(str(value or "")).replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.strip("|").strip()
+
+
+def match_advisorkhoj_fund_row(rows, fund_name):
+    query = normalize_fund_match_text(fund_name)
+    query_tokens = set(query.split())
+    if not query_tokens:
+        return None
+
+    best_row = None
+    best_score = 0
+    for row in rows:
+        candidate = normalize_fund_match_text(row.get("scheme") or row.get("label"))
+        if not candidate:
+            continue
+        candidate_tokens = set(candidate.split())
+        overlap = len(query_tokens & candidate_tokens)
+        overlap_score = overlap / max(len(query_tokens), 1) * 100
+        fuzzy_score = SequenceMatcher(None, query, candidate).ratio() * 100
+        substring_bonus = 20 if query in candidate or candidate in query else 0
+        score = max(overlap_score, fuzzy_score) + substring_bonus
+        if score > best_score:
+            best_score = score
+            best_row = row
+
+    return best_row if best_score >= 58 else None
+
+
+def normalize_fund_match_text(value):
+    text = str(value or "").lower()
+    text = text.replace("&", " and ")
+    replacements = {
+        "flexicap": "flexi cap",
+        "multicap": "multi cap",
+        "bluechip": "blue chip",
+        "dir": "direct",
+        "reg": "regular",
+        "gr": "growth",
+        "pru": "prudential",
+        "absl": "aditya birla sun life",
+    }
+    for source, replacement in replacements.items():
+        text = re.sub(rf"\b{re.escape(source)}\b", replacement, text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    stopwords = {
+        "fund",
+        "mutual",
+        "regular",
+        "direct",
+        "plan",
+        "growth",
+        "option",
+        "scheme",
+        "the",
+    }
+    tokens = [token for token in text.split() if token not in stopwords]
+    return " ".join(tokens)
+
+
+def infer_advisorkhoj_category(fund_name, profile):
+    text = " ".join([
+        str(fund_name or ""),
+        str((profile or {}).get("category") or ""),
+        str((profile or {}).get("legalType") or ""),
+    ]).lower()
+    for needle, category in ADVISORKHOJ_CATEGORY_RULES:
+        if needle in text:
+            return category
+    return "Equity: Multi Cap"
+
+
+def infer_advisorkhoj_plan_type(fund_name):
+    normalized = normalize_fund_match_text(fund_name)
+    raw_text = str(fund_name or "").lower()
+    if " direct " in f" {raw_text} " or " dir " in f" {raw_text} " or " direct " in f" {normalized} ":
+        return "Direct"
+    return "Regular"
+
+
+def build_annual_comparison_rows(matched, annual_data):
+    rows = []
+    if matched:
+        rows.append({**matched, "type": "Selected fund"})
+    for key, label in (("categoryAverage", "Category average"), ("benchmark", "Benchmark")):
+        row = annual_data.get(key)
+        if row:
+            rows.append({**row, "type": label})
+    matched_label = (matched or {}).get("label")
+    top_peers = [
+        {**row, "type": "Top peer"}
+        for row in (annual_data.get("funds") or [])[:5]
+        if row.get("label") != matched_label
+    ]
+    rows.extend(top_peers[:5])
+    return rows
+
+
+def summarize_annual_return_comparison(matched, annual_data):
+    category = annual_data.get("category") or "selected category"
+    plan = annual_data.get("planType") or "plan"
+    as_on = annual_data.get("returnsAsOn") or "latest available date"
+    category_average = annual_data.get("categoryAverage") or {}
+    if not matched:
+        return f"No exact AdvisorKhoj scheme match was found; showing {plan} {category} category average, benchmark, and top peer annual returns as on {as_on}."
+
+    latest = matched.get("latestReturn")
+    category_latest = category_average.get("latestReturn")
+    spread = latest - category_latest if is_finite(latest) and is_finite(category_latest) else None
+    spread_text = f" Latest-year spread versus category average is {spread:+.2f} pp." if is_finite(spread) else ""
+    rank = f" Rank {matched.get('rank')} by five-year average." if matched.get("rank") else ""
+    return f"Matched against AdvisorKhoj {plan} {category} annual returns as on {as_on}.{spread_text}{rank}".strip()
+
+
 def build_asset_risk_report(closes):
     volatility = annualized_volatility(closes)
     drawdown = max_drawdown_percent(closes)
@@ -4860,7 +5277,7 @@ def build_asset_momentum_report(current, sma50_value, sma200_value, performance)
     }
 
 
-def build_asset_confidence_report(candles, profile, holdings, summary):
+def build_asset_confidence_report(candles, profile, holdings, summary, annual_returns=None):
     score = 45
     checks = []
     if len(candles) >= 250:
@@ -4882,6 +5299,9 @@ def build_asset_confidence_report(candles, profile, holdings, summary):
     if summary.get("fundProfile"):
         score += 8
         checks.append("Fund profile data was available.")
+    if annual_returns and annual_returns.get("available"):
+        score += 8
+        checks.append("AdvisorKhoj annual return comparison was available.")
     score = round(clamp(score, 0, 100))
     return {
         "score": score,
@@ -4968,6 +5388,13 @@ def build_asset_references(symbol, long_name, quote_data, meta, asset_type):
             "note": "Review live chart, trend, and support/resistance behavior.",
         })
     if asset_type == "mutual-fund":
+        advisorkhoj_category = infer_advisorkhoj_category(long_name, {})
+        advisorkhoj_plan = infer_advisorkhoj_plan_type(long_name)
+        links.append({
+            "label": "AdvisorKhoj annual returns",
+            "url": advisorkhoj_annual_returns_url(advisorkhoj_category, advisorkhoj_plan),
+            "note": "Compare annual calendar-year returns against category average, benchmark, and peers.",
+        })
         links.append({
             "label": "Morningstar search",
             "url": f"https://www.morningstar.com/search?query={quote(long_name or symbol)}",
@@ -6982,10 +7409,10 @@ def build_quality_report(data):
 
     if chart_points >= 200:
         score += 15
-        strengths.append(f"One-year chart has {chart_points} daily candles.")
+        strengths.append(f"Price chart has {chart_points} daily candles in the one-year display window.")
     else:
         score -= 18
-        warnings.append(f"Only {chart_points} chart candles were available.")
+        warnings.append(f"Only {chart_points} chart candles were available; analysis is based on the available history.")
 
     if level_count >= 3:
         score += 8
@@ -7097,7 +7524,7 @@ def build_accuracy_checks(data, ownership, relative_strength, freshness=None):
         "label": "Price and chart history",
         "status": "Available" if len(data["candles"]) >= 200 else "Partial",
         "tone": "positive" if len(data["candles"]) >= 200 else "warning",
-        "detail": f"{len(data['candles'])} daily candles loaded for the setup.",
+        "detail": f"{len(data['candles'])} daily candles loaded; chart display is capped at one year when more data exists.",
     })
 
     chart_age = freshness.get("chartAgeDays")
