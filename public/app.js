@@ -103,7 +103,13 @@ let selectedOpenInterestPeriod = "day";
 let selectedMonitorPane = "primary";
 let chartRedrawFrame = null;
 let monitorRequestInFlight = false;
-const MONITOR_LIVE_POLL_MS = 1000;
+const MONITOR_LIVE_POLL_MS = 5000;
+const DATA_LOADING_ETA_DEFAULT = "10-30s";
+const DATA_LOADING_ETA_PROVIDER = "15-45s";
+const DATA_LOADING_ETA_MARKET = "20-60s";
+const LOADING_TEXT_PATTERN = /^Loading\s+(.+?)\.\.\.\s+ETA\s+(.+)$/i;
+const RAW_MISSING_PATTERN = /\b(?:n\/a|none|null|undefined|nan)\b|--:--|(?:^|[^\w])--(?=$|[^\w])/gi;
+const UNAVAILABLE_PATTERN = /\b(?:unavailable|not loaded yet)\b/i;
 const WATCHLIST_REFRESH_CONCURRENCY = 3;
 const analysisRequestCache = new Map();
 let searchController = null;
@@ -297,6 +303,16 @@ document.addEventListener("click", (event) => {
   analyzeAsset(context, symbol);
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearMarketMonitorPoll();
+    return;
+  }
+  if (monitorView && !monitorView.classList.contains("is-hidden") && latestMonitor) {
+    scheduleMarketMonitorPoll();
+  }
+});
+
 function setActiveTab(tab) {
   const isEtf = tab === "etf";
   const isFund = tab === "fund";
@@ -479,8 +495,8 @@ function showInvalidSearchPopup(payload, query) {
       button.dataset.suggestionKind = item.kind;
       button.dataset.suggestionSymbol = item.symbol;
       button.innerHTML = `
-        <strong>${escapeHtml(item.symbol || "n/a")}</strong>
-        <span>${escapeHtml(item.name || item.symbol || "n/a")}</span>
+        <strong>${displayHtml(item.symbol, "symbol", DATA_LOADING_ETA_PROVIDER)}</strong>
+        <span>${displayHtml(item.name || item.symbol, "name", DATA_LOADING_ETA_PROVIDER)}</span>
         <em>${escapeHtml([item.exchange, item.type || item.label].filter(Boolean).join(" · "))}</em>
       `;
       section.appendChild(button);
@@ -639,7 +655,7 @@ async function loadMarketMonitor(forceRefresh, options = {}) {
 }
 
 function scheduleMarketMonitorPoll(delay = MONITOR_LIVE_POLL_MS) {
-  if (monitorView.classList.contains("is-hidden")) {
+  if (document.hidden || monitorView.classList.contains("is-hidden")) {
     clearMarketMonitorPoll();
     return;
   }
@@ -693,6 +709,7 @@ function renderRecommendations(payload) {
   setText("#recommendationsSummary", payload.summary || "");
   renderRecommendationRows(items);
   annotateRecommendationTableCells();
+  validateRenderedData(recommendationsContent);
 }
 
 function renderRecommendationRows(items) {
@@ -705,13 +722,14 @@ function renderRecommendationRows(items) {
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   for (const item of items) {
     const row = document.createElement("tr");
     row.className = `recommendation-row ${recommendationTone(item.score)}`;
     row.innerHTML = `
       <td>
         <div class="recommendation-stock-head">
-          <span class="recommendation-heat">${Number.isFinite(item.score) ? Math.round(item.score) : "n/a"}</span>
+          <span class="recommendation-heat">${Number.isFinite(item.score) ? Math.round(item.score) : loadingText("score")}</span>
           <div>
             <button class="recommendation-stock-link" type="button" data-recommendation-symbol="${escapeHtml(item.analysisSymbol || item.symbol || "")}">${escapeHtml(item.name || item.symbol)}</button>
             <span>${escapeHtml(item.symbol || "")} · ${escapeHtml(item.sourceType || "Public signal")}</span>
@@ -721,7 +739,7 @@ function renderRecommendationRows(items) {
       </td>
       <td>
         <strong>${escapeHtml(item.recommendedBy || "Public signal")}</strong>
-        <span>${escapeHtml(item.fundGroup || "Source group unavailable")}</span>
+        <span>${displayHtml(item.fundGroup, "source group", DATA_LOADING_ETA_PROVIDER)}</span>
         ${renderRecommenderDetails(item)}
       </td>
       <td>${renderQuarterlyResults(item)}</td>
@@ -734,12 +752,13 @@ function renderRecommendationRows(items) {
         <strong>${formatMoney(item.stopLoss, "INR")}</strong>
         <span>Risk ${formatPercentValue(item.riskPercent)}</span>
       </td>
-      <td>${escapeHtml(item.duration || "n/a")}</td>
+      <td>${displayHtml(item.duration, "duration", DATA_LOADING_ETA_PROVIDER)}</td>
       <td><span class="${changeClass(item.upsidePercent)}">${formatPercentValue(item.upsidePercent)}</span></td>
       <td><button class="link-button" type="button" data-recommendation-symbol="${escapeHtml(item.analysisSymbol || item.symbol || "")}">Analyze</button></td>
     `;
-    recommendationRows.appendChild(row);
+    fragment.appendChild(row);
   }
+  recommendationRows.appendChild(fragment);
 }
 
 function renderRecommenderDetails(item) {
@@ -763,7 +782,7 @@ function renderRecommenderDetails(item) {
 function renderQuarterlyResults(item) {
   const result = item.quarterlyResults || {};
   if (!result.available) {
-    return `<span>Latest quarterly result summary unavailable</span><small>Open the stock analysis page and cross-check exchange filings.</small>`;
+    return `<span>${loadingText("quarterly result", DATA_LOADING_ETA_PROVIDER)}</span><small>Open the stock analysis page and cross-check exchange filings.</small>`;
   }
   return `
     <strong>${escapeHtml(result.period || "Latest quarter")}</strong>
@@ -1351,6 +1370,7 @@ function renderWatchlist() {
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   for (const item of items) {
     const row = document.createElement("tr");
     row.className = `watchlist-row is-${item.rowTone || "watch"}`;
@@ -1381,8 +1401,10 @@ function renderWatchlist() {
         <button class="link-button" type="button" data-delete-watchlist="${escapeHtml(item.id)}">Delete</button>
       </td>
     `;
-    watchlistRows.appendChild(row);
+    fragment.appendChild(row);
   }
+  watchlistRows.appendChild(fragment);
+  validateRenderedData(watchlistRows);
 }
 
 async function checkWatchlistPrice(id) {
@@ -1551,7 +1573,7 @@ function averageDailyVolume(report, days) {
 
 function formatBuyRange(item) {
   if (!Number.isFinite(item.buyLow) && !Number.isFinite(item.buyHigh)) {
-    return "n/a";
+    return loadingText("buy range");
   }
   if (!Number.isFinite(item.buyLow) || item.buyLow === item.buyHigh) {
     return formatMoney(item.buyHigh, item.currency);
@@ -1567,12 +1589,12 @@ function formatTargetRange(item) {
 }
 
 function formatRiskReward(value) {
-  return Number.isFinite(value) ? `${formatNumber(value)}:1` : "n/a";
+  return Number.isFinite(value) ? `${formatNumber(value)}:1` : loadingText("risk reward");
 }
 
 function formatVolumeConfirmation(item) {
   if (!Number.isFinite(item.volumeRatio)) {
-    return "Volume confirmation n/a";
+    return `Volume confirmation ${loadingText("volume")}`;
   }
   return `Volume ${formatNumber(item.volumeRatio)}x 20D avg`;
 }
@@ -1595,18 +1617,21 @@ function renderSearchLogs(items, totalCount) {
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   for (const item of items) {
     const row = document.createElement("tr");
     const status = item.success ? "Success" : `Failed ${item.statusCode || ""}`.trim();
     row.innerHTML = `
       <td>${formatDateTime(item.createdAt)}</td>
-      <td><strong>${escapeHtml(item.symbol || item.rawInput || "n/a")}</strong><span>Input: ${escapeHtml(item.rawInput || "n/a")}</span></td>
-      <td>${escapeHtml(item.ipAddress || "n/a")}</td>
+      <td><strong>${displayHtml(item.symbol || item.rawInput, "symbol", DATA_LOADING_ETA_PROVIDER)}</strong><span>Input: ${displayHtml(item.rawInput, "input", DATA_LOADING_ETA_PROVIDER)}</span></td>
+      <td>${displayHtml(item.ipAddress, "IP address", DATA_LOADING_ETA_PROVIDER)}</td>
       <td><strong>${escapeHtml(item.deviceLabel || item.deviceType || "Unknown device")}</strong><small>${escapeHtml(shortUserAgent(item.userAgent))}</small></td>
       <td><span class="status-pill ${item.success ? "status-success" : "status-failed"}">${escapeHtml(status)}</span>${item.errorMessage ? `<small>${escapeHtml(item.errorMessage)}</small>` : ""}</td>
     `;
-    searchLogRows.appendChild(row);
+    fragment.appendChild(row);
   }
+  searchLogRows.appendChild(fragment);
+  validateRenderedData(searchLogRows);
 }
 
 function shortUserAgent(userAgent) {
@@ -1663,6 +1688,7 @@ function renderReport(report) {
   renderSwingTradePlan(report.swingTradePlan, currency);
   renderReferences(report.references);
   renderSectionSummaries(report, currency);
+  validateRenderedData(reportEl);
   redrawChart();
 }
 
@@ -1775,10 +1801,11 @@ function renderMarketClock(clock) {
     marketClockTimer = null;
   }
   if (!clock) {
-    marketClockTime.textContent = "--:--";
+    marketClockTime.textContent = loadingText("session time", DATA_LOADING_ETA_PROVIDER);
     marketClockStatus.textContent = "Market status";
-    marketClockDetail.textContent = "Session timing is not available for this stock.";
+    marketClockDetail.textContent = loadingText("session timing", DATA_LOADING_ETA_PROVIDER);
     setMarketClockClass("closed");
+    validateRenderedData(marketClockEl);
     return;
   }
 
@@ -1794,6 +1821,7 @@ function updateMarketClock(clock) {
   marketClockStatus.textContent = state.label;
   marketClockDetail.textContent = state.detail;
   setMarketClockClass(state.className);
+  validateRenderedData(marketClockEl);
 }
 
 function resolveMarketClockState(clock, now) {
@@ -1815,7 +1843,7 @@ function resolveMarketClockState(clock, now) {
     return {
       className: "open",
       label: clock.statusLabel || "Market Open",
-      detail: clock.message || `${exchangeLabel} reports the market is open; session close time is unavailable.`
+      detail: clock.message || `${exchangeLabel} reports the market is open; ${loadingText("close time", DATA_LOADING_ETA_PROVIDER)}`
     };
   }
 
@@ -2057,7 +2085,7 @@ function renderAggregateOiChart(period) {
     <section class="oi-chart-card">
       <div class="oi-chart-head">
         <strong>Aggregate OI movement</strong>
-        <span>${escapeHtml(period.volumeSummary || "Call/put volume split unavailable.")}</span>
+        <span>${displayHtml(period.volumeSummary, "call/put volume split", DATA_LOADING_ETA_MARKET)}</span>
       </div>
       ${oiSingleBar("Previous OI", previous, maxValue, "neutral")}
       ${oiSingleBar("Latest OI", latest, maxValue, period.changeOi >= 0 ? "put" : "call")}
@@ -2255,25 +2283,26 @@ function renderAssetReport(prefix, report) {
   renderAssetHoldings(prefix, report.holdings);
   renderList(`#${prefix}Checks`, [
     ...(report.confidence.checks || []),
-    `Quote type: ${report.quote.quoteType || "n/a"}`,
-    `Data source: ${report.source || "n/a"}`
+    `Quote type: ${displayText(report.quote.quoteType, "quote type")}`,
+    `Data source: ${displayText(report.source, "data source")}`
   ]);
   renderAssetReferences(`#${prefix}ReferenceLinks`, report.references);
+  validateRenderedData(document.querySelector(`#${prefix}Report`));
 }
 
 function renderAssetProfile(prefix, report) {
   const profile = report.profile || {};
   renderTable(`#${prefix}ProfileMetrics`, [
-    ["Category", profile.category || "n/a"],
-    ["Family", profile.family || "n/a"],
-    ["Type", profile.legalType || report.assetLabel || "n/a"],
+    ["Category", displayText(profile.category, "category", DATA_LOADING_ETA_PROVIDER)],
+    ["Family", displayText(profile.family, "family", DATA_LOADING_ETA_PROVIDER)],
+    ["Type", displayText(profile.legalType || report.assetLabel, "asset type", DATA_LOADING_ETA_PROVIDER)],
     ["Total assets / AUM", formatLarge(profile.totalAssets, report.currency)],
     ["NAV / price", formatMoney(profile.navPrice, report.currency)],
     ["Expense ratio", formatExpenseRatio(profile.expenseRatio)],
     ["Yield", formatRatioPercent(profile.yield)],
     ["YTD return", formatRatioPercent(profile.ytdReturn)],
     ["3Y beta", formatNumber(profile.beta3Year)],
-    ["Inception", profile.inceptionDate ? formatDateTime(profile.inceptionDate) : "n/a"]
+    ["Inception", profile.inceptionDate ? formatDateTime(profile.inceptionDate) : loadingText("inception date", DATA_LOADING_ETA_PROVIDER)]
   ]);
 }
 
@@ -2317,16 +2346,18 @@ function renderAssetAnnualReturns(prefix, annualReturns) {
   if (meta) {
     meta.innerHTML = "";
     const cards = [
-      ["Category", annualReturns.category || "n/a", annualReturns.planType || ""],
-      ["Returns date", annualReturns.returnsAsOn || "n/a", annualReturns.source || ""],
+      ["Category", displayText(annualReturns.category, "category", DATA_LOADING_ETA_PROVIDER), annualReturns.planType || ""],
+      ["Returns date", displayText(annualReturns.returnsAsOn, "returns date", DATA_LOADING_ETA_PROVIDER), annualReturns.source || ""],
       ["Matched fund", annualReturns.matched ? "Yes" : "No", annualReturns.matchedFund?.label || "Showing category peers"]
     ];
+    const fragment = document.createDocumentFragment();
     for (const [label, value, detail] of cards) {
       const card = document.createElement("article");
       card.className = "market-mini-card";
       card.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail || "")}</small>`;
-      meta.appendChild(card);
+      fragment.appendChild(card);
     }
+    meta.appendChild(fragment);
   }
 
   const years = annualReturns.years || [];
@@ -2349,22 +2380,24 @@ function renderAssetAnnualReturns(prefix, annualReturns) {
     return;
   }
   body.innerHTML = "";
+  const fragment = document.createDocumentFragment();
   for (const item of rows) {
     const row = document.createElement("tr");
     row.className = item.type === "Selected fund" ? "is-selected-row" : "";
     row.innerHTML = `
       <td>
-        <strong>${escapeHtml(item.label || "n/a")}</strong>
+        <strong>${displayHtml(item.label, "fund label", DATA_LOADING_ETA_PROVIDER)}</strong>
         <span>${escapeHtml(item.amc || "")}${item.rank ? ` · Rank ${escapeHtml(String(item.rank))}` : ""}</span>
       </td>
       <td>${escapeHtml(item.type || "Comparator")}</td>
       <td class="${changeClass(item.averageReturn)}">${formatPercentValue(item.averageReturn)}</td>
-      <td>${Number.isFinite(item.terPercent) ? `${item.terPercent.toFixed(2)}%` : "n/a"}</td>
-      <td>${Number.isFinite(item.aumCrore) ? `${formatNumber(item.aumCrore)} cr` : "n/a"}</td>
+      <td>${Number.isFinite(item.terPercent) ? `${item.terPercent.toFixed(2)}%` : loadingText("TER", DATA_LOADING_ETA_PROVIDER)}</td>
+      <td>${Number.isFinite(item.aumCrore) ? `${formatNumber(item.aumCrore)} cr` : loadingText("AUM", DATA_LOADING_ETA_PROVIDER)}</td>
       ${years.map((year) => annualReturnCell(item, year)).join("")}
     `;
-    body.appendChild(row);
+    fragment.appendChild(row);
   }
+  body.appendChild(fragment);
 }
 
 function annualReturnCell(item, year) {
@@ -2386,7 +2419,7 @@ function renderAssetPlan(prefix, plan) {
     row.className = "asset-plan-item";
     row.innerHTML = `
       <span>${escapeHtml(item.label || "Check")}</span>
-      <strong>${escapeHtml(item.value || "n/a")}</strong>
+      <strong>${displayHtml(item.value, "plan value", DATA_LOADING_ETA_PROVIDER)}</strong>
       <p>${escapeHtml(item.detail || "")}</p>
     `;
     container.appendChild(row);
@@ -2413,7 +2446,7 @@ function renderAssetHoldings(prefix, holdings) {
       row.className = "asset-holding-row";
       row.innerHTML = `
         <span>${escapeHtml(item.symbol || "")}</span>
-        <strong>${escapeHtml(item.name || "n/a")}</strong>
+        <strong>${displayHtml(item.name, "holding name", DATA_LOADING_ETA_PROVIDER)}</strong>
         <em>${formatRatioPercent(item.percent)}</em>
       `;
       group.appendChild(row);
@@ -2430,7 +2463,7 @@ function renderAssetHoldings(prefix, holdings) {
       row.className = "asset-holding-row";
       row.innerHTML = `
         <span></span>
-        <strong>${escapeHtml(item.name || "n/a")}</strong>
+        <strong>${displayHtml(item.name, "sector name", DATA_LOADING_ETA_PROVIDER)}</strong>
         <em>${formatRatioPercent(item.percent)}</em>
       `;
       group.appendChild(row);
@@ -2513,6 +2546,7 @@ function renderMarketMonitor(data) {
   renderOrderCatalystRows(data.orderCatalysts || []);
   annotateMonitorTableCells();
   setupMonitorCollapsibles();
+  validateRenderedData(monitorContent);
 }
 
 function monitorRefreshing() {
@@ -2626,7 +2660,7 @@ function renderNseSnapshot(snapshot) {
     card.className = "market-mini-card";
     card.innerHTML = `
       <span>${escapeHtml(item.market || "Market")}</span>
-      <strong>${escapeHtml(item.status || "n/a")}</strong>
+      <strong>${displayHtml(item.status, "market status", DATA_LOADING_ETA_MARKET)}</strong>
       <small>${escapeHtml(item.message || item.tradeDate || "")}</small>
       ${Number.isFinite(item.last) ? `<small>${escapeHtml(item.index || "")} ${formatNumber(item.last)} <em class="${changeClass(item.changePercent)}">${signed(item.changePercent)}%</em></small>` : ""}
     `;
@@ -2640,7 +2674,7 @@ function renderNseSnapshot(snapshot) {
     ["Advances", formatNumber(breadth.advances), `${formatPercentValue(breadth.advancePercent)} of NSE universe`],
     ["Declines", formatNumber(breadth.declines), `${formatPercentValue(breadth.declinePercent)} of NSE universe`],
     ["A/D Ratio", formatNumber(breadth.advanceDeclineRatio), `${formatNumber(breadth.total)} securities tracked`],
-    ["Market Cap", marketCap.lakhCroreRupees ? `${formatNumber(marketCap.lakhCroreRupees)} lakh cr` : "n/a", marketCap.timestamp || ""],
+    ["Market Cap", marketCap.lakhCroreRupees ? `${formatNumber(marketCap.lakhCroreRupees)} lakh cr` : loadingText("market cap", DATA_LOADING_ETA_MARKET), marketCap.timestamp || ""],
     ["GIFT Nifty", formatNumber(gift.last), `${signed(gift.change)} (${signed(gift.changePercent)}%)`],
   ];
   for (const [label, value, detail] of breadthCards) {
@@ -2753,6 +2787,7 @@ function renderSectorStockPerformanceHeatmap(container, rows, emptyMessage = "")
     .filter((value) => Number.isFinite(value));
   const maxMove = Math.max(1, ...moves);
 
+  const fragment = document.createDocumentFragment();
   for (const item of orderedRows) {
     const move = stockHeatmapNumber(item.sectorChangePercent);
     const breadth = sectorBreadthPercent(item);
@@ -2764,7 +2799,7 @@ function renderSectorStockPerformanceHeatmap(container, rows, emptyMessage = "")
     tile.innerHTML = `
       <div class="sector-heatmap-main">
         <strong>${escapeHtml(item.sector || "Sector")}</strong>
-        <em>${Number.isFinite(move) ? `${signed(move)}%` : "n/a"}</em>
+        <em>${Number.isFinite(move) ? `${signed(move)}%` : loadingText("sector move", DATA_LOADING_ETA_MARKET)}</em>
       </div>
       <div class="sector-heatmap-meta">
         <span>${formatNumber(item.stockCount)} stocks</span>
@@ -2778,13 +2813,14 @@ function renderSectorStockPerformanceHeatmap(container, rows, emptyMessage = "")
         ${sectorHeatmapMover("Worst", item.worstStock)}
       </div>
     `;
-    container.appendChild(tile);
+    fragment.appendChild(tile);
   }
+  container.appendChild(fragment);
 }
 
 function sectorHeatmapMover(label, stock) {
   if (!stock || !stock.symbol) {
-    return `<span><small>${label}</small><strong>n/a</strong><em></em></span>`;
+    return `<span><small>${label}</small><strong>${loadingText("stock", DATA_LOADING_ETA_MARKET)}</strong><em></em></span>`;
   }
   return `
     <span>
@@ -2805,7 +2841,7 @@ function sectorBreadthPercent(item) {
 
 function renderSectorStockMover(stock, sectorChangePercent) {
   if (!stock || !stock.symbol) {
-    return "<span>n/a</span>";
+    return `<span>${loadingText("stock", DATA_LOADING_ETA_MARKET)}</span>`;
   }
   const spread = Number.isFinite(stock.changePercent) && Number.isFinite(sectorChangePercent)
     ? stock.changePercent - sectorChangePercent
@@ -2814,7 +2850,7 @@ function renderSectorStockMover(stock, sectorChangePercent) {
     <strong>${escapeHtml(stock.symbol)}</strong>
     <span>${escapeHtml(stock.name || "")}</span>
     <span class="${changeClass(stock.changePercent)}">${signed(stock.changePercent)}% · ${formatMoney(stock.price, "INR")}</span>
-    <small>vs sector ${Number.isFinite(spread) ? `${spread >= 0 ? "+" : ""}${spread.toFixed(2)} pp` : "n/a"}</small>
+    <small>vs sector ${Number.isFinite(spread) ? `${spread >= 0 ? "+" : ""}${spread.toFixed(2)} pp` : loadingText("spread", DATA_LOADING_ETA_MARKET)}</small>
   `;
 }
 
@@ -2853,6 +2889,7 @@ function renderMentionedStockHeatmap(data) {
   }
   setText("#stockHeatmapSummary", summaryParts.join(" · "));
 
+  const fragment = document.createDocumentFragment();
   for (const stock of stocks) {
     const tile = document.createElement("button");
     tile.type = "button";
@@ -2868,12 +2905,13 @@ function renderMentionedStockHeatmap(data) {
       </div>
       <div class="stock-heatmap-move">
         <span>${formatMoney(stock.price, "INR")}</span>
-        <em>${Number.isFinite(stock.changePercent) ? `${signed(stock.changePercent)}%` : "n/a"}</em>
+        <em>${Number.isFinite(stock.changePercent) ? `${signed(stock.changePercent)}%` : loadingText("move", DATA_LOADING_ETA_MARKET)}</em>
       </div>
       <small>${escapeHtml(sources + moreSources)}</small>
     `;
-    grid.appendChild(tile);
+    fragment.appendChild(tile);
   }
+  grid.appendChild(fragment);
 }
 
 async function analyzeStockFromHeatmap(symbol) {
@@ -3111,7 +3149,7 @@ function renderMoneycontrolSectorAnalysis(snapshot) {
         <td><span class="sector-signal ${item.signalType === "weak" ? "is-weak" : "is-strong"}">${escapeHtml(item.signal || "Tracked")}</span></td>
         <td><strong>${title}</strong><span>${formatNumber(item.stocks)} stocks · ${formatNumber(item.industries)} industries</span></td>
         <td>${renderMoneycontrolSectorStocks(item.topStocks || [], item.nseSector)}</td>
-        <td>${escapeHtml(item.trend || "n/a")}<span>${escapeHtml(item.summary || "")}</span></td>
+        <td>${displayHtml(item.trend, "trend", DATA_LOADING_ETA_MARKET)}<span>${escapeHtml(item.summary || "")}</span></td>
         <td class="${changeClass(item.marketCapChangePercent)}">${signed(item.marketCapChangePercent)}%<span>${formatLarge(item.marketCapCrore, "")} cr</span></td>
         <td>${formatNumber(item.advance)} / ${formatNumber(item.decline)}<span>${formatPercentValue(item.advancePercent)} advancing</span></td>
         <td>${formatNumber(item.sectorPe)}</td>
@@ -3147,7 +3185,7 @@ function renderMoneycontrolSectorStocks(stocks, nseSector) {
   return `
     ${nseSector ? `<span>${escapeHtml(nseSector)}</span>` : ""}
     ${stocks.slice(0, 4).map((stock) => `
-      <strong>${escapeHtml(stock.symbol || "n/a")}</strong>
+      <strong>${displayHtml(stock.symbol, "stock", DATA_LOADING_ETA_MARKET)}</strong>
       <span class="${changeClass(stock.changePercent)}">${signed(stock.changePercent)}% · ${formatMoney(stock.price, "INR")}</span>
     `).join("")}
   `;
@@ -3164,7 +3202,7 @@ function renderSectorOpenInterest(openInterest) {
   rows.innerHTML = "";
 
   if (!openInterest.available) {
-    const status = openInterest.loading || monitorRefreshing() ? "OI refreshing" : "OI unavailable";
+    const status = openInterest.loading || monitorRefreshing() ? "OI refreshing" : loadingText("OI", DATA_LOADING_ETA_MARKET);
     setText("#sectorOiStatus", status);
     summary.innerHTML = `
       <article class="market-mini-card">
@@ -3188,8 +3226,8 @@ function renderSectorOpenInterest(openInterest) {
     ["Mapped F&O", formatNumber(coverage.mappedStocks), `${formatNumber(coverage.sourceRows)} NSE OI rows · ${formatNumber(coverage.unmappedStocks)} unmapped`],
     ["Mapped OI", formatLarge(totals.latestOi, ""), `Change ${formatSignedLarge(totals.changeOi)} (${formatPercentValue(totals.changePercent)})`],
     ["Total Volume", formatLarge(totals.volume, ""), "NSE derivative volume"],
-    ["Highest OI", highestOi.sector || "n/a", formatLarge(highestOi.latestOi, "")],
-    ["Top Build-up", topBuildUp.sector || "n/a", `${formatSignedLarge(topBuildUp.changeOi)} (${formatPercentValue(topBuildUp.changePercent)})`],
+    ["Highest OI", displayText(highestOi.sector, "highest OI sector", DATA_LOADING_ETA_MARKET), formatLarge(highestOi.latestOi, "")],
+    ["Top Build-up", displayText(topBuildUp.sector, "top build-up sector", DATA_LOADING_ETA_MARKET), `${formatSignedLarge(topBuildUp.changeOi)} (${formatPercentValue(topBuildUp.changePercent)})`],
   ];
   for (const [label, value, detail] of cards) {
     const card = document.createElement("article");
@@ -3220,10 +3258,10 @@ function renderSectorOpenInterest(openInterest) {
 
 function renderSectorOiStocks(stocks) {
   if (!stocks.length) {
-    return "<span>n/a</span>";
+    return `<span>${loadingText("top OI stocks", DATA_LOADING_ETA_MARKET)}</span>`;
   }
   return stocks.map((stock) => `
-    <strong>${escapeHtml(stock.symbol || "n/a")}</strong>
+    <strong>${displayHtml(stock.symbol, "stock", DATA_LOADING_ETA_MARKET)}</strong>
     <span>${formatLarge(stock.latestOi, "")} OI · ${formatSignedLarge(stock.changeOi)}</span>
   `).join("");
 }
@@ -3332,13 +3370,99 @@ function emptyTable(selector, colspan, message) {
   if (body) {
     const rowClass = monitorRefreshing() ? " class=\"is-refreshing-row\"" : "";
     body.innerHTML = `<tr${rowClass}><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
+    validateRenderedData(body);
+  }
+}
+
+function loadingText(label = "data", eta = DATA_LOADING_ETA_DEFAULT) {
+  return `Loading ${label}... ETA ${eta}`;
+}
+
+function loadingMarkup(label = "data", eta = DATA_LOADING_ETA_DEFAULT) {
+  return `
+    <span class="data-loading" role="status" aria-live="polite">
+      <span class="data-loading-dot" aria-hidden="true"></span>
+      <span>Loading ${escapeHtml(label)}...</span>
+      <small>ETA ${escapeHtml(eta)}</small>
+    </span>
+  `;
+}
+
+function isMissingValue(value) {
+  if (value === null || value === undefined) {
+    return true;
+  }
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return true;
+  }
+  return /^(?:n\/a|none|null|undefined|nan|--|--:--)$/i.test(normalized);
+}
+
+function displayText(value, label = "data", eta = DATA_LOADING_ETA_DEFAULT) {
+  return isMissingValue(value) ? loadingText(label, eta) : String(value);
+}
+
+function displayHtml(value, label = "data", eta = DATA_LOADING_ETA_DEFAULT) {
+  return isMissingValue(value) ? loadingMarkup(label, eta) : escapeHtml(value);
+}
+
+function validateRenderedData(root = document) {
+  const base = root instanceof Element || root instanceof Document ? root : document;
+  const selector = "td, dd, span, small, strong, em, p, li";
+  const elements = [];
+  if (base instanceof Element && base.matches(selector)) {
+    elements.push(base);
+  }
+  elements.push(...base.querySelectorAll(selector));
+
+  for (const element of elements) {
+    if (element.children.length || element.closest("script, style, option, datalist")) {
+      continue;
+    }
+    const text = element.textContent.trim();
+    if (!text) {
+      continue;
+    }
+
+    const loadingMatch = text.match(LOADING_TEXT_PATTERN);
+    if (loadingMatch) {
+      element.innerHTML = loadingMarkup(loadingMatch[1], loadingMatch[2]);
+      element.classList.add("is-loading-value");
+      continue;
+    }
+
+    if (isMissingValue(text) || (text.length < 110 && UNAVAILABLE_PATTERN.test(text))) {
+      element.innerHTML = loadingMarkup("data", DATA_LOADING_ETA_PROVIDER);
+      element.classList.add("is-loading-value");
+      continue;
+    }
+
+    RAW_MISSING_PATTERN.lastIndex = 0;
+    if (RAW_MISSING_PATTERN.test(text) && text.length < 140) {
+      RAW_MISSING_PATTERN.lastIndex = 0;
+      element.innerHTML = escapeHtml(text).replace(RAW_MISSING_PATTERN, (match) => {
+        const prefixMatch = match.match(/^([^\w])--$/);
+        return prefixMatch
+          ? `${escapeHtml(prefixMatch[1])}${loadingMarkup("data", DATA_LOADING_ETA_PROVIDER)}`
+          : loadingMarkup("data", DATA_LOADING_ETA_PROVIDER);
+      });
+      element.classList.add("has-loading-value");
+      continue;
+    }
+
+    if (text.includes("Loading ") && text.includes("ETA")) {
+      element.classList.add("has-loading-value");
+      element.setAttribute("aria-busy", "true");
+    }
   }
 }
 
 function setText(selector, value) {
   const element = document.querySelector(selector);
   if (element) {
-    element.textContent = value;
+    element.textContent = displayText(value);
+    validateRenderedData(element);
   }
 }
 
@@ -3357,7 +3481,7 @@ function renderCommodities(items, usdInr) {
     `;
     container.appendChild(fxCard);
   } else {
-    setText("#usdInrStatus", monitorRefreshing() ? "USD/INR refreshing" : "USD/INR n/a");
+    setText("#usdInrStatus", monitorRefreshing() ? "USD/INR refreshing" : `USD/INR ${loadingText("rate", DATA_LOADING_ETA_MARKET)}`);
   }
 
   for (const item of items) {
@@ -3368,7 +3492,7 @@ function renderCommodities(items, usdInr) {
       <span>${escapeHtml(item.category)}</span>
       <strong>${escapeHtml(item.name)}</strong>
       <p>${formatMoney(item.price, "USD")} <em class="${directionClass}">${signed(item.changePercent)}%</em></p>
-      <small>${Number.isFinite(item.inrPrice) ? `${formatMoney(item.inrPrice, "INR")} at USD/INR ${formatNumber(item.usdInr)}` : "INR conversion n/a"}</small>
+      <small>${Number.isFinite(item.inrPrice) ? `${formatMoney(item.inrPrice, "INR")} at USD/INR ${formatNumber(item.usdInr)}` : `INR conversion ${loadingText("rate", DATA_LOADING_ETA_MARKET)}`}</small>
       <small>1W ${formatPercentValue(item.oneWeek)} · 1M ${formatPercentValue(item.oneMonth)} · ${escapeHtml(item.trend)}</small>
     `;
     container.appendChild(card);
@@ -3413,7 +3537,7 @@ function renderBreakoutRows(items) {
 function rangeBreakoutText(item, key, label) {
   const range = item[key] || {};
   if (!range.high) {
-    return `${label} n/a`;
+    return `${label} ${loadingText("range", DATA_LOADING_ETA_MARKET)}`;
   }
   const state = range.breakout ? "breakout" : range.watch ? "watch" : range.tight ? "tight" : "wide";
   return `${label} ${state} ${formatMoney(range.high, "INR")} (${formatPercentValue(range.widthPercent)})`;
@@ -3474,9 +3598,10 @@ function renderLevels(levels, currency, technicalLevels) {
   document.querySelector("#breakoutTrigger").textContent = formatMoney(levels.breakoutTrigger, currency);
   document.querySelector("#invalidation").textContent = formatMoney(levels.invalidation, currency);
   document.querySelector("#targets").textContent = levels.targets.map((value) => formatMoney(value, currency)).join(" / ");
-  document.querySelector("#riskReward").textContent = levels.riskReward ? `${levels.riskReward}:1` : "n/a";
+  document.querySelector("#riskReward").textContent = Number.isFinite(levels.riskReward) ? `${levels.riskReward}:1` : loadingText("risk reward");
   document.querySelector("#supportZones").textContent = formatZones(technicalLevels && technicalLevels.supportZones, currency, "S");
   document.querySelector("#resistanceZones").textContent = formatZones(technicalLevels && technicalLevels.resistanceZones, currency, "R");
+  validateRenderedData(document.querySelector(".levels-panel"));
 }
 
 function renderTechnical(technical, currency) {
@@ -3494,7 +3619,7 @@ function renderTechnical(technical, currency) {
   ];
 
   if (relativeStrength.available) {
-    rows.push([`RS vs ${relativeStrength.benchmarkName}`, relativeStrength.label || "n/a"]);
+    rows.push([`RS vs ${relativeStrength.benchmarkName}`, displayText(relativeStrength.label, "relative strength", DATA_LOADING_ETA_PROVIDER)]);
   }
 
   renderTable("#technicalMetrics", rows);
@@ -3506,7 +3631,7 @@ function renderTechnical(technical, currency) {
 
 function renderFundamentals(metrics, signals, currency) {
   const rows = [
-    ["Sector", metrics.sector || "n/a"],
+    ["Sector", displayText(metrics.sector, "sector", DATA_LOADING_ETA_PROVIDER)],
     ["Market cap", formatLarge(metrics.marketCap, currency)],
     ["Revenue", formatLarge(metrics.revenue, currency)],
     ["Net profit", formatLarge(metrics.netIncome, currency)],
@@ -3517,7 +3642,7 @@ function renderFundamentals(metrics, signals, currency) {
     ["Debt/equity", formatNumber(metrics.debtToEquity)],
     ["Promoter holding", formatRatioPercent(metrics.promoterHolding)],
     ["Target mean", formatMoney(metrics.targetMeanPrice, currency)],
-    ["Analyst view", metrics.recommendationKey || "n/a"]
+    ["Analyst view", displayText(metrics.recommendationKey, "analyst view", DATA_LOADING_ETA_PROVIDER)]
   ];
 
   renderTable("#fundamentalMetrics", rows);
@@ -3591,7 +3716,7 @@ function renderEvents(events) {
     row.className = "event-item";
     row.innerHTML = `
       <span>${escapeHtml(event.type)}${event.date ? " - " + escapeHtml(event.date) : ""}</span>
-      <strong>${escapeHtml(event.detail || "n/a")}</strong>
+      <strong>${displayHtml(event.detail, "event detail", DATA_LOADING_ETA_PROVIDER)}</strong>
     `;
     container.appendChild(row);
   }
@@ -3621,7 +3746,7 @@ function renderGrowthDrivers(data, currency) {
             <span>${escapeHtml(row.name)}</span>
             <strong>${formatRatioPercent(row.latest)}</strong>
             <em class="${changeClass(row.changePoints)}">${formatPointChange(row.changePoints)}</em>
-            <small>${escapeHtml(row.trend || "n/a")}</small>
+            <small>${displayHtml(row.trend, "ownership trend", DATA_LOADING_ETA_PROVIDER)}</small>
           </div>
         `;
       })
@@ -3687,12 +3812,12 @@ function renderGrowthDrivers(data, currency) {
         <strong>${title}</strong>
         <p>${escapeHtml(sectorAnalysis.summary || sector.summary || "")}</p>
         <div class="sector-analysis-metrics">
-          <span>Trend <em>${escapeHtml(sector.trend || "n/a")}</em></span>
+          <span>Trend <em>${displayHtml(sector.trend, "trend", DATA_LOADING_ETA_MARKET)}</em></span>
           <span>Mcap <em class="${changeClass(sector.marketCapChangePercent)}">${signed(sector.marketCapChangePercent)}%</em></span>
           <span>A/D <em>${formatNumber(sector.advance)} / ${formatNumber(sector.decline)}</em></span>
           <span>PE <em>${formatNumber(sector.sectorPe)}</em></span>
           <span>NP YoY <em class="${changeClass(sector.earningsYoyChange)}">${signed(sector.earningsYoyChange)}%</em></span>
-          <span>Rank <em>${sectorAnalysis.rank ? `#${sectorAnalysis.rank}` : "n/a"}</em></span>
+          <span>Rank <em>${sectorAnalysis.rank ? `#${sectorAnalysis.rank}` : loadingText("rank", DATA_LOADING_ETA_MARKET)}</em></span>
         </div>
       </div>
     `;
@@ -3728,7 +3853,7 @@ function renderQuality(quality) {
   renderTable("#qualityMetrics", [
     ["Confidence", `${quality.score}/100 (${quality.label})`],
     ["Chart candles", `${formatNumber(quality.chartPoints)} (max 1Y)`],
-    ["Data sources", quality.dataSources || "n/a"]
+    ["Data sources", displayText(quality.dataSources, "data sources", DATA_LOADING_ETA_PROVIDER)]
   ]);
   renderAccuracyChecks(quality.checks || []);
   renderList("#qualityWarnings", [
@@ -3813,8 +3938,9 @@ function renderSwingTradePlan(plan, currency) {
   list.innerHTML = "";
 
   if (!plan || !Array.isArray(plan.plans) || !plan.plans.length) {
-    badge.textContent = "Plan unavailable";
-    summary.textContent = "A swing trade plan could not be generated from the available data.";
+    badge.textContent = loadingText("plan", DATA_LOADING_ETA_PROVIDER);
+    summary.textContent = loadingText("swing trade plan", DATA_LOADING_ETA_PROVIDER);
+    validateRenderedData(document.querySelector(".swing-plan-panel"));
     return;
   }
 
@@ -3852,8 +3978,8 @@ function renderSwingTradePlan(plan, currency) {
         </div>
         <div>
           <span>Exit targets</span>
-          <strong>${targets || "n/a"}</strong>
-          <small>Risk/reward ${Number.isFinite(item.riskReward) ? `${item.riskReward}:1` : "n/a"}</small>
+          <strong>${targets || loadingText("targets")}</strong>
+          <small>Risk/reward ${Number.isFinite(item.riskReward) ? `${item.riskReward}:1` : loadingText("risk reward")}</small>
         </div>
         <div>
           <span>Stop loss</span>
@@ -3896,6 +4022,7 @@ function renderReferences(references) {
 function renderTable(selector, rows) {
   const container = document.querySelector(selector);
   container.innerHTML = "";
+  const fragment = document.createDocumentFragment();
   for (const [label, value] of rows) {
     const row = document.createElement("div");
     const name = document.createElement("span");
@@ -3903,18 +4030,23 @@ function renderTable(selector, rows) {
     name.textContent = label;
     amount.textContent = value;
     row.append(name, amount);
-    container.appendChild(row);
+    fragment.appendChild(row);
   }
+  container.appendChild(fragment);
+  validateRenderedData(container);
 }
 
 function renderList(selector, items) {
   const list = document.querySelector(selector);
   list.innerHTML = "";
+  const fragment = document.createDocumentFragment();
   for (const item of items) {
     const li = document.createElement("li");
     li.textContent = item;
-    list.appendChild(li);
+    fragment.appendChild(li);
   }
+  list.appendChild(fragment);
+  validateRenderedData(list);
 }
 
 function redrawChart() {
@@ -4229,7 +4361,7 @@ function drawCandlesticks(context, series, padding, plotWidth, plotHeight, min, 
 
 function formatZones(levels, currency, prefix) {
   if (!Array.isArray(levels) || !levels.length) {
-    return "n/a";
+    return loadingText("levels", DATA_LOADING_ETA_PROVIDER);
   }
   return levels
     .slice(0, 3)
@@ -4250,7 +4382,7 @@ function colorToRgba(hex, alpha) {
 
 function formatMoney(value, currency) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("price");
   }
   return safeNumberFormat({
     style: currency ? "currency" : "decimal",
@@ -4273,7 +4405,7 @@ function formatCompactMoney(value, currency) {
 
 function formatLarge(value, currency) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("value");
   }
   return safeNumberFormat({
     style: currency ? "currency" : "decimal",
@@ -4285,7 +4417,7 @@ function formatLarge(value, currency) {
 
 function formatSignedLarge(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("change");
   }
   const prefix = value >= 0 ? "+" : "-";
   return `${prefix}${formatLarge(Math.abs(value), "")}`;
@@ -4293,21 +4425,21 @@ function formatSignedLarge(value) {
 
 function formatNumber(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("value");
   }
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
 }
 
 function formatRatioPercent(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("percent");
   }
   return `${(value * 100).toFixed(2)}%`;
 }
 
 function formatExpenseRatio(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("expense ratio", DATA_LOADING_ETA_PROVIDER);
   }
   const percent = value <= 1 ? value * 100 : value;
   return `${percent.toFixed(2)}%`;
@@ -4315,21 +4447,21 @@ function formatExpenseRatio(value) {
 
 function formatPercentValue(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("percent");
   }
   return `${value.toFixed(2)}%`;
 }
 
 function formatPointChange(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("change");
   }
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)} pp`;
 }
 
 function formatHoldingChange(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("holding change", DATA_LOADING_ETA_PROVIDER);
   }
   if (Math.abs(value) < 0.005) {
     return "No change";
@@ -4349,12 +4481,15 @@ function numericOr(value, fallback) {
 }
 
 function scoreText(value) {
+  if (!Number.isFinite(value)) {
+    return loadingText("score");
+  }
   return `${Math.round(value)}/100`;
 }
 
 function signed(value) {
   if (!Number.isFinite(value)) {
-    return "n/a";
+    return loadingText("change");
   }
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 }

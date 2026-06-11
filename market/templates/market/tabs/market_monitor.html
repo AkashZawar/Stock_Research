@@ -3,14 +3,14 @@
             <div>
               <p class="eyebrow">Market Monitor</p>
               <h2>Primary opportunities and detailed market internals</h2>
-              <p class="muted" id="monitorGenerated">Not loaded yet.</p>
+              <p class="muted" id="monitorGenerated"><span class="data-loading"><span class="data-loading-dot"></span><span>Loading monitor...</span><small>ETA on refresh</small></span></p>
             </div>
             <button type="button" id="refreshMonitor">Refresh Monitor</button>
           </section>
 
           <section id="monitorLoading" class="loading-state is-hidden">
             <div class="spinner"></div>
-            <p>Loading market monitor...</p>
+            <p>Loading market monitor... <span class="eta-blur">ETA 15-45s</span></p>
           </section>
 
           <section id="monitorError" class="error-state is-hidden"></section>

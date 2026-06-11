@@ -1,16 +1,16 @@
         <section id="recommendationsView" class="tab-view is-hidden">
           <section class="monitor-header">
             <div>
-              <p class="eyebrow">Recomendations</p>
+              <p class="eyebrow">Recommendations</p>
               <h2>Analyst and FII/DII backed stock ideas</h2>
-              <p class="muted" id="recommendationsGenerated">Not loaded yet.</p>
+              <p class="muted" id="recommendationsGenerated"><span class="data-loading"><span class="data-loading-dot"></span><span>Loading list...</span><small>ETA on refresh</small></span></p>
             </div>
             <button type="button" id="refreshRecommendations">Refresh List</button>
           </section>
 
           <section id="recommendationsLoading" class="loading-state is-hidden">
             <div class="spinner"></div>
-            <p>Loading recommendations...</p>
+            <p>Loading recommendations... <span class="eta-blur">ETA 15-45s</span></p>
           </section>
 
           <section id="recommendationsError" class="error-state is-hidden"></section>

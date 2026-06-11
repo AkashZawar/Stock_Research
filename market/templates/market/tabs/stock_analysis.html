@@ -6,7 +6,7 @@
 
           <section id="loadingState" class="loading-state is-hidden">
             <div class="spinner"></div>
-            <p>Building report...</p>
+            <p>Building report... <span class="eta-blur">ETA 10-30s</span></p>
           </section>
 
           <section id="errorState" class="error-state is-hidden"></section>
@@ -22,7 +22,7 @@
               <div id="marketClock" class="market-clock is-closed" aria-live="polite">
                 <span class="market-clock-icon" aria-hidden="true"></span>
                 <div>
-                  <span id="marketClockTime">--:--</span>
+                  <span id="marketClockTime">Loading...</span>
                   <strong id="marketClockStatus">Market status</strong>
                   <small id="marketClockDetail">Search a stock to load exchange session time.</small>
                 </div>

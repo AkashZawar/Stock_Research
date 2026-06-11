@@ -6246,3 +6246,189 @@ h3 {
     height: 300px;
   }
 }
+
+/* Bootstrap 5.3 dashboard refinement */
+:root {
+  --bs-body-bg: #f4f6f8;
+  --bs-body-color: #24313d;
+  --bs-primary: #0f766e;
+  --bs-primary-rgb: 15, 118, 110;
+  --bs-link-color: #0f766e;
+  --bs-link-hover-color: #0b5f59;
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --ink: #24313d;
+  --heading: #1a2732;
+  --muted: #647382;
+  --line: #dbe3ea;
+  --soft: #eef3f6;
+  --primary: #0f766e;
+  --primary-soft: #e3f3ef;
+  --primary-shadow: rgba(15, 118, 110, 0.24);
+  --teal: #0f766e;
+  --teal-dark: #0b5f59;
+  --blue: #2563eb;
+  --amber: #b7791f;
+  --gold: #f5a524;
+  --red: #c2410c;
+  --green: #15803d;
+  --emerald: #059669;
+  --navy: #1f2937;
+  --cyan: #0891b2;
+  --indigo: #4f46e5;
+  --violet: #7c3aed;
+  --rose: #be123c;
+  --slate-accent: #475569;
+  --shadow: 0 0.35rem 1.1rem rgba(36, 49, 61, 0.08);
+  --shadow-lg: 0 1rem 2.5rem rgba(36, 49, 61, 0.14);
+}
+
+body {
+  background:
+    linear-gradient(180deg, rgba(15, 118, 110, 0.06), transparent 18rem),
+    var(--bg);
+}
+
+.layout-menu,
+.topbar,
+.quote-panel,
+.chart-panel,
+.levels-panel,
+.analysis-panel,
+.metric-card,
+.monitor-header,
+.empty-state,
+.loading-state,
+.error-state {
+  border: 1px solid rgba(219, 227, 234, 0.78);
+}
+
+.topbar {
+  border-top: 4px solid var(--primary);
+}
+
+.layout-menu {
+  border-top: 4px solid var(--blue);
+}
+
+.tab-button.is-active {
+  color: #ffffff;
+  background: var(--primary);
+  box-shadow: 0 0.35rem 0.9rem var(--primary-shadow);
+}
+
+.tab-button:hover:not(.is-active) {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.search-row button,
+.asset-search-row button,
+.monitor-header button,
+.trade-form button,
+.watchlist-price-check button,
+.asset-shortlist-card button {
+  background: var(--primary);
+}
+
+.search-row button:hover,
+.asset-search-row button:hover,
+.monitor-header button:hover,
+.trade-form button:hover,
+.watchlist-price-check button:hover,
+.asset-shortlist-card button:hover {
+  background: var(--teal-dark);
+}
+
+.metric-card,
+.analysis-panel,
+.chart-panel,
+.levels-panel {
+  content-visibility: auto;
+  contain-intrinsic-size: 18rem;
+}
+
+.topbar,
+.quote-panel,
+.monitor-header {
+  content-visibility: visible;
+}
+
+.monitor-table,
+.metric-table,
+.levels-list,
+.price-block,
+.market-mini-card,
+.commodity-card {
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-table tbody tr:hover td {
+  background: #f8fbfb;
+}
+
+.data-loading {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  max-width: 100%;
+  min-height: 1.45rem;
+  color: var(--muted);
+  vertical-align: middle;
+  white-space: normal;
+}
+
+.data-loading-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.28);
+  animation: data-pulse 1.25s ease-in-out infinite;
+}
+
+.data-loading small,
+.eta-blur {
+  display: inline-flex;
+  margin-left: 0.15rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  color: #647382;
+  background: #eef3f6;
+  filter: blur(0.25px);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.is-loading-value,
+.has-loading-value {
+  color: var(--muted);
+}
+
+@keyframes data-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.28);
+    transform: scale(0.92);
+  }
+  70% {
+    box-shadow: 0 0 0 0.42rem rgba(15, 118, 110, 0);
+    transform: scale(1);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(15, 118, 110, 0);
+    transform: scale(0.92);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
