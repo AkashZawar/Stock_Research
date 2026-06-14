@@ -1,4 +1,11 @@
 {% load static %}
+{% comment %}
+  home.html - the Google-style landing page served at / by core.views.home.
+  Full-screen market background, a single search box with AJAX suggestions
+  (/api/search) and "top picks" links from the cached recommendations.
+  Submitting sends the user to /app?symbol=... which auto-runs the report.
+  Self-contained: inline styles + inline suggestion script; uses public/cursor.js.
+{% endcomment %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -12,6 +19,7 @@
       :root {
         --home-accent: #34d399;
         --home-ink: #f8fafc;
+        --cursor-accent: #34d399;
       }
       * { box-sizing: border-box; }
       html, body { height: 100%; margin: 0; }
@@ -165,10 +173,27 @@
         font-size: 12px;
         padding: 0 20px;
       }
+      /* iOS Safari renders background-attachment: fixed poorly; use scroll on smaller/touch screens. */
+      @media (max-width: 820px) {
+        .home-hero { background-attachment: scroll; }
+      }
+      @media (max-width: 560px) {
+        .home-hero { padding: 24px 16px 48px; }
+        .home-brand {
+          position: static;
+          justify-content: center;
+          margin: 0 auto 18px;
+        }
+      }
       @media (max-width: 520px) {
         .home-search { flex-direction: column; border-radius: 22px; padding: 14px; gap: 12px; }
         .home-search input { width: 100%; text-align: center; }
         .home-search button { width: 100%; }
+      }
+      @media (max-width: 380px) {
+        .home-title { font-size: 30px; }
+        .home-subtitle { font-size: 14px; }
+        .home-examples a { font-size: 12px; padding: 6px 11px; }
       }
     </style>
   </head>
@@ -202,7 +227,7 @@
           <button type="submit">Analyze</button>
         </form>
 
-        <div class="home-examples">
+        <div class="home-examples" id="homeExamples" data-app-url="{% url 'core:index' %}">
           <span>Top picks:</span>
           {% for item in suggestions %}
           <a href="{% url 'core:index' %}?symbol={{ item.symbol|urlencode }}">{{ item.label }}</a>
@@ -276,6 +301,42 @@
           list.appendChild(fragment);
         }
       })();
+
+      // Populate "Top picks" from the recommendations list on every load.
+      (function () {
+        const wrap = document.getElementById("homeExamples");
+        if (!wrap) {
+          return;
+        }
+        const appUrl = wrap.getAttribute("data-app-url") || "/app";
+
+        fetch("/api/recommendations")
+          .then((response) => (response.ok ? response.json() : null))
+          .then((payload) => {
+            const rows = (payload && payload.results) || [];
+            const picks = rows
+              .map((row) => String(row.analysisSymbol || row.symbol || "").trim())
+              .filter(Boolean)
+              .slice(0, 5);
+            if (!picks.length) {
+              return;
+            }
+
+            wrap.querySelectorAll("a").forEach((link) => link.remove());
+            const fragment = document.createDocumentFragment();
+            for (const symbol of picks) {
+              const link = document.createElement("a");
+              link.href = `${appUrl}?symbol=${encodeURIComponent(symbol)}`;
+              link.textContent = symbol.split(".")[0] || symbol;
+              fragment.appendChild(link);
+            }
+            wrap.appendChild(fragment);
+          })
+          .catch(() => {
+            /* keep the server-rendered default picks on failure */
+          });
+      })();
     </script>
+    <script src="{% static 'cursor.js' %}?v=20260614-mobile-1" defer></script>
   </body>
 </html>

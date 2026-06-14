@@ -1,3 +1,4 @@
+"""URL route for the Recommendations tab (``/api/recommendations``)."""
 from django.urls import path
 
 from . import views

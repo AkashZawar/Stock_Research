@@ -1,3 +1,4 @@
+"""App config for the ETF Analysis tab."""
 from django.apps import AppConfig
 
 

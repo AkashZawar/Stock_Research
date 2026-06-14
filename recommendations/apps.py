@@ -1,3 +1,4 @@
+"""App config for the Recommendations tab."""
 from django.apps import AppConfig
 
 

@@ -1,3 +1,30 @@
+"""The analysis engine: all market-data fetching and report building.
+
+This is the shared "brain" of the app. It contains no Django request/response
+code - views call into it and serialise the returned dicts to JSON. It is a
+large module, so locate functions by the area they belong to rather than
+reading top to bottom:
+
+- Data providers: Yahoo Finance, SEC, Screener.in, Groww/Upstox, NSE and
+  Moneycontrol fetch/parse helpers (e.g. ``get_quote``, ``get_chart``,
+  ``get_screener_fundamentals``, ``fetch_nse_json``).
+- Technical analysis: indicators and patterns (SMA/EMA, RSI, ATR,
+  support/resistance, candlestick and relative-strength helpers).
+- Fundamentals & ownership: financials, quarterly results, promoter/FII/DII
+  shareholding trends and growth catalysts.
+- Stock report: ``resolve_symbol_input`` + ``analyze_symbol`` build the full
+  Stock Analysis payload, plus the swing-trade plan and quality checks.
+- Asset report: ``analyze_asset`` for ETFs and mutual funds.
+- Recommendations: ``get_recommendations`` / ``build_recommendations``.
+- Market monitor: ``build_live_market_monitor`` plus NSE/Moneycontrol
+  snapshots, sector OI, gainers/losers and heatmaps.
+- Caching & concurrency: ``cached`` / ``get_cached`` / ``set_cached`` /
+  ``clear_cache`` and the threaded ``settle_map`` / ``settle_named_loaders``.
+- Symbol validation: ``INVALID_INSTRUMENT_MESSAGE``,
+  ``invalid_instrument_payload`` and ``instrument_suggestions``.
+
+Data comes from public endpoints; replace with a licensed feed for production.
+"""
 import html
 import json
 import math

@@ -1,3 +1,4 @@
+"""App config for the Mutual Funds tab."""
 from django.apps import AppConfig
 
 

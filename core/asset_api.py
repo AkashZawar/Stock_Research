@@ -1,3 +1,11 @@
+"""Shared view logic for the ETF and mutual-fund tabs.
+
+The ``etf_analysis`` and ``mutual_funds`` apps both reuse these helpers,
+passing their asset type ("etf" or "mutual-fund"):
+- ``search_asset(request, asset_type)``: symbol/scheme search suggestions.
+- ``analyze_asset(request, asset_type)``: build the full asset report and
+  log the request.
+"""
 from django.http import JsonResponse
 
 from . import services

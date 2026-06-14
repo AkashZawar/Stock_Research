@@ -1,3 +1,11 @@
+"""Views for the Market Monitor tab.
+
+- ``market_monitor`` (``/api/market-monitor``): returns the cached market
+  monitor, kicking off a background refresh when data is stale. Supports
+  ``?live=1`` and ``?refresh=1``.
+- ``cache_live_market_monitor`` / ``mark_monitor_refreshing``: helpers that
+  assemble and flag the live payload built by ``core.services``.
+"""
 from django.http import JsonResponse
 
 from core import services

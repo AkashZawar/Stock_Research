@@ -34,6 +34,28 @@ owns its own `views.py`, `urls.py`, and `templates/<app>/tab.html`.
 `core/templates/core/base.html` is the page shell; it includes each tab app's
 `tab.html`, so editing a tab only touches that app's folder.
 
+## Folder guide (for new contributors)
+
+Every folder has its own `README.md` describing each file in it, and every
+source file starts with a short header comment explaining its purpose. Start
+here:
+
+- [`core/`](core/README.md) - shared analysis engine, models, helpers, page shells, cross-cutting APIs
+- [`stock_analysis/`](stock_analysis/README.md) - Stock Analysis tab
+- [`recommendations/`](recommendations/README.md) - Recommendations tab
+- [`market_monitor/`](market_monitor/README.md) - Market Monitor tab
+- [`etf_analysis/`](etf_analysis/README.md) - ETF Analysis tab
+- [`mutual_funds/`](mutual_funds/README.md) - Mutual Funds tab
+- [`stockdesk/`](stockdesk/README.md) - Django project config (settings, URLs, WSGI/ASGI)
+- [`public/`](public/README.md) - shared static assets (`app.js`, `styles.css`, `cursor.js`)
+
+### Request flow
+
+1. The browser loads `/` (landing page) or `/app` (workspace shell).
+2. `public/app.js` calls a JSON API (e.g. `/api/analyze`).
+3. The matching tab app view calls into `core/services.py` to build the data.
+4. The view returns JSON; `app.js` renders it into that tab.
+
 ## API
 
 - `/api/search?q=ABBOT%20india`

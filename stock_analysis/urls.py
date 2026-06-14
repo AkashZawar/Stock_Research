@@ -1,3 +1,4 @@
+"""URL routes for the Stock Analysis tab (``/api/search``, ``/api/analyze``)."""
 from django.urls import path
 
 from . import views

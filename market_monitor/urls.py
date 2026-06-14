@@ -1,3 +1,4 @@
+"""URL route for the Market Monitor tab (``/api/market-monitor``)."""
 from django.urls import path
 
 from . import views

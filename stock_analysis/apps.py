@@ -1,3 +1,4 @@
+"""App config for the Stock Analysis tab."""
 from django.apps import AppConfig
 
 

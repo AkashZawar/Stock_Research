@@ -1,3 +1,4 @@
+"""WSGI entry point for synchronous servers (gunicorn, uWSGI, etc.)."""
 import os
 
 from django.core.wsgi import get_wsgi_application

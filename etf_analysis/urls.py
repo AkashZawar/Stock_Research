@@ -1,3 +1,4 @@
+"""URL routes for the ETF Analysis tab (``/api/etf/search``, ``/api/etf/analyze``)."""
 from django.urls import path
 
 from . import views

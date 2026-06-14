@@ -1,3 +1,4 @@
+"""App config for the Market Monitor tab."""
 from django.apps import AppConfig
 
 

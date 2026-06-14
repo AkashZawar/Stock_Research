@@ -1,3 +1,16 @@
+"""Shared request/form helpers used by views across the apps.
+
+Functions:
+- ``record_stock_search(...)``: best-effort persist of a ``StockSearchLog``
+  row for an analyze/search request (never raises).
+- ``client_ip(request)``: safe client IP (honours ``X-Forwarded-For``).
+- ``describe_device(user_agent)``: classify the user agent into a device
+  type/label (mobile, tablet, desktop, bot, unknown).
+- ``read_json_body(request)``: parse and validate a JSON request body.
+- ``save_trade_reference(...)`` / ``save_watchlist_item(...)``: validate a
+  payload and persist the related model (used by the core CRUD APIs).
+- ``decimal_from_payload(...)``: parse an optional/required decimal field.
+"""
 import json
 import logging
 from decimal import Decimal, InvalidOperation

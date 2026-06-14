@@ -1,3 +1,10 @@
+"""URL routes owned by the core app.
+
+Maps the landing page (``/``), the workspace shell (``/app``), and the
+cross-cutting JSON APIs (``/api/search-logs``, ``/api/watchlist`` + detail,
+``/api/trade-references`` + detail). Included at the project root by
+``stockdesk/urls.py``.
+"""
 from django.urls import path
 
 from . import views

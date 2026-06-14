@@ -1,3 +1,17 @@
+/*
+ * styles.css - shared stylesheet for the whole app (loaded by core/base.html).
+ *
+ * Structure (top to bottom):
+ * - :root design tokens (colors, shadows) and base/reset rules.
+ * - Layout: .app-shell sidebar + page, .topbar, .tabs, .workspace.
+ * - Components: panels, metric cards, grids, tables, charts, modals, forms.
+ * - A later "Bootstrap 5.3 dashboard refinement" block re-themes some tokens.
+ * - Responsive @media blocks (1180 / 980 / 860 / 760 / 620 / 430 px) and a
+ *   final "Mobile base-sizing refinements" layer near the end.
+ *
+ * The landing page (core/home.html) is styled separately with its own inline
+ * styles. The animated cursor is in public/cursor.js.
+ */
 :root {
   --bg: #eef2f6;
   --panel: #ffffff;
@@ -6430,5 +6444,109 @@ body {
     transition-duration: 0.001ms !important;
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+/* ============================================================
+   Mobile base-sizing refinements (final layer)
+   Complements the existing 1180 / 860 / 620 breakpoints to keep
+   the workspace usable down to ~320px without horizontal scroll.
+   ============================================================ */
+
+/* Defensive: no element should force the page to scroll sideways. */
+.app-shell,
+.layout-page,
+.workspace,
+.tab-view {
+  min-width: 0;
+  max-width: 100%;
+}
+
+img,
+canvas,
+svg,
+video {
+  max-width: 100%;
+}
+
+@media (max-width: 860px) {
+  /* Smooth, chrome-free horizontal tab strip on touch devices. */
+  .menu-list.tabs {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .menu-list.tabs::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Stack every remaining multi-column section grid. */
+  .main-grid,
+  .detail-grid,
+  .trade-grid,
+  .market-signal-grid,
+  .wide-grid,
+  .nse-data-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Keep long values and labels inside their panels. */
+  .quote-panel,
+  .section-summary,
+  .metric-table,
+  .levels-list dd,
+  .swing-plan-list,
+  .reference-links {
+    overflow-wrap: anywhere;
+  }
+
+  /* Tighter data tables (still horizontally swipeable via .table-wrap). */
+  .monitor-table th,
+  .monitor-table td {
+    padding: 9px 8px;
+  }
+}
+
+@media (max-width: 430px) {
+  .app-shell {
+    padding: 0.5rem;
+  }
+
+  .layout-menu,
+  .topbar,
+  .quote-panel,
+  .chart-panel,
+  .levels-panel,
+  .analysis-panel,
+  .metric-card,
+  .monitor-header,
+  .empty-state,
+  .loading-state,
+  .error-state {
+    padding: 0.85rem;
+  }
+
+  .topbar h1,
+  h1 {
+    font-size: 1.18rem;
+  }
+
+  h2 {
+    font-size: 1.05rem;
+  }
+
+  .hero-copy {
+    font-size: 0.9rem;
+  }
+
+  #priceChart {
+    height: 260px;
+  }
+
+  /* Brand subtitle is non-essential on the smallest screens. */
+  .app-brand small {
+    display: none;
   }
 }

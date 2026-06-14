@@ -1,3 +1,14 @@
+"""Database models for the application (kept here so migrations stay in one app).
+
+Models:
+- ``TradeReference``: a manually tracked trade idea (buy/sell/stop prices,
+  status, note) with computed expected-return and risk percentages.
+- ``WatchlistItem``: a saved symbol with optional buy/sell/check prices.
+- ``StockSearchLog``: an audit row written on each analyze/search request
+  (symbol, device, IP, status), surfaced by the search-logs API.
+
+Each model exposes ``as_dict()`` to serialise itself for the JSON APIs.
+"""
 from decimal import Decimal
 
 from django.db import models

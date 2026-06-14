@@ -1,3 +1,13 @@
+"""Unit and integration tests for the analysis engine and APIs.
+
+Covers swing-trade plans, ownership/shareholding parsing, recommendations,
+relative strength, candlestick patterns, the market clock, caching, the
+market-monitor endpoint, open-interest reports, the watchlist API, NSE
+market snapshots, asset (ETF/MF) analysis, search suggestions, history
+windows, quality reports, and the search-log API.
+
+Run with ``python manage.py test``.
+"""
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo

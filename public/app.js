@@ -1,3 +1,23 @@
+/*
+ * app.js - the single-page frontend for the workspace shell (/app).
+ *
+ * Responsibilities:
+ * - Tab switching between Stock Analysis, Recommendations, Market Monitor,
+ *   ETF Analysis and Mutual Funds (setActiveTab).
+ * - Calling the JSON APIs and rendering the results:
+ *     /api/search, /api/analyze              -> stock report
+ *     /api/etf/* , /api/mutual-funds/*       -> asset reports
+ *     /api/market-monitor                    -> monitor tables/heatmaps
+ *     /api/recommendations                   -> recommendation table
+ *     /api/watchlist, /api/trade-references  -> saved lists
+ *     /api/search-logs                       -> search audit log
+ * - Drawing the price chart on the <canvas>, search suggestions, and the
+ *   invalid-symbol popup.
+ * - On load it reads ?symbol=... (from the landing page) and auto-runs analyze.
+ *
+ * Top of file: DOM element lookups. Below: event wiring, then fetch/render
+ * helpers grouped by feature.
+ */
 const form = document.querySelector("#analysisForm");
 const symbolInput = document.querySelector("#symbolInput");
 const suggestions = document.querySelector("#symbolSuggestions");

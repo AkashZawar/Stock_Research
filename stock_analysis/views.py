@@ -1,3 +1,9 @@
+"""Views for the Stock Analysis tab.
+
+- ``search``: ticker/name search suggestions (``/api/search``).
+- ``analyze``: build the full stock research report (``/api/analyze``) and
+  log the request. The heavy lifting lives in ``core.services``.
+"""
 from django.http import JsonResponse
 
 from core import services

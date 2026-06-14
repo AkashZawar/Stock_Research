@@ -1,3 +1,4 @@
+"""URL routes for the Mutual Funds tab (``/api/mutual-funds/search``, ``/analyze``)."""
 from django.urls import path
 
 from . import views

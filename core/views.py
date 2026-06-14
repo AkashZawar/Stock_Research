@@ -1,3 +1,17 @@
+"""Core views: the page shells plus the cross-cutting JSON APIs.
+
+Views:
+- ``home``: the Google-style landing page (``core/home.html``) showing the
+  top recommendation picks as quick analyze links.
+- ``index``: the main single-page workspace shell (``core/base.html``).
+- ``search_logs``: recent analyze/search audit log (GET).
+- ``watchlist_items`` / ``watchlist_item_detail``: watchlist CRUD.
+- ``trade_references`` / ``trade_reference_detail``: trade-idea CRUD.
+
+Helper:
+- ``recommended_home_suggestions``: top picks pulled from the cached
+  recommendations payload (falls back to defaults) for the landing page.
+"""
 from django.http import HttpResponseNotAllowed
 from django.http import JsonResponse
 from django.shortcuts import render
