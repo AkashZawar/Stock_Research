@@ -6,12 +6,15 @@
           Populated by public/app.js from /api/analyze and /api/search.
         {% endcomment %}
         <section id="analysisView" class="tab-view">
-
+          <section id="emptyState" class="empty-state empty-state--art">
+            <figure class="empty-state-figure">
+              <img class="empty-state-art" src="{% static 'empty-bull.png' %}" alt="Angry stock market bull">
               <figcaption class="empty-state-caption">
                 <h2>You haven't looked for anything yet...</h2>
                 <p>Search a ticker to generate a chart report using available history up to one year, with fundamentals, technicals, ownership/catalyst checks, and research levels.</p>
               </figcaption>
-
+            </figure>
+          </section>
 
           <section id="loadingState" class="loading-state is-hidden">
             <div class="spinner"></div>

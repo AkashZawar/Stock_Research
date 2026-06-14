@@ -26,19 +26,13 @@ from .view_helpers import save_trade_reference
 from .view_helpers import save_watchlist_item
 
 
-DEFAULT_HOME_SUGGESTIONS = [
-    {"symbol": "RELIANCE", "label": "RELIANCE"},
-    {"symbol": "TCS", "label": "TCS"},
-    {"symbol": "INFY", "label": "INFY"},
-    {"symbol": "HDFCBANK", "label": "HDFCBANK"},
-]
-
-
 def recommended_home_suggestions(limit=5):
-    """Top stocks from the cached recommendations, falling back to defaults.
+    """Top picks from the cached recommendations (empty list if not built yet).
 
-    Uses only the cached payload so the landing page stays instant and never
-    triggers the slow recommendations build on load.
+    Uses only the cache so the landing page stays instant; the page's script
+    fetches /api/recommendations to fill or refresh the picks client-side. When
+    the cache is warm this returns the real picks so they render immediately
+    with no flash of placeholder content.
     """
     try:
         payload = services.get_cached("recommendations")
@@ -53,7 +47,7 @@ def recommended_home_suggestions(limit=5):
         label = symbol.split(".")[0] or symbol
         suggestions.append({"symbol": symbol, "label": label})
 
-    return suggestions if len(suggestions) >= 3 else DEFAULT_HOME_SUGGESTIONS
+    return suggestions
 
 
 def home(request):

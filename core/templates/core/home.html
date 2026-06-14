@@ -20,6 +20,7 @@
         --home-accent: #34d399;
         --home-ink: #f8fafc;
         --cursor-accent: #34d399;
+        --loading-accent: #34d399;
       }
       * { box-sizing: border-box; }
       html, body { height: 100%; margin: 0; }
@@ -152,6 +153,13 @@
         transition: border-color 0.12s ease, color 0.12s ease;
       }
       .home-examples a:hover { border-color: var(--home-accent); color: #fff; }
+      .home-picks { display: contents; }
+      .home-pick-loading {
+        font-style: italic;
+        opacity: 0.85;
+        animation: home-pick-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes home-pick-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
       .home-enter {
         margin-top: 40px;
         display: inline-block;
@@ -196,6 +204,7 @@
         .home-examples a { font-size: 12px; padding: 6px 11px; }
       }
     </style>
+    <script src="{% static 'loading.js' %}?v=20260614-pick-1"></script>
   </head>
   <body>
     <main class="home-hero">
@@ -229,9 +238,13 @@
 
         <div class="home-examples" id="homeExamples" data-app-url="{% url 'core:index' %}">
           <span>Top picks:</span>
-          {% for item in suggestions %}
-          <a href="{% url 'core:index' %}?symbol={{ item.symbol|urlencode }}">{{ item.label }}</a>
-          {% endfor %}
+          <span id="homePicks" class="home-picks">
+            {% for item in suggestions %}
+            <a href="{% url 'core:index' %}?symbol={{ item.symbol|urlencode }}">{{ item.label }}</a>
+            {% empty %}
+            <span class="home-pick-loading" aria-live="polite">Loading top picks&hellip;</span>
+            {% endfor %}
+          </span>
         </div>
 
         <a class="home-enter" href="{% url 'core:index' %}">Open the full research workspace &rarr;</a>
@@ -303,40 +316,41 @@
       })();
 
       // Populate "Top picks" from the recommendations list on every load.
+      // Shows a loading state until the list resolves, then renders the real
+      // picks. Only falls back to a static default list if the request fails.
       (function () {
         const wrap = document.getElementById("homeExamples");
-        if (!wrap) {
+        const picks = document.getElementById("homePicks");
+        if (!wrap || !picks) {
           return;
         }
         const appUrl = wrap.getAttribute("data-app-url") || "/app";
+        const DEFAULTS = ["RELIANCE", "TCS", "INFY", "HDFCBANK"];
+
+        function render(symbols) {
+          picks.innerHTML = "";
+          const fragment = document.createDocumentFragment();
+          for (const symbol of symbols) {
+            const link = document.createElement("a");
+            link.href = `${appUrl}?symbol=${encodeURIComponent(symbol)}`;
+            link.textContent = symbol.split(".")[0] || symbol;
+            fragment.appendChild(link);
+          }
+          picks.appendChild(fragment);
+        }
 
         fetch("/api/recommendations")
           .then((response) => (response.ok ? response.json() : null))
           .then((payload) => {
-            const rows = (payload && payload.results) || [];
-            const picks = rows
+            const symbols = ((payload && payload.results) || [])
               .map((row) => String(row.analysisSymbol || row.symbol || "").trim())
               .filter(Boolean)
               .slice(0, 5);
-            if (!picks.length) {
-              return;
-            }
-
-            wrap.querySelectorAll("a").forEach((link) => link.remove());
-            const fragment = document.createDocumentFragment();
-            for (const symbol of picks) {
-              const link = document.createElement("a");
-              link.href = `${appUrl}?symbol=${encodeURIComponent(symbol)}`;
-              link.textContent = symbol.split(".")[0] || symbol;
-              fragment.appendChild(link);
-            }
-            wrap.appendChild(fragment);
+            render(symbols.length ? symbols : DEFAULTS);
           })
-          .catch(() => {
-            /* keep the server-rendered default picks on failure */
-          });
+          .catch(() => render(DEFAULTS));
       })();
     </script>
-    <script src="{% static 'cursor.js' %}?v=20260614-mobile-1" defer></script>
+    <script src="{% static 'cursor.js' %}?v=20260614-pick-1" defer></script>
   </body>
 </html>
