@@ -10,7 +10,12 @@ ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
 INSTALLED_APPS = [
     "django.contrib.staticfiles",
-    "market",
+    "core",
+    "stock_analysis",
+    "recommendations",
+    "market_monitor",
+    "etf_analysis",
+    "mutual_funds",
 ]
 
 MIDDLEWARE = [

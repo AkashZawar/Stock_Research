@@ -1,0 +1,281 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>The Big Picture Investment</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --home-accent: #34d399;
+        --home-ink: #f8fafc;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        font-family: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: var(--home-ink);
+        background: #0b1220;
+      }
+      .home-hero {
+        position: relative;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 32px 20px 64px;
+        text-align: center;
+        background-image:
+          linear-gradient(rgba(7, 12, 24, 0.72), rgba(7, 12, 24, 0.82)),
+          url("{% static 'home-bg.png' %}");
+        background-size: cover;
+        background-position: center;
+        background-attachment: fixed;
+      }
+      .home-brand {
+        position: absolute;
+        top: 26px;
+        left: 28px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .home-brand .logo {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        background: var(--home-accent);
+        color: #06281c;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+      }
+      .home-brand small {
+        display: block;
+        color: #94a3b8;
+        font-weight: 500;
+        font-size: 12px;
+      }
+      .home-brand strong { font-size: 15px; }
+      .home-center { width: 100%; max-width: 720px; }
+      .home-eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 3px;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--home-accent);
+        margin: 0 0 16px;
+      }
+      .home-title {
+        font-size: clamp(34px, 6vw, 60px);
+        line-height: 1.05;
+        font-weight: 800;
+        margin: 0 0 14px;
+      }
+      .home-subtitle {
+        font-size: clamp(15px, 2.2vw, 19px);
+        color: #cbd5e1;
+        margin: 0 auto 34px;
+        max-width: 560px;
+      }
+      .home-search {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        max-width: 620px;
+        margin: 0 auto;
+        background: rgba(15, 23, 42, 0.72);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 999px;
+        padding: 8px 8px 8px 22px;
+        backdrop-filter: blur(8px);
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      }
+      .home-search:focus-within {
+        border-color: var(--home-accent);
+        box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.18), 0 24px 60px rgba(0, 0, 0, 0.45);
+      }
+      .home-search input {
+        flex: 1;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--home-ink);
+        font-size: 17px;
+        padding: 12px 4px;
+      }
+      .home-search input::placeholder { color: #94a3b8; }
+      .home-search button {
+        border: 0;
+        cursor: pointer;
+        border-radius: 999px;
+        padding: 13px 26px;
+        font-size: 15px;
+        font-weight: 700;
+        color: #06281c;
+        background: var(--home-accent);
+        transition: transform 0.12s ease, filter 0.12s ease;
+      }
+      .home-search button:hover { filter: brightness(1.06); transform: translateY(-1px); }
+      .home-examples {
+        margin: 22px auto 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: center;
+      }
+      .home-examples span { color: #94a3b8; font-size: 13px; align-self: center; }
+      .home-examples a {
+        text-decoration: none;
+        color: #e2e8f0;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 7px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        background: rgba(15, 23, 42, 0.55);
+        transition: border-color 0.12s ease, color 0.12s ease;
+      }
+      .home-examples a:hover { border-color: var(--home-accent); color: #fff; }
+      .home-enter {
+        margin-top: 40px;
+        display: inline-block;
+        color: #cbd5e1;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 14px;
+        border-bottom: 1px dashed rgba(203, 213, 225, 0.5);
+        padding-bottom: 2px;
+      }
+      .home-enter:hover { color: #fff; }
+      .home-note {
+        position: absolute;
+        bottom: 18px;
+        left: 0;
+        right: 0;
+        text-align: center;
+        color: #64748b;
+        font-size: 12px;
+        padding: 0 20px;
+      }
+      @media (max-width: 520px) {
+        .home-search { flex-direction: column; border-radius: 22px; padding: 14px; gap: 12px; }
+        .home-search input { width: 100%; text-align: center; }
+        .home-search button { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="home-hero">
+      <a class="home-brand" href="{% url 'core:home' %}">
+        <span class="logo" aria-hidden="true">BP</span>
+        <span>
+          <strong>The Big Picture</strong>
+          <small>Investment desk</small>
+        </span>
+      </a>
+
+      <section class="home-center">
+        <p class="home-eyebrow">By Akash Zawar</p>
+        <h1 class="home-title">The Big Picture Investment</h1>
+        <p class="home-subtitle">Search any stock to generate a research report with charts, support and resistance levels, fundamentals, ownership trends, and risk checks.</p>
+
+        <form class="home-search" action="{% url 'core:index' %}" method="get" role="search">
+          <input
+            id="homeSymbolInput"
+            type="text"
+            name="symbol"
+            list="homeSuggestions"
+            placeholder="Search a stock  e.g. RELIANCE, TCS, HAL.NS"
+            aria-label="Stock ticker or name"
+            autocomplete="off"
+            autofocus
+            required>
+          <datalist id="homeSuggestions"></datalist>
+          <button type="submit">Analyze</button>
+        </form>
+
+        <div class="home-examples">
+          <span>Top picks:</span>
+          {% for item in suggestions %}
+          <a href="{% url 'core:index' %}?symbol={{ item.symbol|urlencode }}">{{ item.label }}</a>
+          {% endfor %}
+        </div>
+
+        <a class="home-enter" href="{% url 'core:index' %}">Open the full research workspace &rarr;</a>
+      </section>
+
+      <p class="home-note">Research output only. Not personalized financial advice. Verify data and manage risk before trading.</p>
+    </main>
+
+    <script>
+      (function () {
+        const input = document.getElementById("homeSymbolInput");
+        const list = document.getElementById("homeSuggestions");
+        if (!input || !list) {
+          return;
+        }
+
+        let timer = null;
+        let controller = null;
+
+        input.addEventListener("input", () => {
+          clearTimeout(timer);
+          const query = input.value.trim();
+          if (query.length < 1) {
+            if (controller) {
+              controller.abort();
+              controller = null;
+            }
+            list.innerHTML = "";
+            return;
+          }
+          timer = setTimeout(() => fetchSuggestions(query), 180);
+        });
+
+        async function fetchSuggestions(query) {
+          if (controller) {
+            controller.abort();
+          }
+          controller = new AbortController();
+          const current = controller;
+          try {
+            const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: current.signal });
+            const payload = await response.json();
+            if (controller !== current) {
+              return;
+            }
+            renderOptions(payload.results || []);
+          } catch (error) {
+            if (error.name !== "AbortError" && controller === current) {
+              list.innerHTML = "";
+            }
+          } finally {
+            if (controller === current) {
+              controller = null;
+            }
+          }
+        }
+
+        function renderOptions(results) {
+          list.innerHTML = "";
+          const fragment = document.createDocumentFragment();
+          for (const item of results) {
+            const option = document.createElement("option");
+            option.value = item.symbol;
+            option.label = `${item.name || ""}${item.exchange ? " - " + item.exchange : ""}`;
+            fragment.appendChild(option);
+          }
+          list.appendChild(fragment);
+        }
+      })();
+    </script>
+  </body>
+</html>

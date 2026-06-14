@@ -382,7 +382,8 @@ async function analyze(symbol) {
 async function analyzeAsset(context, symbol) {
   showAssetState(context.prefix, "loading");
   try {
-    const response = await fetch(`/api/analyze-asset?type=${encodeURIComponent(context.type)}&symbol=${encodeURIComponent(symbol)}`);
+    const slug = context.type === "etf" ? "etf" : "mutual-funds";
+    const response = await fetch(`/api/${slug}/analyze?symbol=${encodeURIComponent(symbol)}`);
     const payload = await response.json();
     if (!response.ok) {
       if (payload.suggestions) {
@@ -434,7 +435,8 @@ async function searchAssets(context, query) {
   const controller = new AbortController();
   assetSearchControllers[context.prefix] = controller;
   try {
-    const response = await fetch(`/api/search-assets?type=${encodeURIComponent(context.type)}&q=${encodeURIComponent(query)}`, { signal: controller.signal });
+    const slug = context.type === "etf" ? "etf" : "mutual-funds";
+    const response = await fetch(`/api/${slug}/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
     const payload = await response.json();
     if (assetSearchControllers[context.prefix] !== controller) {
       return;
@@ -4542,3 +4544,11 @@ if (watchlistRows) {
   renderWatchlist();
 }
 showState("empty");
+
+const initialSymbol = new URLSearchParams(window.location.search).get("symbol");
+if (initialSymbol && initialSymbol.trim()) {
+  const bootSymbol = initialSymbol.trim();
+  symbolInput.value = bootSymbol;
+  setActiveTab("analysis");
+  analyze(bootSymbol);
+}
