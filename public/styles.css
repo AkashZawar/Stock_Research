@@ -6608,6 +6608,11 @@ video {
   }
 }
 
+/* Hero / "Analyze a stock" header: only on Stock Analysis & Recommendations. */
+body:not([data-active-tab="analysis"]):not([data-active-tab="recommendations"]) .topbar {
+  display: none;
+}
+
 /* ============================================================
    App-wide background image (shown across every tab).
    Content sits on opaque panels, so the image only frames the

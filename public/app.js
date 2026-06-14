@@ -358,6 +358,9 @@ function setActiveTab(tab) {
   monitorView.classList.toggle("is-hidden", !isMonitor);
   tradeView?.classList.toggle("is-hidden", !isTrade);
   searchLogView?.classList.toggle("is-hidden", !isLogs);
+  // Record the active tab on <body> so CSS shows the hero / "Analyze a stock"
+  // header only on the Stock Analysis and Recommendations tabs.
+  document.body.dataset.activeTab = isAnalysis ? "analysis" : tab;
   if (isAnalysis && latestReport) {
     redrawChart();
   }
