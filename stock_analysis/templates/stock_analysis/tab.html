@@ -1,3 +1,4 @@
+        {% load static %}
         {% comment %}
           Stock Analysis tab partial (included by core/base.html).
           Renders the stock research report: quote, score cards, market context,
@@ -5,10 +6,12 @@
           Populated by public/app.js from /api/analyze and /api/search.
         {% endcomment %}
         <section id="analysisView" class="tab-view">
-          <section id="emptyState" class="empty-state">
-            <h2>No report loaded</h2>
-            <p>Search a ticker to generate a chart report using available history up to one year, with fundamentals, technicals, ownership/catalyst checks, and research levels.</p>
-          </section>
+
+              <figcaption class="empty-state-caption">
+                <h2>You haven't looked for anything yet...</h2>
+                <p>Search a ticker to generate a chart report using available history up to one year, with fundamentals, technicals, ownership/catalyst checks, and research levels.</p>
+              </figcaption>
+
 
           <section id="loadingState" class="loading-state is-hidden">
             <div class="spinner"></div>
