@@ -54,6 +54,7 @@ const recommendationsLoading = document.querySelector("#recommendationsLoading")
 const recommendationsError = document.querySelector("#recommendationsError");
 const recommendationsContent = document.querySelector("#recommendationsContent");
 const recommendationRows = document.querySelector("#recommendationRows");
+const intradayRecommendationRows = document.querySelector("#intradayRecommendationRows");
 const refreshSearchLogs = document.querySelector("#refreshSearchLogs");
 const searchLogLoading = document.querySelector("#searchLogLoading");
 const searchLogError = document.querySelector("#searchLogError");
@@ -221,6 +222,14 @@ tradeRows?.addEventListener("click", async (event) => {
 });
 
 recommendationRows?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-recommendation-symbol]");
+  if (!button) {
+    return;
+  }
+  await analyzeStockFromRecommendation(button.dataset.recommendationSymbol);
+});
+
+intradayRecommendationRows?.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-recommendation-symbol]");
   if (!button) {
     return;
@@ -728,13 +737,30 @@ async function loadRecommendations(forceRefresh) {
 
 function renderRecommendations(payload) {
   const items = payload.results || [];
+  const intraday = payload.intraday || {};
+  const intradayItems = intraday.results || [];
   setText("#recommendationsGenerated", `Generated ${formatDateTime(payload.generatedAt)} from ${payload.source || "public data"}`);
-  setText("#recommendationsSource", `${payload.scannedCount || 0} scanned · ${payload.note || ""}`);
+  setText("#recommendationsSource", recommendationSourceText(payload));
   setText("#recommendationsCount", items.length ? `${items.length} ideas` : "No ideas");
   setText("#recommendationsSummary", payload.summary || "");
+  setText("#intradayRecommendationsSource", recommendationSourceText(intraday));
+  setText("#intradayRecommendationsCount", intradayItems.length ? `${intradayItems.length} setups` : "No setups");
+  setText("#intradayRecommendationsSummary", intraday.summary || "");
   renderRecommendationRows(items);
+  renderIntradayRecommendationRows(intradayItems);
   annotateRecommendationTableCells();
   validateRenderedData(recommendationsContent);
+}
+
+function recommendationSourceText(payload) {
+  const parts = [`${payload?.scannedCount || 0} scanned`];
+  if (payload?.failedCount) {
+    parts.push(`${payload.failedCount} skipped`);
+  }
+  if (payload?.note) {
+    parts.push(payload.note);
+  }
+  return parts.join(" · ");
 }
 
 function renderRecommendationRows(items) {
@@ -784,6 +810,106 @@ function renderRecommendationRows(items) {
     fragment.appendChild(row);
   }
   recommendationRows.appendChild(fragment);
+}
+
+function renderIntradayRecommendationRows(items) {
+  if (!intradayRecommendationRows) {
+    return;
+  }
+  intradayRecommendationRows.innerHTML = "";
+  if (!items.length) {
+    intradayRecommendationRows.innerHTML = "<tr><td colspan=\"7\">No intraday candidates passed the 3-5% move, volume, momentum, and structure filters.</td></tr>";
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    const row = document.createElement("tr");
+    const directionClass = item.direction === "Short" ? "is-short" : "is-long";
+    const directionTone = item.direction === "Short" ? "negative" : "positive";
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+    row.className = `recommendation-row intraday-recommendation-row ${recommendationTone(item.score)} ${directionClass}`;
+    row.innerHTML = `
+      <td>
+        <div class="recommendation-stock-head">
+          <span class="recommendation-heat">${Number.isFinite(item.score) ? Math.round(item.score) : loadingText("score")}</span>
+          <div>
+            <button class="recommendation-stock-link" type="button" data-recommendation-symbol="${escapeHtml(item.analysisSymbol || item.symbol || "")}">${escapeHtml(item.name || item.symbol)}</button>
+            <span>${escapeHtml(item.symbol || "")} · ${escapeHtml(tags.slice(0, 3).join(" · ") || "Nifty 500")}</span>
+          </div>
+        </div>
+        <small>${escapeHtml(item.reason || "")}</small>
+      </td>
+      <td>
+        <strong class="${directionTone}">${escapeHtml(item.direction || "Watch")}</strong>
+        <span>${escapeHtml(item.setup || "Intraday setup")}</span>
+        <small>Bias ${escapeHtml(item.bias || "")} · Score ${scoreText(item.score || 0)}</small>
+      </td>
+      <td>
+        <strong>${formatIntradayMoveRange(item)}</strong>
+        <span>Trigger ${formatMoney(item.triggerPrice, "INR")}</span>
+        <span>Target ${formatIntradayTarget(item)}</span>
+      </td>
+      <td>
+        <strong>${formatIntradayRatio(item.volumeRatio, "20D avg")}</strong>
+        <span>${formatIntradayShares(item.volume)}</span>
+        <span>${formatIntradayRatio(item.deliveryProxy, "50D avg", "Participation")}</span>
+      </td>
+      <td>
+        <strong>${intradayStructureText(item)}</strong>
+        <span>RSI ${formatNumber(item.rsi14)} · ATR ${formatPercentValue(item.atrPercent)}</span>
+        <span>BB width ${formatPercentValue(item.bollingerWidthPercent)}</span>
+      </td>
+      <td>
+        <strong>${formatMoney(item.stopLoss, "INR")}</strong>
+        <span>Risk ${formatPercentValue(item.riskPercent)}</span>
+        <span>Value ${formatLarge(item.liquidityValue, "INR")}</span>
+      </td>
+      <td><button class="link-button" type="button" data-recommendation-symbol="${escapeHtml(item.analysisSymbol || item.symbol || "")}">Analyze</button></td>
+    `;
+    fragment.appendChild(row);
+  }
+  intradayRecommendationRows.appendChild(fragment);
+}
+
+function formatIntradayMoveRange(item) {
+  const low = item.expectedMoveRange?.low;
+  const high = item.expectedMoveRange?.high ?? item.expectedMovePercent;
+  if (Number.isFinite(low) && Number.isFinite(high)) {
+    return `${formatPercentValue(low)} - ${formatPercentValue(high)}`;
+  }
+  return formatPercentValue(item.expectedMovePercent);
+}
+
+function formatIntradayTarget(item) {
+  if (Number.isFinite(item.targetNear) && Number.isFinite(item.targetFar)) {
+    return `${formatMoney(item.targetNear, "INR")} / ${formatMoney(item.targetFar, "INR")}`;
+  }
+  return formatMoney(item.targetFar ?? item.targetNear, "INR");
+}
+
+function formatIntradayRatio(value, label, prefix = "") {
+  if (!Number.isFinite(value)) {
+    const loading = loadingText("ratio", DATA_LOADING_ETA_PROVIDER);
+    return prefix ? `${prefix} ${loading}` : loading;
+  }
+  const ratio = `${formatNumber(value)}x ${label}`;
+  return prefix ? `${prefix} ${ratio}` : ratio;
+}
+
+function formatIntradayShares(value) {
+  if (!Number.isFinite(value)) {
+    return loadingText("volume", DATA_LOADING_ETA_PROVIDER);
+  }
+  return `${formatLarge(value, "")} shares`;
+}
+
+function intradayStructureText(item) {
+  const levels = item.levels || {};
+  if (item.direction === "Short") {
+    return `52W low gap ${formatPercentValue(levels.pctAbove52WeekLow)}`;
+  }
+  return `52W high gap ${formatPercentValue(levels.pctBelow52WeekHigh)}`;
 }
 
 function renderRecommenderDetails(item) {
@@ -2942,6 +3068,9 @@ function renderMentionedStockHeatmap(data) {
 async function analyzeStockFromHeatmap(symbol) {
   const targetSymbol = String(symbol || "").trim();
   if (!targetSymbol) {
+    setActiveTab("analysis");
+    errorState.textContent = "This row does not include a stock symbol to analyze.";
+    showState("error");
     return;
   }
   symbolInput.value = targetSymbol;

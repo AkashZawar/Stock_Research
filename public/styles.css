@@ -2468,6 +2468,30 @@ h3 {
   background: var(--gold);
 }
 
+#recommendationsContent .intraday-recommendation-row.is-long td {
+  background: #f0fdf4;
+}
+
+#recommendationsContent .intraday-recommendation-row.is-short td {
+  background: #fff7ed;
+}
+
+#recommendationsContent .intraday-recommendation-row.is-long td:first-child {
+  border-left: 5px solid var(--green);
+}
+
+#recommendationsContent .intraday-recommendation-row.is-short td:first-child {
+  border-left: 5px solid #c2410c;
+}
+
+#recommendationsContent .intraday-recommendation-row.is-long .recommendation-heat {
+  background: var(--green);
+}
+
+#recommendationsContent .intraday-recommendation-row.is-short .recommendation-heat {
+  background: #c2410c;
+}
+
 .recommender-detail-list {
   display: grid;
   gap: 4px;

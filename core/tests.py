@@ -284,6 +284,346 @@ class RecommendationFeedTests(SimpleTestCase):
 
         self.assertIsNone(row)
 
+    def test_recommendation_cache_key_is_scoped_to_ist_date(self):
+        before_midnight_utc = datetime(2026, 6, 18, 18, 0, tzinfo=timezone.utc)
+        after_midnight_ist = datetime(2026, 6, 18, 19, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            services.recommendation_cache_key(before_midnight_utc),
+            "recommendations:2026-06-18",
+        )
+        self.assertEqual(
+            services.recommendation_cache_key(after_midnight_ist),
+            "recommendations:2026-06-19",
+        )
+
+    def test_clear_recommendations_cache_clears_all_daily_keys(self):
+        services._cache["recommendations:2026-06-18"] = {"data": {}, "expiresAt": 9999999999}
+        services._cache["recommendations:2026-06-19"] = {"data": {}, "expiresAt": 9999999999}
+        services._cache["analysis:ABC.NS"] = {"data": {}, "expiresAt": 9999999999}
+
+        services.clear_recommendations_cache()
+
+        self.assertNotIn("recommendations:2026-06-18", services._cache)
+        self.assertNotIn("recommendations:2026-06-19", services._cache)
+        self.assertIn("analysis:ABC.NS", services._cache)
+        services.clear_cache("analysis:ABC.NS")
+
+    def test_build_daily_recommendation_from_nifty500_scan(self):
+        candles = self._daily_recommendation_candles()
+
+        with patch("core.services.rsi", return_value=[None] * (len(candles) - 1) + [60.0]):
+            row = services.build_daily_recommendation_from_inputs(
+                {
+                    "symbol": "DAILY.NS",
+                    "name": "Daily Setup Ltd",
+                    "nsePrice": 110.0,
+                    "nseChangePercent": 3.5,
+                    "nseVolume": 2_500_000,
+                    "nseYearHigh": 111.0,
+                    "nseYearLow": 92.0,
+                },
+                candles,
+            )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["sourceType"], "Daily Nifty 500")
+        self.assertEqual(row["duration"], "3-15 sessions")
+        self.assertGreater(row["sellPrice"], row["buyPrice"])
+        self.assertIn("20-day breakout", row["reason"])
+
+    def test_build_recommendations_merges_daily_nifty500_rows(self):
+        candles = self._daily_recommendation_candles()
+        with patch("core.services.rsi", return_value=[None] * (len(candles) - 1) + [60.0]):
+            daily_row = services.build_daily_recommendation_from_inputs(
+                {
+                    "symbol": "DAILY.NS",
+                    "name": "Daily Setup Ltd",
+                    "nsePrice": 110.0,
+                    "nseChangePercent": 3.5,
+                    "nseVolume": 2_500_000,
+                    "nseYearHigh": 111.0,
+                    "nseYearLow": 92.0,
+                },
+                candles,
+            )
+
+        with (
+            patch("core.services.recommendation_universe", return_value=[]),
+            patch("core.services.safe_daily_recommendations", return_value={
+                "scannedCount": 1,
+                "failedCount": 0,
+                "results": [daily_row],
+            }),
+            patch("core.services.safe_intraday_recommendations", return_value={
+                "scannedCount": 0,
+                "failedCount": 0,
+                "results": [],
+            }),
+        ):
+            payload = services.build_recommendations()
+
+        self.assertEqual(payload["results"][0]["symbol"], "DAILY.NS")
+        self.assertIn("daily Nifty 500", payload["summary"])
+        self.assertEqual(payload["scannedCount"], 1)
+
+    def test_nifty500_universe_falls_back_to_constituent_csv(self):
+        csv_text = (
+            "Company Name,Industry,Symbol,Series,ISIN Code\n"
+            "Mahindra & Mahindra Ltd.,Automobile,M&M,EQ,INE101A01026\n"
+            "Daily Setup Ltd,Capital Goods,DAILY,EQ,INE000A01000\n"
+        )
+
+        with (
+            patch("core.services.fetch_nse_stock_index_payload", side_effect=RuntimeError("NSE India returned 404.")),
+            patch("core.services.fetch_text_once", return_value=csv_text),
+            patch("core.services.get_quotes", return_value={
+                "M&M.NS": {
+                    "regularMarketPrice": 3123.45,
+                    "regularMarketChangePercent": 1.23,
+                    "regularMarketVolume": 123456,
+                    "fiftyTwoWeekHigh": 3300.0,
+                    "fiftyTwoWeekLow": 2400.0,
+                },
+            }),
+        ):
+            rows = services.build_nifty500_primary_universe()
+
+        by_symbol = {row["symbol"]: row for row in rows}
+        self.assertEqual(services.normalize_symbol("M&M.NS"), "M&M.NS")
+        self.assertIn("M&M.NS", by_symbol)
+        self.assertEqual(by_symbol["M&M.NS"]["nsePrice"], 3123.45)
+        self.assertIn("Automobile", by_symbol["M&M.NS"]["tags"])
+
+    @staticmethod
+    def _daily_recommendation_candles():
+        candles = []
+        for index in range(59):
+            close = 100.0 + (index % 8) * 0.45
+            candles.append({
+                "open": close - 0.15,
+                "high": close + 0.55,
+                "low": close - 0.55,
+                "close": close,
+                "volume": 1_000_000,
+            })
+        candles[-1] = {
+            "open": 103.5,
+            "high": 104.6,
+            "low": 103.0,
+            "close": 104.0,
+            "volume": 1_000_000,
+        }
+        candles.append({
+            "open": 106.0,
+            "high": 111.0,
+            "low": 105.5,
+            "close": 110.0,
+            "volume": 2_500_000,
+        })
+        return candles
+
+    def test_build_intraday_recommendation_flags_volume_breakout_long(self):
+        candles = self._intraday_base_candles()
+        previous_close = candles[-2]["close"]
+        candles[-1] = {
+            "open": previous_close + 0.4,
+            "high": 111.0,
+            "low": previous_close,
+            "close": 110.0,
+            "volume": 3_400_000,
+        }
+
+        row = services.build_intraday_recommendation_from_inputs(
+            {
+                "symbol": "LONG.NS",
+                "name": "Long Setup Ltd",
+                "nsePrice": 110.0,
+                "nseChangePercent": 5.8,
+                "nseVolume": 3_400_000,
+                "nseYearHigh": 111.0,
+                "nseYearLow": 88.0,
+                "tags": ["Nifty 500"],
+            },
+            candles,
+        )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["direction"], "Long")
+        self.assertGreaterEqual(row["score"], 58)
+        self.assertGreaterEqual(row["expectedMovePercent"], 3)
+        self.assertLessEqual(row["expectedMovePercent"], 5)
+        self.assertGreater(row["volumeRatio"], 3)
+        self.assertIn("Volume is", row["reason"])
+
+    def test_build_intraday_recommendation_flags_volume_breakdown_short(self):
+        candles = self._intraday_base_candles(start=122.0, step=-0.04)
+        previous_close = candles[-2]["close"]
+        candles[-1] = {
+            "open": previous_close - 0.5,
+            "high": previous_close,
+            "low": 107.5,
+            "close": 108.0,
+            "volume": 3_200_000,
+        }
+
+        row = services.build_intraday_recommendation_from_inputs(
+            {
+                "symbol": "SHORT.NS",
+                "name": "Short Setup Ltd",
+                "nsePrice": 108.0,
+                "nseChangePercent": -8.3,
+                "nseVolume": 3_200_000,
+                "nseYearHigh": 140.0,
+                "nseYearLow": 105.0,
+                "tags": ["Nifty 500"],
+            },
+            candles,
+        )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["direction"], "Short")
+        self.assertGreaterEqual(row["score"], 58)
+        self.assertGreaterEqual(row["expectedMovePercent"], 3)
+        self.assertLessEqual(row["expectedMovePercent"], 5)
+        self.assertGreater(row["deliveryProxy"], 3)
+        self.assertIn("Price is down", row["reason"])
+
+    def test_build_intraday_recommendation_rejects_weak_volume_setup(self):
+        candles = self._intraday_base_candles()
+        previous_close = candles[-2]["close"]
+        candles[-1] = {
+            "open": previous_close,
+            "high": previous_close + 0.4,
+            "low": previous_close - 0.4,
+            "close": previous_close + 0.2,
+            "volume": 950_000,
+        }
+
+        row = services.build_intraday_recommendation_from_inputs(
+            {
+                "symbol": "QUIET.NS",
+                "name": "Quiet Ltd",
+                "nsePrice": previous_close + 0.2,
+                "nseChangePercent": 0.2,
+                "nseVolume": 950_000,
+                "nseYearHigh": 115.0,
+                "nseYearLow": 90.0,
+                "tags": ["Nifty 500"],
+            },
+            candles,
+        )
+
+        self.assertIsNone(row)
+
+    def test_build_intraday_recommendation_skips_malformed_provider_candles(self):
+        candles = self._intraday_base_candles()
+        candles.insert(5, {"open": None, "high": None, "low": None, "close": None, "volume": None})
+        candles.insert(12, {"open": 105.0, "high": 102.0, "low": 104.0, "close": 103.0, "volume": 1_000_000})
+        previous_close = candles[-2]["close"]
+        candles[-1] = {
+            "open": previous_close + 0.4,
+            "high": 111.0,
+            "low": previous_close,
+            "close": 110.0,
+            "volume": 3_400_000,
+        }
+
+        row = services.build_intraday_recommendation_from_inputs(
+            {
+                "symbol": "MESSY.NS",
+                "name": "Messy Provider Ltd",
+                "nsePrice": 110.0,
+                "nseChangePercent": 5.8,
+                "nseVolume": 3_400_000,
+                "nseYearHigh": 111.0,
+                "nseYearLow": 88.0,
+                "tags": ["Nifty 500"],
+            },
+            candles,
+        )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["symbol"], "MESSY.NS")
+
+    def test_intraday_recommendations_reports_failed_symbol_scans(self):
+        def candidate(stock):
+            if stock["symbol"] == "BAD.NS":
+                raise RuntimeError("provider failed")
+            return {
+                "symbol": "GOOD.NS",
+                "analysisSymbol": "GOOD.NS",
+                "name": "Good Ltd",
+                "direction": "Long",
+                "score": 72,
+                "volumeRatio": 2.0,
+                "changePercent": 3.4,
+            }
+
+        with (
+            patch("core.services.intraday_recommendation_universe", return_value=[
+                {"symbol": "GOOD.NS", "name": "Good Ltd"},
+                {"symbol": "BAD.NS", "name": "Bad Ltd"},
+            ]),
+            patch("core.services.build_intraday_recommendation_candidate", side_effect=candidate),
+        ):
+            payload = services.build_intraday_recommendations()
+
+        self.assertEqual(payload["scannedCount"], 2)
+        self.assertEqual(payload["failedCount"], 1)
+        self.assertEqual(len(payload["results"]), 1)
+        self.assertIn("could not be checked", payload["summary"])
+
+    def test_build_daily_recommendation_flags_short_term_breakout(self):
+        candles = self._daily_recommendation_candles()
+
+        with patch("core.services.rsi", return_value=[None] * (len(candles) - 1) + [60.0]):
+            row = services.build_daily_recommendation_from_inputs(
+                {
+                    "symbol": "BREAKOUT.NS",
+                    "name": "Breakout Ltd",
+                    "nsePrice": 110.0,
+                    "nseChangePercent": 3.5,
+                    "nseVolume": 2_500_000,
+                    "nseYearHigh": 111.0,
+                    "nseYearLow": 90.0,
+                },
+                candles,
+            )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["sourceType"], "Daily Nifty 500")
+        self.assertEqual(row["duration"], "3-15 sessions")
+        self.assertGreaterEqual(row["upsidePercent"], 4)
+        self.assertIn("Nifty 500 daily technical scan", row["recommendedBy"])
+
+    def test_recommendation_cache_key_rotates_daily_and_clear_removes_all_days(self):
+        first = services.recommendation_cache_key(datetime(2026, 6, 18, 23, 55, tzinfo=ZoneInfo("Asia/Kolkata")))
+        second = services.recommendation_cache_key(datetime(2026, 6, 19, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")))
+
+        self.assertNotEqual(first, second)
+
+        services.set_cached(first, {"day": "old"}, 60)
+        services.set_cached(second, {"day": "new"}, 60)
+        services.clear_recommendations_cache()
+
+        self.assertIsNone(services.get_cached(first))
+        self.assertIsNone(services.get_cached(second))
+
+    @staticmethod
+    def _intraday_base_candles(start=100.0, step=0.08, count=60):
+        candles = []
+        for index in range(count):
+            close = start + index * step
+            candles.append({
+                "open": close - 0.1,
+                "high": close + 0.6,
+                "low": close - 0.6,
+                "close": close,
+                "volume": 1_000_000,
+            })
+        return candles
+
 
 class RelativeStrengthTests(SimpleTestCase):
     def test_build_relative_strength_compares_stock_with_benchmark(self):
@@ -764,6 +1104,18 @@ class MarketSnapshotTests(SimpleTestCase):
         self.assertEqual(universe[0]["name"], "Reliance Industries")
         self.assertEqual(universe[0]["tags"], ["Nifty 500"])
         self.assertEqual(universe[0]["nsePrice"], None)
+
+    def test_build_nifty500_primary_universe_falls_back_to_constituent_csv(self):
+        csv_text = "Company Name,Industry,Symbol\nReliance Industries Ltd.,Oil Gas & Consumable Fuels,RELIANCE\nTata Consultancy Services Ltd.,Information Technology,TCS\n"
+
+        with patch("core.services.fetch_nse_stock_index_payload", side_effect=RuntimeError("NSE India returned 404.")), \
+            patch("core.services.fetch_text_once", return_value=csv_text), \
+            patch("core.services.get_quotes", return_value={}):
+            universe = services.build_nifty500_primary_universe()
+
+        self.assertEqual([stock["symbol"] for stock in universe], ["RELIANCE.NS", "TCS.NS"])
+        self.assertEqual(universe[0]["name"], "Reliance Industries Ltd.")
+        self.assertIn("Oil Gas & Consumable Fuels", universe[0]["tags"])
 
     def test_primary_scan_prefilter_limits_to_ranked_nifty500_candidates(self):
         weak_rows = [

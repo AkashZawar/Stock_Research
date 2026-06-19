@@ -15,6 +15,7 @@ app_name = "core"
 urlpatterns = [
     path("", views.home, name="home"),
     path("app", views.index, name="index"),
+    path("app/", views.index, name="index-slash"),
     path("api/search-logs", views.search_logs, name="api-search-logs"),
     path("api/watchlist", views.watchlist_items, name="api-watchlist"),
     path("api/watchlist/<int:item_id>", views.watchlist_item_detail, name="api-watchlist-detail"),

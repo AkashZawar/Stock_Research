@@ -25,6 +25,7 @@ reading top to bottom:
 
 Data comes from public endpoints; replace with a licensed feed for production.
 """
+import csv
 import html
 import json
 import math
@@ -38,6 +39,7 @@ from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
+from io import StringIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener, urlopen
@@ -58,6 +60,12 @@ RECOMMENDATION_SCAN_LIMIT = 18
 RECOMMENDATION_RESULT_LIMIT = 14
 RECOMMENDATION_MIN_UPSIDE_PERCENT = 4
 RECOMMENDATION_PROVIDER_CONCURRENCY = 4
+DAILY_RECOMMENDATION_SCAN_LIMIT = 40
+DAILY_RECOMMENDATION_RESULT_LIMIT = 8
+INTRADAY_RECOMMENDATION_SCAN_LIMIT = 36
+INTRADAY_RECOMMENDATION_RESULT_LIMIT = 10
+INTRADAY_MIN_EXPECTED_MOVE_PERCENT = 3
+INTRADAY_MAX_EXPECTED_MOVE_PERCENT = 5
 STOCK_REPORT_MAX_SESSIONS = 252
 STOCK_ANALYSIS_BUFFER_SESSIONS = 63
 STOCK_ANALYSIS_MAX_SESSIONS = STOCK_REPORT_MAX_SESSIONS + STOCK_ANALYSIS_BUFFER_SESSIONS
@@ -148,8 +156,10 @@ NSE_OI_SECTOR_INDICES = (
     "NIFTY INFRASTRUCTURE",
 )
 NIFTY_500_INDEX_NAME = "NIFTY 500"
+NIFTY_500_CONSTITUENTS_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
 NIFTY_500_PRIMARY_CACHE_SECONDS = 6 * 60 * 60
 NIFTY_500_PRIMARY_SCAN_LIMIT = 120
+NIFTY_500_CONSTITUENTS_CSV_URL = NIFTY_500_CONSTITUENTS_URL
 MARKET_MONITOR_PRIMARY_CONCURRENCY = 6
 MARKET_MONITOR_ACTIVITY_CONCURRENCY = 3
 MARKET_MONITOR_CATALYST_CONCURRENCY = 2
@@ -2710,12 +2720,65 @@ def refresh_market_monitor_cache():
 
 
 def get_recommendations():
-    return cached("recommendations", build_recommendations, RECOMMENDATION_CACHE_SECONDS)
+    return cached(recommendation_cache_key(), build_recommendations, RECOMMENDATION_CACHE_SECONDS)
+
+
+def recommendation_cache_key(now=None):
+    value = now or datetime.now(ZoneInfo("Asia/Kolkata"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    return f"recommendations:{value.astimezone(ZoneInfo('Asia/Kolkata')).date().isoformat()}"
+
+
+def clear_recommendations_cache():
+    clear_cache_prefix("recommendations")
 
 
 def build_recommendations():
     universe = recommendation_universe()
-    results = settle_map(universe, build_recommendation_candidate, 4)
+    analyst_results = settle_map(universe, build_recommendation_candidate, 4)
+    analyst_rows = [
+        value
+        for ok, value in analyst_results
+        if ok and value
+    ]
+    daily = safe_daily_recommendations()
+    daily_rows = daily.get("results") or []
+    rows = merge_recommendation_rows([*analyst_rows, *daily_rows])
+    rows = sorted(
+        rows,
+        key=lambda item: (
+            item.get("score") or 0,
+            item.get("upsidePercent") if is_finite(item.get("upsidePercent")) else -1000,
+        ),
+        reverse=True,
+    )[:RECOMMENDATION_RESULT_LIMIT]
+    intraday = safe_intraday_recommendations()
+
+    return {
+        "generatedAt": iso_now(),
+        "source": "Yahoo Finance analyst consensus/actions, public shareholding data, NSE Nifty 500 price/volume scan, and Yahoo/NSE prices",
+        "note": (
+            "Rows qualify when public analyst data is constructive, FIIs/DIIs have accumulated meaningfully, "
+            "or the daily Nifty 500 scan finds a price/volume technical setup. Buy, sell, and stop levels are "
+            "generated from the latest public price/chart data and must be verified before trading."
+        ),
+        "summary": summarize_recommendations(rows),
+        "scannedCount": len(universe) + (daily.get("scannedCount") or 0),
+        "results": rows,
+        "daily": daily,
+        "intraday": intraday,
+    }
+
+
+def build_intraday_recommendations():
+    universe = intraday_recommendation_universe()
+    results = settle_map(
+        universe,
+        build_intraday_recommendation_candidate,
+        RECOMMENDATION_PROVIDER_CONCURRENCY,
+    )
+    failed_count = sum(1 for ok, _value in results if not ok)
     rows = [
         value
         for ok, value in results
@@ -2725,23 +2788,906 @@ def build_recommendations():
         rows,
         key=lambda item: (
             item.get("score") or 0,
-            item.get("upsidePercent") if is_finite(item.get("upsidePercent")) else -1000,
+            item.get("volumeRatio") if is_finite(item.get("volumeRatio")) else 0,
+            abs(item.get("changePercent") or 0),
         ),
         reverse=True,
-    )[:RECOMMENDATION_RESULT_LIMIT]
+    )[:INTRADAY_RECOMMENDATION_RESULT_LIMIT]
 
     return {
-        "generatedAt": iso_now(),
-        "source": "Yahoo Finance analyst consensus/actions, public shareholding data, NSE/Yahoo prices",
-        "note": (
-            "Rows qualify only when public analyst data is constructive or when FIIs/DIIs have accumulated "
-            "meaningfully in the latest available shareholding trend. Buy, sell, and stop levels are generated "
-            "from the latest public price/chart data and must be verified before trading."
-        ),
-        "summary": summarize_recommendations(rows),
+        "source": "NSE Nifty 500 snapshot fields and Yahoo Finance daily candles",
+        "note": intraday_recommendation_note(failed_count),
+        "summary": summarize_intraday_recommendations(rows, failed_count),
         "scannedCount": len(universe),
+        "failedCount": failed_count,
         "results": rows,
     }
+
+
+def safe_intraday_recommendations():
+    try:
+        return build_intraday_recommendations()
+    except Exception as error:
+        return empty_intraday_recommendations(str(error))
+
+
+def empty_intraday_recommendations(error=""):
+    return {
+        "source": "NSE Nifty 500 snapshot fields and Yahoo Finance daily candles",
+        "note": (
+            "Intraday scan could not be completed from public provider data. "
+            "The long-horizon recommendation list remains available."
+        ),
+        "summary": "Intraday candidates are temporarily unavailable; refresh after provider data returns.",
+        "scannedCount": 0,
+        "failedCount": 0,
+        "results": [],
+        "error": error,
+    }
+
+
+def intraday_recommendation_note(failed_count=0):
+    skipped = f" {failed_count} symbols could not be checked from public data." if failed_count else ""
+    return (
+        "Intraday rows are day-trade watchlist candidates, not guaranteed trades. "
+        "The app uses NSE snapshot fields plus daily candles, so confirm live minute-chart structure, "
+        "news, F&O/OI, actual delivery data, and liquidity in your broker terminal before acting."
+        f"{skipped}"
+    )
+
+
+def intraday_recommendation_universe():
+    stocks = []
+    nse_universe = safe_nifty500_primary_universe()
+    if nse_universe:
+        stocks.extend(
+            sorted(
+                nse_universe,
+                key=intraday_scan_prefilter_score,
+                reverse=True,
+            )[:INTRADAY_RECOMMENDATION_SCAN_LIMIT]
+        )
+
+    stocks.extend([
+        {"symbol": symbol, "name": name, "tags": list(tags)}
+        for symbol, name, tags in RECOMMENDATION_FALLBACK_UNIVERSE
+    ])
+
+    by_symbol = {}
+    for stock in stocks:
+        symbol = normalize_symbol(stock.get("symbol"))
+        if not symbol:
+            continue
+        by_symbol.setdefault(symbol, {**stock, "symbol": symbol})
+    return list(by_symbol.values())[:INTRADAY_RECOMMENDATION_SCAN_LIMIT]
+
+
+def intraday_scan_prefilter_score(stock):
+    price = stock.get("nsePrice")
+    year_high = stock.get("nseYearHigh")
+    year_low = stock.get("nseYearLow")
+    change_percent = stock.get("nseChangePercent")
+    volume = stock.get("nseVolume")
+    traded_value = stock.get("nseValue")
+    range_position = (
+        safe_divide(price - year_low, year_high - year_low) * 100
+        if is_finite(price)
+        and is_finite(year_high)
+        and is_finite(year_low)
+        and year_high > year_low
+        else None
+    )
+    pct_below_high = (
+        safe_divide(year_high - price, year_high) * 100
+        if is_finite(price) and is_finite(year_high) and year_high > 0
+        else None
+    )
+    pct_above_low = (
+        safe_divide(price - year_low, year_low) * 100
+        if is_finite(price) and is_finite(year_low) and year_low > 0
+        else None
+    )
+
+    score = 0
+    if is_finite(change_percent):
+        score += clamp(abs(change_percent) * 5, 0, 30)
+        if change_percent > 0 and is_finite(pct_below_high) and pct_below_high <= 8:
+            score += 16
+        if change_percent < 0 and (
+            (is_finite(range_position) and range_position <= 35)
+            or (is_finite(pct_above_low) and pct_above_low <= 18)
+        ):
+            score += 16
+    if is_finite(volume) and volume > 0:
+        score += min(math.log10(volume + 1) * 2.2, 16)
+    if is_finite(traded_value) and traded_value > 0:
+        score += min(math.log10(traded_value + 1), 10)
+    if is_finite(range_position) and (range_position >= 78 or range_position <= 28):
+        score += 10
+    return score
+
+
+def build_intraday_recommendation_candidate(stock):
+    symbol = normalize_symbol(stock.get("symbol"))
+    if not symbol:
+        return None
+    chart = get_chart_range(symbol, "6mo", "1d")
+    return build_intraday_recommendation_from_inputs(stock, chart.get("candles") or [])
+
+
+def build_intraday_recommendation_from_inputs(stock, candles):
+    symbol = normalize_symbol(stock.get("symbol"))
+    if not symbol:
+        return None
+
+    candles = usable_intraday_candles(candles)
+    if len(candles) < 40:
+        return None
+
+    candles = candles[-126:]
+    closes = [candle["close"] for candle in candles]
+    highs = [candle["high"] for candle in candles]
+    lows = [candle["low"] for candle in candles]
+    volumes = [candle.get("volume") or 0 for candle in candles]
+    latest = candles[-1]
+    previous = candles[-2]
+    current = finite_or(stock.get("nsePrice"), latest["close"])
+    previous_close = previous["close"]
+    if not is_finite(current) or current <= 0 or not is_finite(previous_close) or previous_close <= 0:
+        return None
+
+    change_percent = finite_or(
+        stock.get("nseChangePercent"),
+        safe_divide(current - previous_close, previous_close) * 100,
+        0,
+    )
+    volume = finite_or(stock.get("nseVolume"), latest.get("volume"), 0) or 0
+    prior_volumes = volumes[:-1]
+    avg_volume_20 = average(prior_volumes[-20:]) or last(sma(volumes, 20))
+    avg_volume_50 = average(prior_volumes[-50:]) or last(sma(volumes, 50)) or avg_volume_20
+    volume_ratio = safe_divide(volume, avg_volume_20) if avg_volume_20 else None
+    delivery_proxy = safe_divide(volume, avg_volume_50) if avg_volume_50 else None
+    liquidity_value = current * volume
+    atr_value = last(atr(candles, 14)) or current * 0.02
+    atr_percent = safe_divide(atr_value, current) * 100
+    sma20_value = last(sma(closes, 20))
+    sma50_value = last(sma(closes, 50))
+    rsi_value = last(rsi(closes, 14))
+    bands = bollinger(closes, 20, 2)
+    bollinger_widths = [
+        safe_divide(upper - lower, middle) * 100
+        for upper, lower, middle in zip(bands["upper"], bands["lower"], bands["middle"])
+        if is_finite(upper) and is_finite(lower) and is_finite(middle) and middle
+    ]
+    bollinger_width = bollinger_widths[-1] if bollinger_widths else None
+    average_bollinger_width = average(bollinger_widths[-60:]) if bollinger_widths else None
+    volatility_tight = (
+        is_finite(bollinger_width)
+        and (
+            bollinger_width <= 6
+            or (
+                is_finite(average_bollinger_width)
+                and average_bollinger_width > 0
+                and bollinger_width <= average_bollinger_width * 0.78
+            )
+        )
+    )
+
+    prior_5_high = max(highs[-6:-1])
+    prior_5_low = min(lows[-6:-1])
+    prior_20_high = max(highs[-21:-1])
+    prior_20_low = min(lows[-21:-1])
+    high_52 = finite_or(stock.get("nseYearHigh"), max(highs))
+    low_52 = finite_or(stock.get("nseYearLow"), min(lows))
+    pct_below_52_high = safe_divide(high_52 - current, high_52) * 100 if high_52 else None
+    pct_above_52_low = safe_divide(current - low_52, low_52) * 100 if low_52 else None
+    above_sma20 = is_finite(sma20_value) and current > sma20_value
+    below_sma20 = is_finite(sma20_value) and current < sma20_value
+    above_sma50 = is_finite(sma50_value) and current > sma50_value
+    below_sma50 = is_finite(sma50_value) and current < sma50_value
+    volume_spike = is_finite(volume_ratio) and volume_ratio >= 1.8
+    participation_spike = is_finite(delivery_proxy) and delivery_proxy >= 1.35
+    near_high = is_finite(pct_below_52_high) and 0 <= pct_below_52_high <= 6
+    near_low = is_finite(pct_above_52_low) and 0 <= pct_above_52_low <= 12
+    long_breakout = current > prior_20_high and previous_close <= prior_20_high
+    short_breakdown = current < prior_20_low and previous_close >= prior_20_low
+    long_watch = current >= prior_5_high * 0.995 or current >= prior_20_high * 0.99
+    short_watch = current <= prior_5_low * 1.005 or current <= prior_20_low * 1.01
+
+    long_score = intraday_direction_score(
+        direction="Long",
+        change_percent=change_percent,
+        volume_ratio=volume_ratio,
+        delivery_proxy=delivery_proxy,
+        liquidity_value=liquidity_value,
+        near_extreme=near_high,
+        breakout=long_breakout,
+        watch=long_watch,
+        trend_ok=above_sma20 or above_sma50,
+        volatility_tight=volatility_tight,
+        rsi_value=rsi_value,
+    )
+    short_score = intraday_direction_score(
+        direction="Short",
+        change_percent=change_percent,
+        volume_ratio=volume_ratio,
+        delivery_proxy=delivery_proxy,
+        liquidity_value=liquidity_value,
+        near_extreme=near_low,
+        breakout=short_breakdown,
+        watch=short_watch,
+        trend_ok=below_sma20 or below_sma50,
+        volatility_tight=volatility_tight,
+        rsi_value=rsi_value,
+    )
+
+    direction = "Long" if long_score >= short_score else "Short"
+    score = max(long_score, short_score)
+    if score < 58:
+        return None
+    if not volume_spike and not participation_spike:
+        return None
+    if direction == "Long" and not (change_percent > 0 and (long_breakout or long_watch or near_high or volatility_tight)):
+        return None
+    if direction == "Short" and not (change_percent < 0 and (short_breakdown or short_watch or near_low or volatility_tight)):
+        return None
+
+    expected_move = estimate_intraday_move_percent(atr_percent, volume_ratio, change_percent, score)
+    if expected_move < INTRADAY_MIN_EXPECTED_MOVE_PERCENT:
+        return None
+
+    if direction == "Long":
+        trigger_price = max(current, prior_5_high if long_watch and not long_breakout else current)
+        target_near = current * (1 + INTRADAY_MIN_EXPECTED_MOVE_PERCENT / 100)
+        target_far = current * (1 + expected_move / 100)
+        stop_loss = current - max(atr_value * 0.65, current * 0.012)
+        setup = intraday_setup_label("Long", long_breakout, near_high, volatility_tight, volume_spike)
+    else:
+        trigger_price = min(current, prior_5_low if short_watch and not short_breakdown else current)
+        target_near = current * (1 - INTRADAY_MIN_EXPECTED_MOVE_PERCENT / 100)
+        target_far = current * (1 - expected_move / 100)
+        stop_loss = current + max(atr_value * 0.65, current * 0.012)
+        setup = intraday_setup_label("Short", short_breakdown, near_low, volatility_tight, volume_spike)
+
+    risk_percent = abs(safe_divide(current - stop_loss, current) * 100)
+    reasons = intraday_reasons(
+        direction,
+        volume_ratio,
+        delivery_proxy,
+        change_percent,
+        long_breakout if direction == "Long" else short_breakdown,
+        near_high if direction == "Long" else near_low,
+        volatility_tight,
+        rsi_value,
+        atr_percent,
+    )
+
+    return {
+        "symbol": symbol,
+        "analysisSymbol": symbol,
+        "name": first_present(stock.get("name"), symbol),
+        "direction": direction,
+        "bias": "Up" if direction == "Long" else "Down",
+        "setup": setup,
+        "score": round(clamp(score, 0, 100)),
+        "price": round_or_none(current),
+        "changePercent": round_or_none(change_percent),
+        "triggerPrice": round_or_none(trigger_price),
+        "targetNear": round_or_none(target_near),
+        "targetFar": round_or_none(target_far),
+        "stopLoss": round_or_none(stop_loss),
+        "riskPercent": round_or_none(risk_percent),
+        "expectedMovePercent": round_or_none(expected_move),
+        "expectedMoveRange": {
+            "low": INTRADAY_MIN_EXPECTED_MOVE_PERCENT,
+            "high": round_or_none(expected_move),
+        },
+        "volume": round(volume),
+        "avgVolume20": round(avg_volume_20 or 0),
+        "volumeRatio": round_or_none(volume_ratio),
+        "deliveryProxy": round_or_none(delivery_proxy),
+        "liquidityValue": round_or_none(liquidity_value),
+        "atrPercent": round_or_none(atr_percent),
+        "rsi14": round_or_none(rsi_value),
+        "bollingerWidthPercent": round_or_none(bollinger_width),
+        "levels": {
+            "prior5High": round_or_none(prior_5_high),
+            "prior5Low": round_or_none(prior_5_low),
+            "prior20High": round_or_none(prior_20_high),
+            "prior20Low": round_or_none(prior_20_low),
+            "sma20": round_or_none(sma20_value),
+            "sma50": round_or_none(sma50_value),
+            "pctBelow52WeekHigh": round_or_none(pct_below_52_high),
+            "pctAbove52WeekLow": round_or_none(pct_above_52_low),
+        },
+        "tags": stock.get("tags") or [],
+        "reason": " ".join(reasons),
+    }
+
+
+def intraday_direction_score(
+    direction,
+    change_percent,
+    volume_ratio,
+    delivery_proxy,
+    liquidity_value,
+    near_extreme,
+    breakout,
+    watch,
+    trend_ok,
+    volatility_tight,
+    rsi_value,
+):
+    signed_change = finite_or(change_percent, 0)
+    if direction == "Short":
+        signed_change = -signed_change
+    rsi_ok = (
+        not is_finite(rsi_value)
+        or (direction == "Long" and 48 <= rsi_value <= 76)
+        or (direction == "Short" and 24 <= rsi_value <= 52)
+    )
+    score = 22
+    score += clamp(signed_change * 7, -22, 28)
+    score += clamp(((volume_ratio or 0) - 1) * 18, 0, 34)
+    score += clamp(((delivery_proxy or 0) - 1) * 9, 0, 16)
+    score += 14 if breakout else 0
+    score += 9 if watch else 0
+    score += 8 if near_extreme else 0
+    score += 8 if trend_ok else 0
+    score += 6 if volatility_tight else 0
+    score += 5 if rsi_ok else -6
+    score += 8 if is_finite(liquidity_value) and liquidity_value >= 20_00_00_000 else 0
+    return round(clamp(score, 0, 100))
+
+
+def usable_intraday_candles(candles):
+    usable = []
+    for candle in candles or []:
+        if not isinstance(candle, dict):
+            continue
+        open_price = finite_or(candle.get("open"))
+        high = finite_or(candle.get("high"))
+        low = finite_or(candle.get("low"))
+        close = finite_or(candle.get("close"))
+        if not all(is_finite(value) for value in (open_price, high, low, close)):
+            continue
+        if high < low:
+            continue
+        volume = finite_or(candle.get("volume"), 0)
+        usable.append({
+            **candle,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        })
+    return usable
+
+
+def estimate_intraday_move_percent(atr_percent, volume_ratio, change_percent, score):
+    base = max(atr_percent or 0, abs(change_percent or 0) * 0.55)
+    volume_boost = clamp((volume_ratio or 0) - 1, 0, 3) * 0.45
+    score_boost = clamp(score - 58, 0, 30) * 0.035
+    return round2(clamp(base + volume_boost + score_boost, INTRADAY_MIN_EXPECTED_MOVE_PERCENT, INTRADAY_MAX_EXPECTED_MOVE_PERCENT))
+
+
+def intraday_setup_label(direction, breakout, near_extreme, volatility_tight, volume_spike):
+    if direction == "Long":
+        if breakout and volume_spike:
+            return "Volume breakout long"
+        if near_extreme and volume_spike:
+            return "52-week high momentum long"
+        if volatility_tight:
+            return "Coiled range long watch"
+        return "Upside momentum long"
+    if breakout and volume_spike:
+        return "Volume breakdown short"
+    if near_extreme and volume_spike:
+        return "52-week low pressure short"
+    if volatility_tight:
+        return "Coiled range short watch"
+    return "Downside momentum short"
+
+
+def intraday_reasons(direction, volume_ratio, delivery_proxy, change_percent, breakout, near_extreme, volatility_tight, rsi_value, atr_percent):
+    reasons = []
+    if is_finite(volume_ratio):
+        reasons.append(f"Volume is {volume_ratio:.2f}x the 20-day average.")
+    if is_finite(delivery_proxy):
+        reasons.append(f"Participation proxy is {delivery_proxy:.2f}x the 50-day average.")
+    if is_finite(change_percent):
+        direction_word = "up" if direction == "Long" else "down"
+        reasons.append(f"Price is {direction_word} {abs(change_percent):.2f}% on the latest snapshot.")
+    if breakout:
+        reasons.append("Price has cleared the key short-term range." if direction == "Long" else "Price has broken below the key short-term range.")
+    elif near_extreme:
+        reasons.append("Price is close to a 52-week high/low zone.")
+    if volatility_tight:
+        reasons.append("Bollinger bandwidth shows a compressed range before expansion.")
+    if is_finite(rsi_value):
+        reasons.append(f"RSI is {rsi_value:.1f}.")
+    if is_finite(atr_percent):
+        reasons.append(f"ATR implies roughly {atr_percent:.2f}% daily movement.")
+    return reasons
+
+
+def summarize_intraday_recommendations(rows, failed_count=0):
+    skipped = f" {failed_count} symbols could not be checked." if failed_count else ""
+    if not rows:
+        return f"No intraday candidates passed the 3-5% move, volume, momentum, and structure filters.{skipped}"
+    long_count = sum(1 for row in rows if row.get("direction") == "Long")
+    short_count = sum(1 for row in rows if row.get("direction") == "Short")
+    top = rows[0]
+    return (
+        f"{len(rows)} intraday watchlist candidates: {long_count} long-biased and {short_count} short-biased. "
+        f"Top setup: {top.get('symbol')} {top.get('direction')} at {top.get('score')}/100."
+        f"{skipped}"
+    )
+
+
+def safe_daily_recommendations():
+    try:
+        return build_daily_recommendations()
+    except Exception as error:
+        return empty_daily_recommendations(str(error))
+
+
+def empty_daily_recommendations(error=""):
+    return {
+        "source": "NSE Nifty 500 snapshot fields and Yahoo Finance daily candles",
+        "note": "Daily Nifty 500 short-term scan could not be completed from public provider data.",
+        "summary": "Daily short-term candidates are temporarily unavailable; refresh after provider data returns.",
+        "scannedCount": 0,
+        "failedCount": 0,
+        "results": [],
+        "error": error,
+    }
+
+
+def build_daily_recommendations():
+    universe = daily_recommendation_universe()
+    results = settle_map(
+        universe,
+        build_daily_recommendation_candidate,
+        RECOMMENDATION_PROVIDER_CONCURRENCY,
+    )
+    failed_count = sum(1 for ok, _value in results if not ok)
+    rows = [
+        value
+        for ok, value in results
+        if ok and value
+    ]
+    rows = sorted(
+        rows,
+        key=lambda item: (
+            item.get("score") or 0,
+            item.get("upsidePercent") if is_finite(item.get("upsidePercent")) else 0,
+            item.get("volumeRatio") if is_finite(item.get("volumeRatio")) else 0,
+        ),
+        reverse=True,
+    )[:DAILY_RECOMMENDATION_RESULT_LIMIT]
+
+    return {
+        "source": "NSE Nifty 500 snapshot fields and Yahoo Finance daily candles",
+        "note": daily_recommendation_note(failed_count),
+        "summary": summarize_daily_recommendations(rows, failed_count),
+        "scannedCount": len(universe),
+        "failedCount": failed_count,
+        "results": rows,
+    }
+
+
+def daily_recommendation_note(failed_count=0):
+    skipped = f" {failed_count} symbols could not be checked from public data." if failed_count else ""
+    return (
+        "Daily rows are short-term technical watchlist candidates from Nifty 500 price/volume action, "
+        "not analyst recommendations. Confirm live chart, liquidity, news, and broad-market context before trading."
+        f"{skipped}"
+    )
+
+
+def daily_recommendation_universe():
+    stocks = []
+    nse_universe = safe_nifty500_primary_universe()
+    if nse_universe:
+        stocks.extend(primary_scan_candidates_from_nifty500(nse_universe)[:DAILY_RECOMMENDATION_SCAN_LIMIT])
+    stocks.extend([
+        {"symbol": symbol, "name": name, "tags": list(tags)}
+        for symbol, name, tags in RECOMMENDATION_FALLBACK_UNIVERSE
+    ])
+
+    by_symbol = {}
+    for stock in stocks:
+        symbol = normalize_symbol(stock.get("symbol"))
+        if not symbol:
+            continue
+        by_symbol.setdefault(symbol, {**stock, "symbol": symbol})
+    return list(by_symbol.values())[:DAILY_RECOMMENDATION_SCAN_LIMIT]
+
+
+def build_daily_recommendation_candidate(stock):
+    scanned = scan_watchlist_stock(stock)
+    return build_daily_recommendation_from_scan(scanned)
+
+
+def build_daily_recommendation_from_scan(stock):
+    if not is_daily_recommendation_candidate(stock):
+        return None
+    symbol = normalize_symbol(stock.get("symbol"))
+    current = stock.get("price")
+    if not symbol or not is_finite(current) or current <= 0:
+        return None
+
+    atr_value = stock.get("atr") if is_finite(stock.get("atr")) and stock.get("atr") > 0 else current * 0.025
+    entry_high = round2(current)
+    entry_low = round2(max(current - atr_value * 0.45, current * 0.97))
+    target_percent = daily_target_percent(stock)
+    sell_price = round2(current * (1 + target_percent / 100))
+    stop_loss = round2(current - max(atr_value * 1.15, current * 0.035))
+    risk_percent = safe_divide(entry_high - stop_loss, entry_high) * 100
+    score = daily_recommendation_score(
+        stock.get("changePercent") or 0,
+        stock.get("volumeRatio"),
+        stock.get("oneWeek"),
+        stock.get("oneMonth"),
+        stock.get("pctBelow52WeekHigh"),
+        bool(stock.get("breakout") or stock.get("narrowRange4Breakout") or stock.get("narrowRange7Breakout")),
+        bool(stock.get("breakoutWatch") or stock.get("narrowRange4Watch") or stock.get("narrowRange7Watch")),
+        bool(stock.get("bullishReversal") or stock.get("trendReversal") or stock.get("reversalWatch")),
+        stock.get("rsi14"),
+    )
+
+    return {
+        "symbol": symbol,
+        "analysisSymbol": symbol,
+        "name": first_present(stock.get("name"), symbol),
+        "recommendedBy": "Nifty 500 daily technical scan",
+        "recommenderDetails": [{
+            "type": "Daily technical scan",
+            "name": "Nifty 500",
+            "group": "Price/volume/52-week structure",
+            "detail": daily_recommendation_detail(stock),
+        }],
+        "fundGroup": "Price/volume/52-week structure",
+        "sourceType": "Daily Nifty 500",
+        "sourceDetail": "NSE Nifty 500 snapshot and daily candle scan",
+        "buyPrice": entry_high,
+        "buyRange": {"low": entry_low, "high": entry_high},
+        "sellPrice": sell_price,
+        "stopLoss": stop_loss,
+        "duration": "3-15 sessions",
+        "currentPrice": round_or_none(current),
+        "upsidePercent": round_or_none(target_percent),
+        "riskPercent": round_or_none(risk_percent),
+        "score": score,
+        "analyst": {
+            "recommendationMean": None,
+            "recommendationKey": "",
+            "targetMeanPrice": None,
+            "analystCount": None,
+        },
+        "ownershipSignals": [],
+        "quarterlyResults": {
+            "available": True,
+            "period": "Daily scan",
+            "source": "NSE Nifty 500 / Yahoo Finance daily candles",
+            "summary": "Tactical daily technical candidate; quarterly result data is not part of this signal.",
+        },
+        "reason": daily_recommendation_reason_from_scan(stock),
+    }
+
+
+def is_daily_recommendation_candidate(stock):
+    score = stock.get("score") or 0
+    volume_ratio = stock.get("volumeRatio")
+    change_percent = stock.get("changePercent")
+    constructive_structure = any([
+        stock.get("breakout"),
+        stock.get("breakoutWatch"),
+        stock.get("narrowRange4Breakout"),
+        stock.get("narrowRange7Breakout"),
+        stock.get("narrowRange4Watch"),
+        stock.get("narrowRange7Watch"),
+        stock.get("bullishReversal"),
+        stock.get("trendReversal"),
+        stock.get("reversalWatch"),
+        stock.get("near52WeekHigh"),
+    ])
+    return (
+        score >= 48
+        and constructive_structure
+        and (not is_finite(change_percent) or change_percent >= -1.5)
+        and (
+            (is_finite(volume_ratio) and volume_ratio >= 1.05)
+            or score >= 65
+            or stock.get("breakout")
+            or stock.get("narrowRange7Breakout")
+        )
+    )
+
+
+def daily_target_percent(stock):
+    atr_value = stock.get("atr")
+    price = stock.get("price")
+    atr_percent = safe_divide(atr_value, price) * 100 if is_finite(atr_value) and is_finite(price) and price > 0 else 2.5
+    structure_bonus = 1.5 if stock.get("breakout") or stock.get("narrowRange7Breakout") else 0.75
+    volume_bonus = clamp((stock.get("volumeRatio") or 1) - 1, 0, 2) * 0.6
+    return clamp(max(4.0, atr_percent * 1.8 + structure_bonus + volume_bonus), 4.0, 12.0)
+
+
+def daily_recommendation_detail(stock):
+    parts = [
+        stock.get("signal") or "Daily technical setup",
+        f"score {stock.get('score')}/100" if is_finite(stock.get("score")) else "",
+        f"volume {stock.get('volumeRatio'):.2f}x 20D avg" if is_finite(stock.get("volumeRatio")) else "",
+        f"52W high gap {stock.get('pctBelow52WeekHigh'):.2f}%" if is_finite(stock.get("pctBelow52WeekHigh")) else "",
+    ]
+    return "; ".join(part for part in parts if part)
+
+
+def daily_recommendation_reason_from_scan(stock):
+    parts = [f"Daily Nifty 500 scan: {stock.get('signal') or 'technical setup'}."]
+    if is_finite(stock.get("volumeRatio")):
+        parts.append(f"Volume {stock['volumeRatio']:.2f}x 20-day average.")
+    if is_finite(stock.get("oneMonth")):
+        parts.append(f"One-month momentum {stock['oneMonth']:.2f}%.")
+    if stock.get("breakout") or stock.get("narrowRange4Breakout") or stock.get("narrowRange7Breakout"):
+        parts.append("Breakout structure is active.")
+    elif stock.get("breakoutWatch") or stock.get("narrowRange4Watch") or stock.get("narrowRange7Watch"):
+        parts.append("Price is close to a breakout trigger.")
+    elif stock.get("bullishReversal") or stock.get("trendReversal") or stock.get("reversalWatch"):
+        parts.append("Reversal structure is improving.")
+    return " ".join(parts)
+
+
+def build_daily_recommendation_from_inputs(stock, candles):
+    symbol = normalize_symbol(stock.get("symbol"))
+    if not symbol:
+        return None
+    candles = usable_intraday_candles(candles)
+    if len(candles) < 55:
+        return None
+
+    candles = candles[-126:]
+    latest = candles[-1]
+    previous = candles[-2]
+    closes = [candle["close"] for candle in candles]
+    highs = [candle["high"] for candle in candles]
+    lows = [candle["low"] for candle in candles]
+    volumes = [candle.get("volume") or 0 for candle in candles]
+    current = finite_or(stock.get("nsePrice"), latest["close"])
+    previous_close = previous["close"]
+    if not is_finite(current) or current <= 0 or not is_finite(previous_close) or previous_close <= 0:
+        return None
+
+    change_percent = finite_or(
+        stock.get("nseChangePercent"),
+        safe_divide(current - previous_close, previous_close) * 100,
+        0,
+    )
+    volume = finite_or(stock.get("nseVolume"), latest.get("volume"), 0) or 0
+    prior_volumes = volumes[:-1]
+    avg_volume_20 = average(prior_volumes[-20:])
+    volume_ratio = safe_divide(volume, avg_volume_20) if avg_volume_20 else None
+    atr_value = last(atr(candles, 14)) or current * 0.025
+    atr_percent = safe_divide(atr_value, current) * 100
+    sma20_value = last(sma(closes, 20))
+    sma50_value = last(sma(closes, 50))
+    rsi_value = last(rsi(closes, 14))
+    prior_20_high = max(highs[-21:-1])
+    prior_20_low = min(lows[-21:-1])
+    prior_55_high = max(highs[-56:-1])
+    high_52 = finite_or(stock.get("nseYearHigh"), max(highs))
+    near_high = safe_divide(high_52 - current, high_52) * 100 if high_52 else None
+    one_week = period_return(closes, 5)
+    one_month = period_return(closes, 21)
+    trend_ok = (
+        is_finite(sma20_value)
+        and is_finite(sma50_value)
+        and current >= sma20_value
+        and current >= sma50_value * 0.98
+    )
+    breakout = current > prior_20_high and previous_close <= prior_20_high
+    breakout_watch = current >= prior_20_high * 0.99 or current >= prior_55_high * 0.985
+    pullback_reclaim = (
+        is_finite(sma20_value)
+        and previous_close < sma20_value
+        and current >= sma20_value
+        and change_percent > 0
+    )
+    volume_ok = (is_finite(volume_ratio) and volume_ratio >= 1.15) or change_percent >= 1.5
+    rsi_ok = not is_finite(rsi_value) or 45 <= rsi_value <= 72
+    if not trend_ok or not volume_ok or not rsi_ok or not (breakout or breakout_watch or pullback_reclaim):
+        return None
+
+    target_percent = clamp(
+        max(atr_percent * 1.8, 4) + clamp(change_percent, 0, 4) * 0.35 + clamp((volume_ratio or 1) - 1, 0, 2) * 0.7,
+        4,
+        12,
+    )
+    entry_high = round2(current)
+    entry_low = round2(max(current - max(atr_value * 0.45, current * 0.012), prior_20_low))
+    sell_price = round2(current * (1 + target_percent / 100))
+    stop_loss = round2(max(min(prior_20_low * 0.995, current - atr_value * 1.05), current * 0.9))
+    risk_percent = safe_divide(entry_high - stop_loss, entry_high) * 100
+    score = daily_recommendation_score(
+        change_percent,
+        volume_ratio,
+        one_week,
+        one_month,
+        near_high,
+        breakout,
+        breakout_watch,
+        pullback_reclaim,
+        rsi_value,
+    )
+    setup = daily_recommendation_setup(breakout, breakout_watch, pullback_reclaim)
+
+    return {
+        "symbol": symbol,
+        "analysisSymbol": symbol,
+        "name": first_present(stock.get("name"), symbol),
+        "recommendedBy": "Nifty 500 daily technical scan",
+        "recommenderDetails": [{
+            "type": "Technical scan",
+            "name": "Nifty 500 daily scan",
+            "group": "Short-term price/volume setup",
+            "detail": (
+                f"{setup}; price change {round2(change_percent)}%, "
+                f"volume {round_or_none(volume_ratio) if is_finite(volume_ratio) else 'n/a'}x 20-day average."
+            ),
+        }],
+        "fundGroup": "Short-term price/volume setup",
+        "sourceType": "Daily Nifty 500",
+        "sourceDetail": "NSE Nifty 500 snapshot + Yahoo Finance daily candles",
+        "buyPrice": entry_high,
+        "buyRange": {"low": entry_low, "high": entry_high},
+        "sellPrice": sell_price,
+        "stopLoss": stop_loss,
+        "duration": "3-15 sessions",
+        "currentPrice": round_or_none(current),
+        "upsidePercent": round_or_none(target_percent),
+        "riskPercent": round_or_none(risk_percent),
+        "score": score,
+        "analyst": {
+            "recommendationMean": None,
+            "recommendationKey": "",
+            "targetMeanPrice": None,
+            "analystCount": None,
+        },
+        "ownershipSignals": [],
+        "quarterlyResults": {
+            "available": True,
+            "period": "Daily scan",
+            "source": "NSE/Yahoo daily technical scan",
+            "summary": (
+                f"{setup}. RSI {round_or_none(rsi_value) if is_finite(rsi_value) else 'n/a'}; "
+                f"ATR {round_or_none(atr_percent) if is_finite(atr_percent) else 'n/a'}%; "
+                f"20D volume ratio {round_or_none(volume_ratio) if is_finite(volume_ratio) else 'n/a'}x."
+            ),
+        },
+        "reason": daily_recommendation_reason(setup, change_percent, volume_ratio, one_week, one_month),
+        "technicalSetup": {
+            "setup": setup,
+            "changePercent": round_or_none(change_percent),
+            "volumeRatio": round_or_none(volume_ratio),
+            "rsi14": round_or_none(rsi_value),
+            "atrPercent": round_or_none(atr_percent),
+            "oneWeek": round_or_none(one_week),
+            "oneMonth": round_or_none(one_month),
+            "pctBelow52WeekHigh": round_or_none(near_high),
+        },
+    }
+
+
+def daily_recommendation_score(change_percent, volume_ratio, one_week, one_month, near_high, breakout, breakout_watch, pullback_reclaim, rsi_value):
+    score = 48
+    score += clamp(change_percent * 4, -10, 20)
+    score += clamp(((volume_ratio or 0) - 1) * 14, 0, 24)
+    score += clamp(one_week or 0, -8, 12)
+    score += clamp((one_month or 0) * 0.6, -8, 12)
+    score += 12 if breakout else 0
+    score += 7 if breakout_watch else 0
+    score += 8 if pullback_reclaim else 0
+    if is_finite(near_high) and 0 <= near_high <= 8:
+        score += 6
+    if is_finite(rsi_value) and 52 <= rsi_value <= 68:
+        score += 5
+    return round(clamp(score, 0, 100))
+
+
+def daily_recommendation_setup(breakout, breakout_watch, pullback_reclaim):
+    if breakout:
+        return "20-day breakout with volume confirmation"
+    if pullback_reclaim:
+        return "20-day average reclaim after pullback"
+    if breakout_watch:
+        return "Breakout watch near recent high"
+    return "Short-term momentum watch"
+
+
+def daily_recommendation_reason(setup, change_percent, volume_ratio, one_week, one_month):
+    parts = [setup]
+    if is_finite(change_percent):
+        parts.append(f"latest move {change_percent:.2f}%.")
+    if is_finite(volume_ratio):
+        parts.append(f"volume is {volume_ratio:.2f}x the 20-day average.")
+    if is_finite(one_week):
+        parts.append(f"1W return {one_week:.2f}%.")
+    if is_finite(one_month):
+        parts.append(f"1M return {one_month:.2f}%.")
+    return " ".join(parts)
+
+
+def summarize_daily_recommendations(rows, failed_count=0):
+    skipped = f" {failed_count} symbols could not be checked." if failed_count else ""
+    if not rows:
+        return f"No daily Nifty 500 short-term candidates passed the current price/volume filters.{skipped}"
+    top = rows[0]
+    return (
+        f"{len(rows)} daily short-term candidates from the Nifty 500 scan. "
+        f"Top setup: {top.get('symbol')} at {top.get('score')}/100."
+        f"{skipped}"
+    )
+
+
+def merge_recommendation_rows(rows):
+    merged = {}
+    for row in rows:
+        symbol = normalize_symbol(row.get("symbol"))
+        if not symbol:
+            continue
+        existing = merged.get(symbol)
+        if not existing:
+            merged[symbol] = row
+            continue
+        primary, secondary = (
+            (row, existing)
+            if (row.get("score") or 0) > (existing.get("score") or 0)
+            else (existing, row)
+        )
+        merged[symbol] = {
+            **secondary,
+            **primary,
+            "symbol": symbol,
+            "analysisSymbol": first_present(primary.get("analysisSymbol"), secondary.get("analysisSymbol"), symbol),
+            "recommendedBy": join_unique_text(existing.get("recommendedBy"), row.get("recommendedBy")),
+            "fundGroup": join_unique_text(existing.get("fundGroup"), row.get("fundGroup")),
+            "sourceType": join_unique_text(existing.get("sourceType"), row.get("sourceType")),
+            "sourceDetail": join_unique_text(existing.get("sourceDetail"), row.get("sourceDetail"), separator=" | "),
+            "reason": join_unique_text(existing.get("reason"), row.get("reason"), separator=" "),
+            "recommenderDetails": merge_recommender_details(existing.get("recommenderDetails"), row.get("recommenderDetails")),
+        }
+    return list(merged.values())
+
+
+def join_unique_text(*values, separator=" + "):
+    parts = []
+    for value in values:
+        split_values = (
+            str(value or "").split(separator)
+            if separator != " " and separator in str(value or "")
+            else [str(value or "")]
+        )
+        for part in split_values:
+            part = part.strip()
+            if part and part not in parts:
+                parts.append(part)
+    return separator.join(parts)
+
+
+def merge_recommender_details(*groups):
+    details = []
+    seen = set()
+    for group in groups:
+        for item in group or []:
+            key = (item.get("type"), item.get("name"), item.get("detail"))
+            if key in seen:
+                continue
+            seen.add(key)
+            details.append(item)
+    return details
 
 
 def recommendation_universe():
@@ -3097,12 +4043,14 @@ def recommendation_score(recommendation_mean, analyst_upside, analyst_count, own
 
 def summarize_recommendations(rows):
     if not rows:
-        return "No analyst or FII/DII recommendation candidates passed the current filters."
+        return "No analyst, FII/DII, or daily Nifty 500 recommendation candidates passed the current filters."
     analyst_count = sum(1 for row in rows if "Analyst" in row.get("sourceType", ""))
     ownership_count = sum(1 for row in rows if "FII/DII" in row.get("sourceType", ""))
+    daily_count = sum(1 for row in rows if "Daily" in row.get("sourceType", ""))
     top = rows[0]
     return (
-        f"{len(rows)} ideas from {analyst_count} analyst-backed and {ownership_count} FII/DII-backed signals. "
+        f"{len(rows)} ideas from {analyst_count} analyst-backed, {ownership_count} FII/DII-backed, "
+        f"and {daily_count} daily Nifty 500 technical signals. "
         f"Top score: {top.get('symbol')} at {top.get('score')}/100."
     )
 
@@ -3239,7 +4187,31 @@ def safe_nifty500_primary_universe():
 
 
 def build_nifty500_primary_universe():
-    payload = fetch_nse_stock_index_payload(NIFTY_500_INDEX_NAME)
+    errors = []
+    try:
+        rows = build_nifty500_primary_universe_from_index_payload(
+            fetch_nse_stock_index_payload(NIFTY_500_INDEX_NAME)
+        )
+    except RuntimeError as error:
+        errors.append(str(error))
+        rows = []
+    if rows:
+        return merge_watchlists(rows)
+
+    try:
+        rows = build_nifty500_primary_universe_from_csv()
+    except RuntimeError as error:
+        errors.append(str(error))
+        rows = []
+
+    universe = merge_watchlists(rows)
+    if not universe:
+        detail = f" {' '.join(errors)}" if errors else ""
+        raise RuntimeError(f"NSE Nifty 500 constituents were unavailable.{detail}".strip())
+    return enrich_nifty500_universe_with_yahoo_quotes(universe)
+
+
+def build_nifty500_primary_universe_from_index_payload(payload):
     index_key = sector_match_key(NIFTY_500_INDEX_NAME)
     rows = []
     for item in payload.get("data") or []:
@@ -3261,11 +4233,92 @@ def build_nifty500_primary_universe():
             "nseYearHigh": nse_round(item.get("yearHigh")),
             "nseYearLow": nse_round(item.get("yearLow")),
         })
+    return rows
 
-    universe = merge_watchlists(rows)
-    if not universe:
-        raise RuntimeError("NSE Nifty 500 constituents were unavailable.")
-    return universe
+
+def build_nifty500_primary_universe_from_csv():
+    text = fetch_text_once(NIFTY_500_CONSTITUENTS_CSV_URL, timeout=8)
+    rows = []
+    for item in csv.DictReader(StringIO((text or "").lstrip("\ufeff"))):
+        symbol = nse_text(
+            item.get("Symbol")
+            or item.get("SYMBOL")
+            or item.get("symbol")
+        ).upper()
+        if not symbol:
+            continue
+        industry = nse_text(item.get("Industry"))
+        tags = ["Nifty 500"]
+        if industry:
+            tags.append(industry)
+        rows.append({
+            "symbol": f"{symbol}.NS",
+            "name": nse_text(
+                item.get("Company Name")
+                or item.get("Company")
+                or item.get("Security Name")
+                or item.get("Name")
+            ) or symbol,
+            "tags": tags,
+            "niftyIndexSource": "Nifty Indices constituent CSV",
+            "nsePrice": None,
+            "nseChangePercent": None,
+            "nseVolume": None,
+            "nseValue": None,
+            "nseYearHigh": None,
+            "nseYearLow": None,
+        })
+    return rows
+
+
+def enrich_nifty500_universe_with_yahoo_quotes(universe):
+    quotes = {}
+    for batch in batches([stock.get("symbol") for stock in universe], 80):
+        try:
+            quotes.update(get_quotes(batch))
+        except RuntimeError:
+            continue
+
+    if not quotes:
+        return universe
+
+    enriched = []
+    for stock in universe:
+        quote_data = quotes.get(stock.get("symbol")) or {}
+        price = nse_round(raw(quote_data.get("regularMarketPrice")))
+        volume = nse_int(raw(quote_data.get("regularMarketVolume")))
+        value = price * volume if is_finite(price) and is_finite(volume) else None
+        enriched.append({
+            **stock,
+            "name": first_present(
+                stock.get("name"),
+                quote_data.get("shortName"),
+                quote_data.get("longName"),
+                stock.get("symbol"),
+            ),
+            "nsePrice": first_present(stock.get("nsePrice"), price),
+            "nseChangePercent": first_present(
+                stock.get("nseChangePercent"),
+                nse_round(raw(quote_data.get("regularMarketChangePercent"))),
+            ),
+            "nseVolume": first_present(stock.get("nseVolume"), volume),
+            "nseValue": first_present(stock.get("nseValue"), value),
+            "nseYearHigh": first_present(
+                stock.get("nseYearHigh"),
+                nse_round(raw(quote_data.get("fiftyTwoWeekHigh"))),
+            ),
+            "nseYearLow": first_present(
+                stock.get("nseYearLow"),
+                nse_round(raw(quote_data.get("fiftyTwoWeekLow"))),
+            ),
+        })
+    return enriched
+
+
+def batches(values, size):
+    clean_values = [value for value in values if value]
+    for index in range(0, len(clean_values), size):
+        yield clean_values[index:index + size]
 
 
 def primary_scan_candidates_from_nifty500(universe):
@@ -8090,6 +9143,21 @@ def fetch_text(endpoint, json_request=False, sec=False):
     raise RuntimeError("Market data provider is temporarily unavailable. Please retry in a moment.") from last_error
 
 
+def fetch_text_once(endpoint, timeout=8):
+    headers = {
+        "Accept": "text/csv,text/plain,*/*",
+        "User-Agent": "Mozilla/5.0 StockResearchDesk/0.1",
+    }
+    request = Request(endpoint, headers=headers)
+    try:
+        with urlopen(request, timeout=timeout, context=SSL_CONTEXT) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except HTTPError as error:
+        raise RuntimeError(f"Data provider returned {error.code}.") from error
+    except (TimeoutError, URLError, OSError) as error:
+        raise RuntimeError("Market data provider is temporarily unavailable. Please retry in a moment.") from error
+
+
 def cached(key, loader, ttl=CACHE_TTL_SECONDS):
     cached_value = _cache.get(key)
     if cached_value and cached_value["expiresAt"] > time.time():
@@ -8121,9 +9189,15 @@ def clear_cache(key):
     _cache.pop(key, None)
 
 
+def clear_cache_prefix(prefix):
+    for key in list(_cache.keys()):
+        if key == prefix or key.startswith(f"{prefix}:"):
+            _cache.pop(key, None)
+
+
 def normalize_symbol(value):
     symbol = str(value or "").strip().upper()
-    return symbol if re.fullmatch(r"[A-Z0-9.^=_-]{1,25}", symbol) else ""
+    return symbol if re.fullmatch(r"[A-Z0-9.&^=_-]{1,25}", symbol) else ""
 
 
 def raw(value):
