@@ -1,7 +1,8 @@
 {% load static %}
 {% comment %}
   base.html - the single-page workspace shell served at /app by core.views.index.
-  Renders the sidebar nav, hero search, and includes each tab app's partial
+  Renders the sidebar nav (Stock Analysis, Agent Desk, Recommendations, Market
+  Monitor, ETF Analysis, Mutual Funds), hero search, and each tab app's partial
   ({% include "<app>/tab.html" %}). Tabs are switched client-side by public/app.js.
   Shared assets: public/styles.css, public/app.js, public/cursor.js.
 {% endcomment %}
@@ -16,7 +17,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260618-intraday-1">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260828-perf-1">
     <script src="{% static 'loading.js' %}?v=20260614-pick-1"></script>
   </head>
   <body data-active-tab="analysis">
@@ -34,6 +35,10 @@
           <button class="tab-button is-active" type="button" id="analysisTab">
             <i class="bx bx-line-chart" aria-hidden="true"></i>
             <span>Stock Analysis</span>
+          </button>
+          <button class="tab-button" type="button" id="agentTab">
+            <i class="bx bx-brain" aria-hidden="true"></i>
+            <span>Agent Desk</span>
           </button>
           <button class="tab-button" type="button" id="recommendationsTab">
             <i class="bx bx-bulb" aria-hidden="true"></i>
@@ -87,6 +92,7 @@
 
         <section class="workspace">
           {% include "stock_analysis/tab.html" %}
+          {% include "agent_desk/tab.html" %}
           {% include "recommendations/tab.html" %}
           {% include "market_monitor/tab.html" %}
           {% include "etf_analysis/tab.html" %}
@@ -96,7 +102,7 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
-    <script src="{% static 'app.js' %}?v=20260618-intraday-1" defer></script>
+    <script src="{% static 'app.js' %}?v=20260828-perf-1" defer></script>
     <script src="{% static 'cursor.js' %}?v=20260614-pick-1" defer></script>
   </body>
 </html>

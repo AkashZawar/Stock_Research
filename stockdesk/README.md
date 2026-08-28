@@ -7,7 +7,7 @@ business logic.
 
 | File | What it is for |
 |------|----------------|
-| `settings.py` | Project settings: installed apps (core + the five tab apps), templates, SQLite database, static files (`public/`), timezone, and env-driven secret/debug/hosts. |
+| `settings.py` | Project settings: installed apps (core + the six tab apps), templates, SQLite database, static files (`public/`), timezone, and env-driven secret/debug/hosts. |
 | `urls.py` | Root URL config; includes each app's `urls.py` at the root so paths come from the apps. |
 | `wsgi.py` | WSGI entry point for synchronous servers. |
 | `asgi.py` | ASGI entry point for asynchronous servers. |

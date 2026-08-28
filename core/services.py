@@ -41,7 +41,7 @@ from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 from io import StringIO
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener, urlopen
 from zoneinfo import ZoneInfo
 
@@ -75,10 +75,41 @@ ADVISORKHOJ_ANNUAL_RETURNS_URL = "https://www.advisorkhoj.com/mutual-funds-resea
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "StockResearchDesk/0.1 contact@example.com")
 OWNERSHIP_ROW_NAMES = ("Promoters", "FIIs", "DIIs", "Public")
 INVALID_INSTRUMENT_MESSAGE = "Invalid stock/MF name, do you mean anything from below?"
+# Used when the input parsed to a real-looking ticker but the provider has no
+# data for it. A mistyped ticker ("RELANCE.NS") and one that has expired
+# ("TATAMOTORS.NS", post-demerger) are indistinguishable from the outside, so the
+# message names the symbol that failed and both possible causes rather than
+# guessing at one.
+MISSING_INSTRUMENT_DATA_MESSAGE = (
+    "{symbol} returned no data from the provider. Check the spelling, or the symbol may "
+    "have been delisted, renamed, or demerged. Try one of these instead."
+)
+# Marks the "instrument is real but has no usable history" case so the views can
+# answer 400 with the explanation instead of a bare 500.
+INSUFFICIENT_HISTORY_PREFIX = "Not enough price history"
 _cache = {}
+_cache_lock = threading.Lock()
 _market_monitor_refresh_lock = threading.Lock()
 _market_monitor_refreshing = False
+_nse_session_state = None
+_nse_session_lock = threading.Lock()
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+# How long an NSE cookie jar is reused before it is rebuilt. Long enough that a
+# burst of option-chain calls shares one handshake, short enough that an expired
+# jar is not held onto.
+NSE_SESSION_TTL_SECONDS = 5 * 60
+
+# The cache is a process-local dict with no eviction, so a long-running server
+# that is asked about thousands of symbols would grow without bound. Expired
+# entries are dropped first, then the oldest, once this many keys are held.
+MAX_CACHE_ENTRIES = 2000
+
+# How long an endpoint that answered 401 is skipped for. Long enough to stop
+# spending request budget on it across a browsing session, short enough that
+# restored access is picked up without a restart.
+UNAUTHORIZED_ENDPOINT_TTL_SECONDS = 15 * 60
+_unauthorized_endpoints = {}
 
 MODULES = ",".join([
     "assetProfile",
@@ -388,6 +419,76 @@ ORDER_CATALYST_WATCHLIST = [
     if "Orders" in stock["tags"] or "Defence" in stock["tags"] or "Railways" in stock["tags"]
 ]
 
+# Trading days in a year, used to annualise returns, volatility, and to size the
+# rolling-return window.
+TRADING_SESSIONS_PER_YEAR = 252
+WEEKS_PER_YEAR = 52
+
+# ETF and mutual fund history window. Two years was too short to build
+# rolling one-year returns (which need more than a year of history before the
+# first window even closes) or to say anything about a full market cycle. Ten
+# years spans the 2020 drawdown, so the worst-case figures mean something.
+ASSET_HISTORY_RANGE = "10y"
+
+# Support/resistance detection still looks at the recent two years. Feeding it a
+# decade of candles would surface levels from a completely different price regime.
+ASSET_LEVEL_WINDOW_SESSIONS = 504
+
+# A one-session move beyond this is read as an unadjusted split or bonus rather
+# than a price move, and history before it is discarded for return maths.
+MAX_SESSION_MOVE_PERCENT = 40.0
+
+# Fund risk is conventionally quoted on trailing three years, so volatility,
+# Sharpe, and Sortino use that window even though more history is on file.
+ASSET_RISK_WINDOW_SESSIONS = 756
+
+# Standing risk-free assumptions by currency, used for Sharpe and Sortino. These
+# are not live quotes - they are stable reference levels so the ratios are
+# comparable across funds within a currency, and every payload states the rate it
+# used so the reader can adjust.
+ASSET_RISK_FREE_RATES = {
+    "INR": 6.5,
+    "USD": 4.3,
+    "EUR": 2.5,
+    "GBP": 4.0,
+    "JPY": 1.0,
+}
+DEFAULT_RISK_FREE_RATE = 4.0
+
+# Long-run gross dividend yields for the reference indices, used to put the
+# benchmark on the same footing as the fund.
+#
+# This closes a bias that made every equity fund look better than it was. A
+# Growth-plan NAV accumulates dividends, and an accumulating ETF's price does the
+# same, so the fund side of the comparison is a total return. The reference
+# series (^NSEI, ^GSPC and the rest) are price indices that drop dividends on the
+# floor. Comparing the two showed NIFTYBEES - a plain Nifty 50 tracker charging
+# a fee - beating its own index by 1.27pp a year, which is impossible: the gap
+# was the Nifty's own 1.3% dividend yield.
+#
+# These are stable long-run averages, not live figures, and every payload states
+# the number it used so the reader can adjust it.
+INDEX_DIVIDEND_YIELDS = {
+    "^NSEI": 1.3,
+    "^BSESN": 1.2,
+    "^GSPC": 1.6,
+    "^IXIC": 0.8,
+    "^DJI": 1.9,
+    "^FTSE": 3.6,
+    "^N225": 2.0,
+}
+DEFAULT_INDEX_DIVIDEND_YIELD = 1.5
+
+# When a fund's name or tags contain one of these markers, the mapped market
+# reference is genuinely the index it tracks, so dispersion against it is
+# tracking error rather than active risk.
+ASSET_BENCHMARK_TRACKING_MARKERS = {
+    "^NSEI": ("nifty 50", "nifty50", "nifty index"),
+    "^GSPC": ("s&p 500", "sp 500", "500 index"),
+}
+# Names that contain a tracking marker but follow a different index.
+ASSET_BENCHMARK_TRACKING_EXCLUSIONS = ("next 50", "junior", "bank", "midcap", "mid cap", "smallcap", "small cap")
+
 ETF_UNIVERSE = [
     ("NIFTYBEES.NS", "Nippon India ETF Nifty 50 BeES", "NSE", ["India", "Nifty 50", "Large cap"]),
     ("JUNIORBEES.NS", "Nippon India ETF Junior BeES", "NSE", ["India", "Nifty Next 50"]),
@@ -396,10 +497,28 @@ ETF_UNIVERSE = [
     ("ITBEES.NS", "Nippon India ETF IT BeES", "NSE", ["India", "Information technology"]),
     ("SETFNIF50.NS", "SBI ETF Nifty 50", "NSE", ["India", "Nifty 50"]),
     ("SETFNIFBK.NS", "SBI ETF Nifty Bank", "NSE", ["India", "Banking"]),
-    ("ICICINIFTY.NS", "ICICI Prudential Nifty 50 ETF", "NSE", ["India", "Nifty 50", "Large cap"]),
+    # ICICINIFTY.NS was delisted and 404s on the data provider. Its live
+    # replacement (NIFTYIETF.NS) and AXISNIFTY.NS both return only a handful of
+    # daily candles, so ICICI is represented here by its Nifty 100 ETF instead -
+    # every symbol in this list is verified to return a usable 2y history.
     ("HDFCNIFTY.NS", "HDFC Nifty 50 ETF", "NSE", ["India", "Nifty 50", "Large cap"]),
+    ("IVZINNIFTY.NS", "Invesco India Nifty 50 ETF", "NSE", ["India", "Nifty 50", "Large cap"]),
+    ("NIF100IETF.NS", "ICICI Prudential Nifty 100 ETF", "NSE", ["India", "Nifty 100", "Large cap"]),
+    ("MID150BEES.NS", "Nippon India ETF Nifty Midcap 150", "NSE", ["India", "Midcap", "Nifty Midcap 150"]),
+    ("MOM100.NS", "Motilal Oswal Nifty Midcap 100 ETF", "NSE", ["India", "Midcap"]),
+    ("MOM50.NS", "Motilal Oswal M50 ETF", "NSE", ["India", "Nifty 50"]),
     ("SILVERBEES.NS", "Nippon India Silver ETF", "NSE", ["India", "Silver", "Commodity"]),
+    ("SETFGOLD.NS", "SBI Gold ETF", "NSE", ["India", "Gold", "Commodity"]),
+    ("HDFCGOLD.NS", "HDFC Gold ETF", "NSE", ["India", "Gold", "Commodity"]),
+    ("CPSEETF.NS", "CPSE ETF", "NSE", ["India", "PSU", "Thematic"]),
+    ("ICICIB22.NS", "Bharat 22 ETF", "NSE", ["India", "PSU", "Thematic"]),
+    ("PSUBNKBEES.NS", "Nippon India ETF Nifty PSU Bank BeES", "NSE", ["India", "Banking", "PSU"]),
+    ("AUTOBEES.NS", "Nippon India Nifty Auto ETF", "NSE", ["India", "Auto", "Sectoral"]),
+    ("PHARMABEES.NS", "Nippon India Nifty Pharma ETF", "NSE", ["India", "Pharma", "Sectoral"]),
+    ("LIQUIDBEES.NS", "Nippon India ETF Nifty 1D Rate Liquid BeES", "NSE", ["India", "Liquid", "Cash"]),
     ("MON100.NS", "Motilal Oswal Nasdaq 100 ETF", "NSE", ["India", "Nasdaq 100", "Global", "Technology"]),
+    ("MAFANG.NS", "Mirae Asset NYSE FANG+ ETF", "NSE", ["India", "Global", "Technology"]),
+    ("HNGSNGBEES.NS", "Nippon India ETF Hang Seng BeES", "NSE", ["India", "Global", "Hong Kong"]),
     ("SPY", "SPDR S&P 500 ETF Trust", "NYSE Arca", ["US", "S&P 500", "Large cap"]),
     ("QQQ", "Invesco QQQ Trust", "Nasdaq", ["US", "Nasdaq 100", "Growth"]),
     ("VOO", "Vanguard S&P 500 ETF", "NYSE Arca", ["US", "S&P 500", "Large cap"]),
@@ -408,6 +527,18 @@ ETF_UNIVERSE = [
 ]
 
 MUTUAL_FUND_UNIVERSE = [
+    # Indian schemes are keyed by opaque Yahoo ids, so searching "parag parikh"
+    # only worked when Yahoo's own search happened to answer. Seeding the
+    # popular Direct Growth plans keeps the picker useful and deterministic.
+    ("0P0000YWL1.BO", "Parag Parikh Flexi Cap Fund Direct Growth", "BSE", ["India", "Flexi cap", "Equity"]),
+    ("0P0000XW77.BO", "HDFC Flexi Cap Fund Direct Growth", "BSE", ["India", "Flexi cap", "Equity"]),
+    ("0P0000XVA0.BO", "Mirae Asset Large Cap Fund Direct Growth", "BSE", ["India", "Large cap", "Equity"]),
+    ("0P0000XVG6.BO", "Nippon India Large Cap Fund Direct Growth", "BSE", ["India", "Large cap", "Equity"]),
+    ("0P00012ALS.BO", "Motilal Oswal Midcap Fund Direct Growth", "BSE", ["India", "Mid cap", "Equity"]),
+    ("0P0000XW1B.BO", "SBI Small Cap Fund Direct Growth", "BSE", ["India", "Small cap", "Equity"]),
+    ("0P0000XVFY.BO", "Nippon India Small Cap Fund Direct Growth", "BSE", ["India", "Small cap", "Equity"]),
+    ("0P0000XW4J.BO", "Quant Small Cap Fund Direct Growth", "BSE", ["India", "Small cap", "Equity"]),
+    ("0P0000XVU2.BO", "UTI Nifty 50 Index Fund Direct Growth", "BSE", ["India", "Index fund", "Nifty 50"]),
     ("VFIAX", "Vanguard 500 Index Fund Admiral Shares", "Nasdaq", ["US", "S&P 500", "Index fund"]),
     ("FXAIX", "Fidelity 500 Index Fund", "Nasdaq", ["US", "S&P 500", "Index fund"]),
     ("SWPPX", "Schwab S&P 500 Index Fund", "Nasdaq", ["US", "S&P 500", "Index fund"]),
@@ -604,11 +735,14 @@ def _analyze_symbol(symbol):
 
 
 def _analyze_asset(symbol, asset_type):
+    benchmark_symbol = benchmark_symbol_for(symbol)
     loaders = {
-        "chart": lambda: get_chart_range(symbol, "2y", "1d"),
+        "chart": lambda: get_chart_range(symbol, ASSET_HISTORY_RANGE, "1d"),
         "quote": lambda: get_quote(symbol),
         "summary": lambda: get_asset_summary(symbol),
     }
+    if benchmark_symbol:
+        loaders["benchmark"] = lambda: get_asset_benchmark_chart(benchmark_symbol)
     results = {}
     with ThreadPoolExecutor(max_workers=len(loaders)) as executor:
         futures = {executor.submit(loader): key for key, loader in loaders.items()}
@@ -625,11 +759,18 @@ def _analyze_asset(symbol, asset_type):
 
     candles = chart.get("candles") or []
     if len(candles) < 30:
-        raise RuntimeError("Not enough daily data was returned for this ETF or mutual fund.")
+        # The instrument exists but the provider only has a stub history, so no
+        # level, return, or risk figure below would mean anything.
+        raise RuntimeError(
+            f"{INSUFFICIENT_HISTORY_PREFIX}: the data provider returned only "
+            f"{len(candles)} daily rows for {symbol}, so it cannot be analysed. "
+            "Try a more actively traded ETF or fund."
+        )
 
     quote_data = results.get("quote", (False, {}))[1] if results.get("quote", (False,))[0] else {}
     summary = results.get("summary", (False, {}))[1] if results.get("summary", (False,))[0] else {}
-    return build_asset_report(symbol, asset_type, chart.get("meta", {}), candles, quote_data, summary)
+    benchmark = results.get("benchmark", (False, {}))[1] if results.get("benchmark", (False,))[0] else {}
+    return build_asset_report(symbol, asset_type, chart.get("meta", {}), candles, quote_data, summary, benchmark)
 
 
 def build_nse_market_snapshot():
@@ -1312,14 +1453,26 @@ def get_nse_option_chain_payload(nse_symbol):
         "expiryDates": expiry_texts,
         "data": [],
     }
-    for expiry_text in selected_expiries:
-        payload = cached(
+    # One request per expiry, run together. Sequentially this was the single
+    # slowest step in a stock analysis - four expiries at roughly half a second
+    # each, on the critical path of every uncached report.
+    def load_expiry(expiry_text):
+        return cached(
             f"nse-option-chain-v3:{nse_symbol}:{expiry_text}",
-            lambda expiry_text=expiry_text: fetch_nse_json_with_session(
+            lambda: fetch_nse_json_with_session(
                 f"/api/option-chain-v3?type=Equity&symbol={quote(nse_symbol)}&expiry={quote(expiry_text)}"
             ),
             60,
         )
+
+    # settle_map preserves input order, so the strike rows stay grouped by expiry
+    # rather than arriving in completion order. A failed expiry is skipped: a
+    # partial chain is still a usable read, and the caller falls back to the OI
+    # spurt feed if nothing lands at all.
+    settled = settle_map(selected_expiries, load_expiry, concurrency=len(selected_expiries))
+    for ok, payload in settled:
+        if not ok:
+            continue
         expiry_records = (payload or {}).get("records") or {}
         if expiry_records.get("timestamp"):
             records["timestamp"] = expiry_records.get("timestamp")
@@ -5020,17 +5173,86 @@ def instrument_suggestions(query):
 
     return {
         "stocks": annotate_suggestions(safe_search_symbols(normalized_query), "stock", "Stock")[:8],
-        "etfs": annotate_suggestions(safe_search_assets(normalized_query, "etf"), "etf", "ETF")[:6],
-        "mutualFunds": annotate_suggestions(safe_search_assets(normalized_query, "mutual-fund"), "mutual-fund", "Mutual Fund")[:6],
+        "etfs": annotate_suggestions(asset_suggestions(normalized_query, "etf"), "etf", "ETF")[:6],
+        "mutualFunds": annotate_suggestions(asset_suggestions(normalized_query, "mutual-fund"), "mutual-fund", "Mutual Fund")[:6],
     }
 
 
-def invalid_instrument_payload(query):
+def asset_suggestions(query, asset_type):
+    """Search results for the picker, widened so the panel is never empty.
+
+    Resolution is deliberately strict (see ``asset_match_is_plausible``), which
+    means a fund the provider does not carry - "SBI Bluechip Fund" - resolves to
+    nothing. Suggestions are for browsing rather than acting, so fall back to
+    any curated fund sharing a word with the query, then to the curated list, so
+    "do you mean anything from below?" always has something below it.
+    """
+    results = safe_search_assets(query, asset_type)
+    if results:
+        return results
+
+    tokens = [
+        token for token in re.split(r"[^a-z0-9]+", str(query or "").lower())
+        if len(token) > 2 and token not in FUND_NAME_STOPWORDS
+    ]
+    universe = ASSET_TYPE_CONFIG[normalize_asset_type(asset_type)]["universe"]
+    type_label = "ETF" if asset_type == "etf" else "MUTUALFUND"
+
+    def entry(symbol, name, exchange, tags):
+        return {"symbol": symbol, "name": name, "exchange": exchange, "type": type_label, "tags": list(tags)}
+
+    if tokens:
+        matches = [
+            entry(symbol, name, exchange, tags)
+            for symbol, name, exchange, tags in universe
+            if any(token in " ".join([symbol, name, *tags]).lower() for token in tokens)
+        ]
+        if matches:
+            return matches
+
+    return [entry(symbol, name, exchange, tags) for symbol, name, exchange, tags in universe[:6]]
+
+
+def invalid_instrument_payload(query, resolved_symbol=""):
+    """Error body for an instrument the tab cannot analyse.
+
+    ``resolved_symbol`` is set when the input parsed to a valid-looking ticker but
+    the provider had no data for it. TATAMOTORS.NS is the live example: it parses,
+    it is in the curated universe, and it has 404ed since the demerger.
+
+    That case needs its own answer for two reasons. The old message said the name
+    was invalid when the name was fine and the listing had expired, and the
+    suggestion list offered the failed symbol straight back as the top fix, so the
+    only obvious next click reproduced the same error. The symbol is dropped from
+    the suggestions here, because a symbol that just failed is not a fix for
+    itself.
+    """
+    query_text = str(query or "").strip()
+    symbol_text = str(resolved_symbol or "").strip()
+    suggestions = instrument_suggestions(query)
+    if symbol_text:
+        suggestions = drop_symbol_from_suggestions(suggestions, symbol_text)
+
     return {
-        "error": INVALID_INSTRUMENT_MESSAGE,
-        "invalidInput": str(query or "").strip(),
-        "suggestions": instrument_suggestions(query),
+        "error": MISSING_INSTRUMENT_DATA_MESSAGE.format(symbol=symbol_text) if symbol_text else INVALID_INSTRUMENT_MESSAGE,
+        "invalidInput": query_text,
+        "resolvedSymbol": symbol_text,
+        "suggestions": suggestions,
     }
+
+
+def drop_symbol_from_suggestions(suggestions, symbol):
+    target = str(symbol or "").strip().upper()
+    if not target:
+        return suggestions
+    return {
+        group: [item for item in rows if str(item.get("symbol") or "").strip().upper() != target]
+        for group, rows in (suggestions or {}).items()
+    }
+
+
+def is_insufficient_history_error(message):
+    return INSUFFICIENT_HISTORY_PREFIX.lower() in str(message or "").lower()
 
 
 def is_invalid_instrument_error(message):
@@ -5079,11 +5301,31 @@ def resolve_asset_input(value, asset_type):
     normalized = normalize_symbol(value)
     if normalized:
         local_symbol = local_asset_symbol_match(normalized, normalized_asset_type)
-        return local_symbol or normalized
+        if local_symbol:
+            return local_symbol
+        if looks_like_asset_ticker(normalized):
+            return normalized
+        # A bare word such as "gold" or "nifty" also matches the ticker regex.
+        # Treating it as a ticker used to hand the ETF/mutual-fund tabs a plain
+        # equity (the MF tab resolved "gold" to the US ticker GOLD), so fall
+        # through to search where the asset-type filter applies.
 
     results = search_assets(value, normalized_asset_type)
     best = choose_asset_search_result(results, value, normalized_asset_type)
     return best["symbol"] if best else ""
+
+
+def looks_like_asset_ticker(symbol):
+    """True when the input is specific enough to use without a type check.
+
+    Qualified tickers ("NIFTYBEES.NS"), Yahoo fund ids ("0P0000YWL1.BO"), and
+    index/currency forms are unambiguous. A bare alphabetic word is not - it
+    could equally be a search term - so those are routed through search.
+    """
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return False
+    return bool(re.search(r"[.\^=0-9]", normalized))
 
 
 def local_symbol_match(symbol):
@@ -5122,7 +5364,12 @@ def search_assets(query, asset_type):
             yahoo_results = [
                 {
                     "symbol": item.get("symbol"),
-                    "name": item.get("shortname") or item.get("longname") or item.get("symbol"),
+                    # ``longname`` first: Yahoo sets ``shortname`` to the scheme
+                    # id for Indian funds, which is useless in a picker.
+                    "name": display_name(
+                        [item.get("longname"), item.get("shortname")],
+                        item.get("symbol"),
+                    ),
                     "exchange": item.get("exchDisp") or item.get("exchange") or "",
                     "type": item.get("quoteType") or "",
                 }
@@ -5162,9 +5409,29 @@ def local_asset_search_symbols(query, asset_type):
             "name": name,
             "exchange": exchange,
             "type": "ETF" if asset_type == "etf" else "MUTUALFUND",
+            # Carried through to scoring so a thematic query ("nifty next 50")
+            # ranks the fund tagged with it above an unrelated name match.
+            "tags": list(tags),
         })
 
     return results
+
+
+def display_name(candidates, symbol):
+    """First candidate that is a real name rather than an echo of the symbol.
+
+    Yahoo returns ``shortname``/``shortName`` equal to the symbol itself for
+    Indian mutual funds (and some ETFs), which would otherwise surface as a
+    fund called "0P0000YWL1.BO". Falls back to the symbol only if nothing
+    usable is left.
+    """
+    target = str(symbol or "").strip().upper()
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text or text.upper() == target:
+            continue
+        return text
+    return str(symbol or "")
 
 
 def local_asset_metadata(symbol, asset_type):
@@ -5176,9 +5443,62 @@ def local_asset_metadata(symbol, asset_type):
 
 
 def choose_asset_search_result(results, query, asset_type):
+    """Best result that is actually the requested asset type, else nothing.
+
+    Falling back to ``sorted_results[0]`` regardless of type is what let an
+    equity answer an ETF/mutual-fund lookup. Returning None instead makes the
+    caller emit the "invalid instrument" payload with suggestions.
+    """
     sorted_results = sort_asset_search_results(results, query, asset_type)
     quote_types = ASSET_TYPE_CONFIG[asset_type]["quoteTypes"]
-    return next((item for item in sorted_results if normalized_quote_type(item.get("type")) in quote_types), None) or (sorted_results[0] if sorted_results else None)
+    return next(
+        (
+            item
+            for item in sorted_results
+            if normalized_quote_type(item.get("type")) in quote_types
+            and asset_match_is_plausible(item, query)
+        ),
+        None,
+    )
+
+
+# Words that appear in almost every scheme name and so carry no signal about
+# which fund the user meant.
+FUND_NAME_STOPWORDS = frozenset({
+    "fund", "funds", "scheme", "plan", "direct", "regular", "growth", "dir", "gr",
+    "reg", "idcw", "dividend", "payout", "reinvestment", "option", "etf", "the",
+    "of", "and", "index",
+})
+
+
+def asset_match_is_plausible(item, query):
+    """Reject a match that misses a distinctive word from the query.
+
+    The fuzzy search is deliberately loose so the suggestion list is useful
+    while typing, but resolution has to be strict: "ICICI Prudential Value Fund
+    Direct Growth" used to resolve to "Nippon India Small Cap Fund", quietly
+    analysing a completely different fund. Requiring every significant query
+    word to appear in the candidate makes an unavailable fund report as not
+    found instead.
+    """
+    tokens = [
+        token for token in re.split(r"[^a-z0-9]+", str(query or "").lower())
+        if token and token not in FUND_NAME_STOPWORDS
+    ]
+    if not tokens:
+        return True
+
+    haystack = re.sub(
+        r"[^a-z0-9]",
+        "",
+        " ".join([
+            str(item.get("name") or ""),
+            str(item.get("symbol") or ""),
+            *[str(tag or "") for tag in (item.get("tags") or [])],
+        ]).lower(),
+    )
+    # Substring rather than word match so "flexicap" still matches "Flexi Cap".
+    return all(token in haystack for token in tokens)
 
 
 def sort_asset_search_results(results, query, asset_type):
@@ -5190,9 +5510,35 @@ def sort_asset_search_results(results, query, asset_type):
             0 if normalized_quote_type(item.get("type")) in quote_types else 1,
             exchange_priority(item),
             -search_score(item, lower_query),
+            fund_plan_rank(item, asset_type),
             item.get("symbol", ""),
         ),
     )
+
+
+# Indian schemes list one entry per plan/option, so a search for a fund house
+# returns a dozen near-identical rows. Growth plans are the ones people analyse
+# (IDCW variants pay out and distort NAV history), and Direct plans carry the
+# lower expense ratio, so surface those first on equal name relevance.
+FUND_PLAN_PREFERENCE = (
+    ("dir gr", 0),
+    ("direct gr", 0),
+    ("reg gr", 1),
+    ("regular gr", 1),
+)
+
+
+def fund_plan_rank(item, asset_type):
+    if asset_type != "mutual-fund":
+        return 0
+
+    name = str(item.get("name") or "").lower()
+    for marker, rank in FUND_PLAN_PREFERENCE:
+        if marker in name:
+            return rank
+    if "idcw" in name or "dividend" in name:
+        return 3
+    return 2
 
 
 def normalize_asset_type(asset_type):
@@ -5263,6 +5609,7 @@ def merge_search_results(results):
             "name": item.get("name") or existing.get("name") or symbol,
             "exchange": item.get("exchange") or existing.get("exchange") or exchange_label(symbol),
             "type": item.get("type") or existing.get("type") or "",
+            "tags": item.get("tags") or existing.get("tags") or [],
         }
     return list(merged.values())
 
@@ -5315,7 +5662,14 @@ def search_score(item, lower_query):
         score += 16
     if compact_query and compact_query in compact_name:
         score += 10
-    fuzzy_score = fuzzy_candidate_score(compact_query, [symbol, name])
+    # Tags describe what a fund tracks ("Nifty Next 50", "Gold"), which is often
+    # what the query says even when the fund name never spells it out.
+    tags = [str(tag or "").lower() for tag in (item.get("tags") or [])]
+    if lower_query and any(lower_query == tag for tag in tags):
+        score += 30
+    elif lower_query and any(lower_query in tag for tag in tags):
+        score += 14
+    fuzzy_score = fuzzy_candidate_score(compact_query, [symbol, name, *tags])
     if fuzzy_score >= 82:
         score += 26
     elif fuzzy_score >= 70:
@@ -5376,6 +5730,20 @@ def benchmark_symbol_for(symbol):
 
 def get_benchmark_chart(benchmark_symbol):
     chart = get_chart(benchmark_symbol)
+    return {
+        "symbol": benchmark_symbol,
+        "name": benchmark_name_for(benchmark_symbol),
+        "candles": chart.get("candles") or [],
+    }
+
+
+def get_asset_benchmark_chart(benchmark_symbol):
+    """Benchmark history over the same window the fund/ETF is analysed on.
+
+    ``get_benchmark_chart`` uses the shorter stock window, which would leave the
+    rolling-return and capture-ratio comparisons with nothing to line up against.
+    """
+    chart = get_chart_range(benchmark_symbol, ASSET_HISTORY_RANGE, "1d")
     return {
         "symbol": benchmark_symbol,
         "name": benchmark_name_for(benchmark_symbol),
@@ -5754,7 +6122,7 @@ def build_report(symbol, meta, candles, quote_data, summary, sec, screener, benc
     }
 
 
-def build_asset_report(symbol, asset_type, meta, candles, quote_data, summary):
+def build_asset_report(symbol, asset_type, meta, candles, quote_data, summary, benchmark=None):
     closes = [item["close"] for item in candles]
     volumes = [item.get("volume") or 0 for item in candles]
     current = closes[-1]
@@ -5768,28 +6136,58 @@ def build_asset_report(symbol, asset_type, meta, candles, quote_data, summary):
     )
     asset_label = ASSET_TYPE_CONFIG[asset_type]["label"]
     price = summary.get("price") or {}
-    long_name = first_present(
-        quote_data.get("longName"),
-        quote_data.get("shortName"),
-        price.get("longName"),
-        price.get("shortName"),
-        local_meta.get("name"),
+    # Yahoo's quote/quoteSummary endpoints now answer 401 for anonymous callers,
+    # so ``quote_data``/``summary`` are usually empty and the chart ``meta`` is
+    # the only name source. For Indian mutual funds Yahoo also mirrors the
+    # opaque scheme id ("0P0000YWL1.BO") into shortName, so a name equal to the
+    # symbol has to be rejected instead of shown as the fund name.
+    long_name = display_name(
+        [
+            # Curated name first: the provider often returns an internal code
+            # ("HDFCAMC - HDFCNIFTY") or a triple-prefixed legal name for Indian
+            # funds. Anything outside the curated list still falls back to the
+            # provider, so a renamed fund only reads stale if we listed it.
+            local_meta.get("name"),
+            quote_data.get("longName"),
+            quote_data.get("shortName"),
+            price.get("longName"),
+            price.get("shortName"),
+            meta.get("longName"),
+            meta.get("shortName"),
+        ],
         symbol,
     )
     sma50_value = last(sma(closes, 50))
     sma200_value = last(sma(closes, 200))
     atr14 = atr(candles, 14)
-    levels = find_levels(candles, current, last(atr14))
-    profile = extract_asset_profile(summary, quote_data, meta, asset_type, local_meta)
+    levels = find_levels(candles[-ASSET_LEVEL_WINDOW_SESSIONS:], current, last(atr14))
+    profile = extract_asset_profile(
+        summary, quote_data, meta, asset_type, {**local_meta, "latestClose": current},
+    )
     top_holdings = extract_asset_holdings(summary)
     sectors = extract_sector_weightings(summary)
-    performance = build_asset_performance(closes)
+    # Returns, risk, and the benchmark comparison run on the adjusted series;
+    # price, moving averages, and levels stay on the traded close.
+    return_candles, return_basis = build_asset_return_series(candles)
+    return_closes = [item["close"] for item in return_candles]
+    performance = build_asset_performance(return_closes)
+    rolling_returns = build_asset_rolling_returns(return_closes)
     annual_returns = build_mutual_fund_annual_return_report(long_name, profile) if asset_type == "mutual-fund" else unavailable_annual_returns(asset_type)
-    risk = build_asset_risk_report(closes)
+    risk = build_asset_risk_report(return_closes)
+    risk_adjusted = build_asset_risk_adjusted_report(return_closes, currency)
+    benchmark_report = build_asset_benchmark_report(
+        return_candles, benchmark, asset_type, long_name, local_meta.get("tags") or [],
+    )
     momentum = build_asset_momentum_report(current, sma50_value, sma200_value, performance)
-    confidence = build_asset_confidence_report(candles, profile, top_holdings, summary, annual_returns)
+    freshness = build_asset_freshness(candles, asset_type)
+    confidence = build_asset_confidence_report(candles, profile, top_holdings, summary, annual_returns, freshness)
     plan = build_asset_plan(asset_type, current, currency, levels, performance, risk, profile)
-    suitability_score = score_asset_suitability(momentum, risk, confidence, profile)
+    suitability_score = score_asset_suitability(
+        momentum, risk, confidence, profile, risk_adjusted, rolling_returns, benchmark_report,
+    )
+    suitability = build_asset_suitability_report(
+        suitability_score, confidence, freshness, risk_adjusted, rolling_returns, benchmark_report,
+    )
     references = build_asset_references(symbol, long_name, quote_data, meta, asset_type)
 
     series = [
@@ -5827,11 +6225,17 @@ def build_asset_report(symbol, asset_type, meta, candles, quote_data, summary):
             "risk": risk["score"],
             "confidence": confidence["score"],
         },
-        "summary": summarize_asset_report(asset_label, suitability_score, momentum, risk, profile),
+        "summary": summarize_asset_report(asset_label, suitability_score, momentum, risk, profile, risk_adjusted, benchmark_report),
+        "freshness": freshness,
         "profile": profile,
+        "returnBasis": return_basis,
         "performance": performance,
+        "rollingReturns": rolling_returns,
         "annualReturns": annual_returns,
         "risk": risk,
+        "riskAdjusted": risk_adjusted,
+        "benchmark": benchmark_report,
+        "suitability": suitability,
         "momentum": momentum,
         "confidence": confidence,
         "holdings": {
@@ -5856,11 +6260,26 @@ def extract_asset_profile(summary, quote_data, meta, asset_type, local_meta=None
     key = summary.get("defaultKeyStatistics") or {}
     profile = summary.get("fundProfile") or {}
     return {
+        # Yahoo answers 401 to anonymous quoteSummary calls, so for most Indian
+        # symbols every field below is empty. The client renders a missing value
+        # as "Loading, ETA 10-30s", which told the reader to wait for data that
+        # is never going to arrive and made a finished report look half-built.
+        # This flag lets it say "not published by the data source" instead.
+        "detailsAvailable": bool(price or detail or key or profile),
         "category": first_present(raw(profile.get("categoryName")), raw(detail.get("category")), quote_data.get("market"), ", ".join(local_meta.get("tags") or [])),
         "family": first_present(raw(profile.get("family")), quote_data.get("fundFamily")),
         "legalType": first_present(raw(profile.get("legalType")), ASSET_TYPE_CONFIG[asset_type]["label"]),
         "totalAssets": first_present(raw(detail.get("totalAssets")), raw(key.get("totalAssets")), quote_data.get("totalAssets")),
-        "navPrice": first_present(raw(detail.get("navPrice")), raw(price.get("regularMarketPrice")), quote_data.get("regularMarketPrice")),
+        # The chart's last close is the same NAV the quote panel shows, so falling
+        # back to it means this row is answered from data that did load rather
+        # than reported missing alongside the genuinely absent factsheet fields.
+        "navPrice": first_present(
+            raw(detail.get("navPrice")),
+            raw(price.get("regularMarketPrice")),
+            quote_data.get("regularMarketPrice"),
+            meta.get("regularMarketPrice"),
+            (local_meta or {}).get("latestClose"),
+        ),
         "yield": first_present(raw(detail.get("yield")), raw(key.get("yield")), quote_data.get("yield")),
         "expenseRatio": first_present(raw(detail.get("annualReportExpenseRatio")), raw(key.get("annualReportExpenseRatio")), raw(profile.get("annualReportExpenseRatio"))),
         "turnover": first_present(raw(profile.get("annualHoldingsTurnover")), raw(key.get("annualHoldingsTurnover"))),
@@ -5906,6 +6325,158 @@ def extract_sector_weightings(summary):
     return sorted(sectors, key=lambda item: item["percent"] or 0, reverse=True)[:8]
 
 
+def build_asset_return_series(candles):
+    """Candles suitable for measuring returns over long horizons.
+
+    The raw ``close`` series steps at every corporate action the provider has not
+    adjusted for, so a decade of NIFTYBEES showed a 90% "drawdown" and a 1013%
+    best rolling year that were purely a split divisor. Yahoo's ``adjClose`` is
+    used when it covers the series, but for Indian ETFs it is frequently just a
+    copy of ``close`` and fixes nothing, so a second pass is needed.
+
+    That pass separates two very different faults, because the right repair
+    differs:
+
+    Glitch spikes - a handful of sessions priced on a different divisor that then
+    revert. NIFTYBEES has exactly two such rows in December 2019 (129 -> 13 ->
+    129). Treating the return leg as a permanent break threw away every session
+    before it, which is a third of the history for the sake of two bad rows. The
+    bad rows are dropped and the series is stitched instead.
+
+    Level shifts - a step that does not revert, i.e. a genuine unadjusted split
+    or bonus. There is no way to recover the pre-split scale without the ratio,
+    so history before the last such step is discarded: a shorter honest series
+    beats a long corrupt one.
+    """
+    candles = candles or []
+    adjusted_count = len([item for item in candles if is_finite(item.get("adjClose"))])
+    use_adjusted = adjusted_count >= len(candles) * 0.99 and adjusted_count > 0
+    # Yahoo often returns adjClose identical to close for Indian ETFs, in which
+    # case calling the basis "adjusted" would overstate what the data supports.
+    differs = use_adjusted and any(
+        is_finite(item.get("adjClose"))
+        and is_finite(item.get("close"))
+        and item["close"] > 0
+        and abs(item["adjClose"] - item["close"]) / item["close"] > 0.0005
+        for item in candles
+    )
+    rows = [
+        {
+            "date": item.get("date"),
+            "close": item["adjClose"] if use_adjusted else item.get("close"),
+        }
+        for item in candles
+    ]
+    rows = [item for item in rows if is_finite(item["close"]) and item["close"] > 0]
+
+    rows, repaired = repair_price_spikes(rows)
+
+    break_index = 0
+    break_date = None
+    for index in range(1, len(rows)):
+        previous = rows[index - 1]["close"]
+        move = abs((rows[index]["close"] - previous) / previous) * 100
+        if move > MAX_SESSION_MOVE_PERCENT:
+            break_index = index
+            break_date = rows[index]["date"]
+
+    trimmed = rows[break_index:]
+    if differs:
+        basis = "Adjusted close (splits and dividends)"
+    elif use_adjusted:
+        basis = "Close (provider reported no adjustment)"
+    else:
+        basis = "Unadjusted close"
+
+    notes = []
+    if break_date:
+        notes.append(
+            f"Return, risk, and benchmark figures start at {break_date} because a single-session "
+            f"move of more than {MAX_SESSION_MOVE_PERCENT:.0f}% before that date indicates a "
+            "corporate action the data provider did not adjust for."
+        )
+    elif differs:
+        notes.append("Return, risk, and benchmark figures use the provider's split- and dividend-adjusted close.")
+    else:
+        notes.append(
+            "The provider returned no usable adjustment, so these figures are measured on the traded "
+            "close. That captures dividends the fund reinvests (the norm for growth plans and "
+            "accumulating ETFs) but not any it paid out as cash."
+        )
+    if repaired:
+        notes.append(
+            f"{repaired} isolated session(s) priced on a different divisor were removed as provider "
+            "errors; the surrounding history is retained."
+        )
+
+    return trimmed, {
+        "basis": basis,
+        "adjusted": bool(differs),
+        "sessions": len(trimmed),
+        "droppedSessions": len(rows) - len(trimmed),
+        "repairedSessions": repaired,
+        "discontinuityDate": break_date,
+        "note": " ".join(notes),
+    }
+
+
+# How many consecutive sessions a bad-divisor run may span before it is read as a
+# real level shift rather than a provider error, and how close the price must
+# come back to the pre-spike level to count as reverted.
+MAX_SPIKE_SESSIONS = 5
+SPIKE_REVERSION_TOLERANCE_PERCENT = 15.0
+
+
+def repair_price_spikes(rows):
+    """Drop short runs of sessions that jump away from the series and back.
+
+    NIFTYBEES carries two December 2019 sessions quoted at a tenth of the
+    surrounding price. That is a provider error, not a split - the series returns
+    to its previous level on the next session. Truncating at the return leg
+    (which is what a pure level-shift guard does) discarded 815 earlier sessions
+    to work around two bad rows, so those rows are removed instead.
+
+    A run is only treated as an error when it is short and the price comes back
+    to where it started; anything that persists is left for the level-shift guard
+    to handle.
+    """
+    if len(rows) < 3:
+        return rows, 0
+
+    keep = [True] * len(rows)
+    repaired = 0
+    index = 1
+    while index < len(rows):
+        anchor = rows[index - 1]["close"]
+        move = abs((rows[index]["close"] - anchor) / anchor) * 100
+        if move <= MAX_SESSION_MOVE_PERCENT:
+            index += 1
+            continue
+
+        # Look for the session that comes back to the pre-spike level.
+        limit = min(index + MAX_SPIKE_SESSIONS + 1, len(rows))
+        recovery = next(
+            (
+                candidate
+                for candidate in range(index + 1, limit)
+                if abs((rows[candidate]["close"] - anchor) / anchor) * 100 <= SPIKE_REVERSION_TOLERANCE_PERCENT
+            ),
+            None,
+        )
+        if recovery is None:
+            index += 1
+            continue
+
+        for bad in range(index, recovery):
+            keep[bad] = False
+            repaired += 1
+        index = recovery + 1
+
+    if not repaired:
+        return rows, 0
+    return [row for row, wanted in zip(rows, keep) if wanted], repaired
+
+
 def build_asset_performance(closes):
     rows = [
         {"key": "oneWeek", "label": "1W", "return": round_or_none(period_return(closes, 5))},
@@ -5913,12 +6484,98 @@ def build_asset_performance(closes):
         {"key": "threeMonth", "label": "3M", "return": round_or_none(period_return(closes, 63))},
         {"key": "sixMonth", "label": "6M", "return": round_or_none(period_return(closes, 126))},
         {"key": "oneYear", "label": "1Y", "return": round_or_none(period_return(closes, min(252, len(closes) - 1)))},
+        {"key": "threeYear", "label": "3Y CAGR", "return": round_or_none(annualized_return(closes, 756))},
+        {"key": "fiveYear", "label": "5Y CAGR", "return": round_or_none(annualized_return(closes, 1260))},
     ]
     return {
         "rows": rows,
         "best": max([row for row in rows if is_finite(row.get("return"))], key=lambda row: row["return"], default=None),
         "worst": min([row for row in rows if is_finite(row.get("return"))], key=lambda row: row["return"], default=None),
+        "note": (
+            "Point-to-point returns depend on the start date, so read the rolling-return "
+            "table below before judging consistency."
+        ),
     }
+
+
+def annualized_return(values, sessions):
+    """Compound annual growth rate over ``sessions`` trading days.
+
+    Point-to-point 3Y/5Y totals overstate what an investor experienced per year,
+    so multi-year rows are reported as CAGR.
+    """
+    if not sessions or len(values) <= sessions:
+        return None
+    start = values[-1 - sessions]
+    end = values[-1]
+    if not is_finite(start) or not is_finite(end) or start <= 0 or end <= 0:
+        return None
+    years = sessions / TRADING_SESSIONS_PER_YEAR
+    if years <= 0:
+        return None
+    return ((end / start) ** (1 / years) - 1) * 100
+
+
+def build_asset_rolling_returns(closes, window_sessions=TRADING_SESSIONS_PER_YEAR):
+    """Distribution of every rolling one-year return in the available history.
+
+    A single 1Y number is one sample and is dominated by its start date - the
+    reason point-to-point returns are the wrong tool for judging a fund. Rolling
+    windows answer the question an investor actually has: across all the moments
+    I could have bought, what range of one-year outcomes did this deliver, and
+    how often was it positive?
+    """
+    usable = [value for value in closes if is_finite(value) and value > 0]
+    if len(usable) <= window_sessions + 1:
+        return {
+            "available": False,
+            "windowLabel": "1 year",
+            "reason": (
+                f"Needs more than {window_sessions + 1} daily rows to build one-year rolling windows; "
+                f"only {len(usable)} are available."
+            ),
+        }
+
+    returns = [
+        (usable[index] / usable[index - window_sessions] - 1) * 100
+        for index in range(window_sessions, len(usable))
+    ]
+    positive = len([value for value in returns if value > 0])
+    ordered = sorted(returns)
+
+    return {
+        "available": True,
+        "windowLabel": "1 year",
+        "windowSessions": window_sessions,
+        "observations": len(returns),
+        "average": round_or_none(sum(returns) / len(returns)),
+        "median": round_or_none(percentile(ordered, 50)),
+        "best": round_or_none(ordered[-1]),
+        "worst": round_or_none(ordered[0]),
+        "percentile25": round_or_none(percentile(ordered, 25)),
+        "percentile75": round_or_none(percentile(ordered, 75)),
+        "positiveSharePercent": round_or_none(positive / len(returns) * 100),
+        "summary": (
+            f"Across {len(returns)} rolling one-year windows the median outcome was "
+            f"{percentile(ordered, 50):.1f}%, the range ran {ordered[0]:.1f}% to {ordered[-1]:.1f}%, "
+            f"and {positive / len(returns) * 100:.0f}% of windows finished positive."
+        ),
+    }
+
+
+def percentile(ordered_values, target):
+    """Linear-interpolated percentile of an already-sorted list."""
+    if not ordered_values:
+        return None
+    if len(ordered_values) == 1:
+        return ordered_values[0]
+    position = (len(ordered_values) - 1) * clamp(target, 0, 100) / 100
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered_values[lower]
+    weight = position - lower
+    return ordered_values[lower] * (1 - weight) + ordered_values[upper] * weight
 
 
 class AdvisorkhojAnnualReturnsParser(HTMLParser):
@@ -6309,8 +6966,13 @@ def summarize_annual_return_comparison(matched, annual_data):
 
 
 def build_asset_risk_report(closes):
-    volatility = annualized_volatility(closes)
+    # Volatility is measured on the trailing three years, the window fund
+    # risk is conventionally quoted on, while drawdown uses the full history
+    # because the worst peak-to-trough is the number an investor lives through.
+    risk_window = closes[-ASSET_RISK_WINDOW_SESSIONS:] if len(closes) > ASSET_RISK_WINDOW_SESSIONS else closes
+    volatility = annualized_volatility(risk_window)
     drawdown = max_drawdown_percent(closes)
+    downside = annualized_downside_deviation(risk_window)
     score = 72
     if is_finite(volatility):
         score -= max(0, volatility - 12) * 1.1
@@ -6318,13 +6980,351 @@ def build_asset_risk_report(closes):
         score -= abs(min(drawdown, 0)) * 0.75
     score = round(clamp(score, 0, 100))
     label = "Low risk" if score >= 72 else "Moderate risk" if score >= 48 else "High risk"
+    years = len(closes) / TRADING_SESSIONS_PER_YEAR
     return {
         "score": score,
         "label": label,
         "summary": f"{label}. Check volatility, drawdown, expense ratio, and category fit before allocating.",
         "annualizedVolatility": round_or_none(volatility),
+        "downsideDeviation": round_or_none(downside),
         "maxDrawdown": round_or_none(drawdown),
+        "volatilityWindowLabel": f"{len(risk_window) / TRADING_SESSIONS_PER_YEAR:.1f} years",
+        "drawdownWindowLabel": f"{years:.1f} years",
+        "windowNote": (
+            f"Volatility uses the trailing {len(risk_window) / TRADING_SESSIONS_PER_YEAR:.1f} years; "
+            f"maximum drawdown uses the full {years:.1f} years on file. A drawdown is only as deep "
+            "as the history shown, so a short history can hide a worse one."
+        ),
     }
+
+
+def annualized_downside_deviation(values, target_daily_return=0.0):
+    """Annualised standard deviation of returns below ``target_daily_return``.
+
+    Total volatility punishes upside moves as if they were risk. Downside
+    deviation is what the Sortino ratio uses and is the closer match to what an
+    investor means by risk.
+    """
+    returns = daily_return_series(values)
+    if len(returns) < 20:
+        return None
+    shortfalls = [min(0.0, value - target_daily_return) for value in returns]
+    variance = sum(value ** 2 for value in shortfalls) / len(shortfalls)
+    return math.sqrt(variance) * math.sqrt(TRADING_SESSIONS_PER_YEAR) * 100
+
+
+def build_asset_risk_adjusted_report(closes, currency):
+    """Sharpe and Sortino over the standard three-year fund window.
+
+    The tab previously reported raw returns and raw volatility side by side and
+    left the reader to combine them, and the suitability score mixed momentum
+    with a data-quality score instead. Return per unit of risk is the measure a
+    fund is actually chosen on, so it is computed here with the risk-free rate
+    stated rather than silently assumed to be zero.
+    """
+    window = closes[-ASSET_RISK_WINDOW_SESSIONS:] if len(closes) > ASSET_RISK_WINDOW_SESSIONS else closes
+    risk_free = risk_free_rate_for(currency)
+    sessions = len(window) - 1
+    cagr = annualized_return(window, sessions) if sessions >= 60 else None
+    volatility = annualized_volatility(window)
+    downside = annualized_downside_deviation(window)
+
+    if not is_finite(cagr):
+        return {
+            "available": False,
+            "riskFreeRatePercent": risk_free,
+            "reason": "Not enough history to annualise a return over the risk window.",
+        }
+
+    excess = cagr - risk_free
+    sharpe = excess / volatility if is_finite(volatility) and volatility > 0 else None
+    sortino = excess / downside if is_finite(downside) and downside > 0 else None
+
+    return {
+        "available": True,
+        "windowLabel": f"{len(window) / TRADING_SESSIONS_PER_YEAR:.1f} years",
+        "annualizedReturn": round_or_none(cagr),
+        "annualizedVolatility": round_or_none(volatility),
+        "downsideDeviation": round_or_none(downside),
+        "riskFreeRatePercent": risk_free,
+        "excessReturn": round_or_none(excess),
+        "sharpe": round_or_none(sharpe),
+        "sortino": round_or_none(sortino),
+        "label": sharpe_label(sharpe),
+        "summary": (
+            f"{cagr:.1f}% annualised against {volatility:.1f}% volatility over "
+            f"{len(window) / TRADING_SESSIONS_PER_YEAR:.1f} years."
+            + (f" Sharpe {sharpe:.2f}" if is_finite(sharpe) else " Sharpe unavailable")
+            + (f", Sortino {sortino:.2f}" if is_finite(sortino) else "")
+            + f", using a {risk_free:.1f}% risk-free rate."
+        ),
+        "assumptionNote": (
+            f"The {risk_free:.1f}% risk-free rate is a standing assumption for {currency or 'this currency'}, "
+            "not a live quote. Sharpe and Sortino move with it, so treat them as comparative rather than absolute."
+        ),
+    }
+
+
+def sharpe_label(sharpe):
+    if not is_finite(sharpe):
+        return "Unavailable"
+    if sharpe >= 1.0:
+        return "Strong risk-adjusted return"
+    if sharpe >= 0.5:
+        return "Fair risk-adjusted return"
+    if sharpe >= 0:
+        return "Weak risk-adjusted return"
+    return "Below the risk-free rate"
+
+
+def risk_free_rate_for(currency):
+    return ASSET_RISK_FREE_RATES.get(str(currency or "").strip().upper(), DEFAULT_RISK_FREE_RATE)
+
+
+def build_asset_benchmark_report(candles, benchmark, asset_type, long_name, tags):
+    """Compare the fund against a market reference on the same dates.
+
+    A fund return in isolation says nothing: 14% is excellent against a
+    benchmark that returned 8% and poor against one that returned 22%. This is
+    the comparison the tab was missing entirely. Where the fund actually tracks
+    the reference index the same maths is tracking error, which for an index ETF
+    or index fund is the main selection criterion alongside cost.
+    """
+    benchmark = benchmark or {}
+    benchmark_symbol = benchmark.get("symbol") or ""
+    benchmark_name = benchmark.get("name") or benchmark_symbol or "Market reference"
+    tracking = tracks_benchmark(benchmark_symbol, long_name, tags)
+
+    # The reference goes through the same adjustment so both sides of every
+    # comparison are on a total-return basis.
+    benchmark_rows, _basis = build_asset_return_series(benchmark.get("candles") or [])
+    paired = align_closes_by_date(candles, benchmark_rows)
+    if len(paired) < 60:
+        return {
+            "available": False,
+            "expected": bool(benchmark_symbol),
+            "benchmarkSymbol": benchmark_symbol,
+            "benchmarkName": benchmark_name,
+            "isTrackingBenchmark": tracking,
+            "summary": (
+                f"Not enough overlapping sessions with {benchmark_name} to compare "
+                f"({len(paired)} matched dates)."
+                if benchmark_symbol
+                else "No market reference is mapped for this symbol."
+            ),
+        }
+
+    fund_closes = [row[1] for row in paired]
+    index_closes = [row[2] for row in paired]
+
+    # Beta, tracking error, and capture are computed on weekly rather than daily
+    # returns. A thinly traded ETF's daily "close" is often the last trade rather
+    # than a simultaneous print, so part of today's measured fund return belongs
+    # to yesterday's index move. That non-synchronous pricing decorrelates the
+    # two series and biases beta toward zero while inflating tracking error - it
+    # showed NIFTYBEES, a plain Nifty 50 ETF, at beta 0.89 and 3.05% tracking
+    # error. Weekly sampling absorbs a day of lag and still leaves ~50
+    # observations a year.
+    fund_weekly = weekly_return_series(paired, price_index=1)
+    index_weekly = weekly_return_series(paired, price_index=2)
+    span = min(len(fund_weekly), len(index_weekly))
+    fund_returns = fund_weekly[-span:]
+    index_returns = index_weekly[-span:]
+
+    sessions = len(fund_closes) - 1
+    fund_cagr = annualized_return(fund_closes, sessions)
+    index_cagr = annualized_return(index_closes, sessions)
+
+    # The fund side accumulates dividends and the reference index does not, so
+    # the reference is grossed up by its dividend yield before the two are
+    # subtracted. Without this every equity fund clears its benchmark by roughly
+    # the index yield for free.
+    dividend_yield = index_dividend_yield_for(benchmark_symbol)
+    index_total_return = index_cagr + dividend_yield if is_finite(index_cagr) else None
+    excess = (
+        fund_cagr - index_total_return
+        if is_finite(fund_cagr) and is_finite(index_total_return)
+        else None
+    )
+
+    active_returns = [fund - index for fund, index in zip(fund_returns, index_returns)]
+    tracking_error = (
+        population_stdev(active_returns) * math.sqrt(WEEKS_PER_YEAR) * 100
+        if len(active_returns) >= 20
+        else None
+    )
+    beta = covariance_beta(fund_returns, index_returns)
+    up_capture = capture_ratio(fund_returns, index_returns, "up")
+    down_capture = capture_ratio(fund_returns, index_returns, "down")
+    years = sessions / TRADING_SESSIONS_PER_YEAR
+
+    label = "Tracking error" if tracking else "Active risk"
+    return {
+        "available": True,
+        "expected": True,
+        "benchmarkSymbol": benchmark_symbol,
+        "benchmarkName": benchmark_name,
+        "isTrackingBenchmark": tracking,
+        "windowLabel": f"{years:.1f} years",
+        "matchedSessions": len(paired),
+        "returnFrequency": "weekly",
+        "observations": span,
+        "fundReturn": round_or_none(fund_cagr),
+        "benchmarkPriceReturn": round_or_none(index_cagr),
+        "benchmarkDividendYield": dividend_yield,
+        "benchmarkReturn": round_or_none(index_total_return),
+        "excessReturn": round_or_none(excess),
+        "trackingErrorLabel": label,
+        "trackingError": round_or_none(tracking_error),
+        "beta": round_or_none(beta),
+        "upCapture": round_or_none(up_capture),
+        "downCapture": round_or_none(down_capture),
+        "summary": benchmark_summary(
+            benchmark_name, fund_cagr, index_total_return, excess, tracking, tracking_error, years,
+        ),
+        "note": (
+            f"{benchmark_name} is the market reference this tab maps to the symbol's exchange. "
+            + (
+                "The fund's own name or category matches it, so the dispersion figure reads as tracking error."
+                if tracking
+                else "This is not necessarily the fund's stated benchmark, so read the dispersion as active "
+                     "risk against the broad market rather than as tracking error."
+            )
+            + (
+                f" {benchmark_name} is a price index, so an assumed {dividend_yield:.1f}% dividend yield is "
+                "added to it before the excess return is taken; the fund is measured on a basis that keeps "
+                "any income it received. Without that step every equity fund appears to beat its index by "
+                "roughly the index yield for free."
+            )
+            + (
+                " For an ETF the dispersion is measured on the traded price, which drifts from NAV on premium, "
+                "discount, and thin sessions, so it reads higher than the NAV-based tracking error the AMC publishes."
+                if asset_type == "etf"
+                else ""
+            )
+        ),
+    }
+
+
+def index_dividend_yield_for(benchmark_symbol):
+    return INDEX_DIVIDEND_YIELDS.get(
+        str(benchmark_symbol or "").strip().upper(), DEFAULT_INDEX_DIVIDEND_YIELD,
+    )
+
+
+def benchmark_summary(benchmark_name, fund_cagr, index_cagr, excess, tracking, tracking_error, years):
+    if not (is_finite(fund_cagr) and is_finite(index_cagr)):
+        return f"Comparison against {benchmark_name} could not be annualised."
+    verb = "ahead of" if (excess or 0) >= 0 else "behind"
+    text = (
+        f"{fund_cagr:.1f}% a year versus {index_cagr:.1f}% for {benchmark_name} including dividends "
+        f"over {years:.1f} years, {abs(excess):.1f}pp {verb} the reference."
+    )
+    if is_finite(tracking_error):
+        if tracking:
+            text += f" Tracking error is {tracking_error:.2f}%, which for an index vehicle should stay low."
+        else:
+            text += f" Active risk against the reference is {tracking_error:.2f}%."
+    return text
+
+
+def align_closes_by_date(candles, benchmark_candles):
+    """Match fund and benchmark closes on shared dates.
+
+    Mutual fund NAVs publish on a different calendar from an index (holidays,
+    a day's reporting lag), so comparing the two raw series index-by-index would
+    silently offset them and corrupt beta and tracking error.
+    """
+    index_by_date = {
+        item.get("date"): item.get("close")
+        for item in (benchmark_candles or [])
+        if item.get("date") and is_finite(item.get("close"))
+    }
+    paired = []
+    for item in candles or []:
+        date_key = item.get("date")
+        close = item.get("close")
+        other = index_by_date.get(date_key)
+        if date_key and is_finite(close) and is_finite(other) and close > 0 and other > 0:
+            paired.append((date_key, close, other))
+    return paired
+
+
+def weekly_return_series(paired_rows, price_index):
+    """Week-over-week returns from date-aligned rows.
+
+    Each ISO week contributes its last observation, so a single stale daily
+    close no longer offsets the fund against the index.
+    """
+    last_by_week = {}
+    order = []
+    for row in paired_rows:
+        try:
+            week_key = date.fromisoformat(str(row[0])).isocalendar()[:2]
+        except (TypeError, ValueError):
+            continue
+        if week_key not in last_by_week:
+            order.append(week_key)
+        last_by_week[week_key] = row[price_index]
+
+    closes = [last_by_week[key] for key in order]
+    return daily_return_series(closes)
+
+
+def population_stdev(values):
+    if len(values) < 2:
+        return None
+    average = sum(values) / len(values)
+    variance = sum((value - average) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def covariance_beta(fund_returns, index_returns):
+    """Sensitivity of the fund to the reference index."""
+    if len(fund_returns) < 20 or len(fund_returns) != len(index_returns):
+        return None
+    fund_mean = sum(fund_returns) / len(fund_returns)
+    index_mean = sum(index_returns) / len(index_returns)
+    covariance = sum(
+        (fund - fund_mean) * (index - index_mean)
+        for fund, index in zip(fund_returns, index_returns)
+    )
+    variance = sum((index - index_mean) ** 2 for index in index_returns)
+    if not variance:
+        return None
+    return covariance / variance
+
+
+def capture_ratio(fund_returns, index_returns, direction):
+    """Share of the reference's up (or down) moves the fund captured.
+
+    Above 100 on the up side and below 100 on the down side is the pattern worth
+    paying for; the reverse is a fund that lags rallies and leads selloffs.
+    """
+    pairs = [
+        (fund, index)
+        for fund, index in zip(fund_returns, index_returns)
+        if (index > 0 if direction == "up" else index < 0)
+    ]
+    if len(pairs) < 20:
+        return None
+    index_total = sum(index for _fund, index in pairs)
+    if not index_total:
+        return None
+    fund_total = sum(fund for fund, _index in pairs)
+    return fund_total / index_total * 100
+
+
+def tracks_benchmark(benchmark_symbol, long_name, tags):
+    """True when the fund's own name or tags say it follows the reference index."""
+    markers = ASSET_BENCHMARK_TRACKING_MARKERS.get(benchmark_symbol) or ()
+    if not markers:
+        return False
+    haystack = " ".join([str(long_name or ""), *[str(tag or "") for tag in (tags or [])]]).lower()
+    if not any(marker in haystack for marker in markers):
+        return False
+    # "Nifty Next 50" and "Nifty Bank" contain "nifty" but do not track Nifty 50.
+    return not any(marker in haystack for marker in ASSET_BENCHMARK_TRACKING_EXCLUSIONS)
 
 
 def build_asset_momentum_report(current, sma50_value, sma200_value, performance):
@@ -6357,7 +7357,7 @@ def build_asset_momentum_report(current, sma50_value, sma200_value, performance)
     }
 
 
-def build_asset_confidence_report(candles, profile, holdings, summary, annual_returns=None):
+def build_asset_confidence_report(candles, profile, holdings, summary, annual_returns=None, freshness=None):
     score = 45
     checks = []
     if len(candles) >= 250:
@@ -6365,6 +7365,13 @@ def build_asset_confidence_report(candles, profile, holdings, summary, annual_re
         checks.append("At least one year of daily history is available.")
     else:
         checks.append("Price history is shorter than one year.")
+    if freshness:
+        checks.append(freshness["detail"])
+        if freshness["stale"]:
+            # A stale NAV/close makes every level and return in the report a
+            # statement about the past, so it should not read as high
+            # confidence.
+            score -= 20
     if is_finite(profile.get("expenseRatio")):
         score += 12
         checks.append("Expense ratio was available.")
@@ -6387,6 +7394,59 @@ def build_asset_confidence_report(candles, profile, holdings, summary, annual_re
         "score": score,
         "label": "High" if score >= 75 else "Moderate" if score >= 55 else "Low",
         "checks": checks,
+    }
+
+
+# A latest row older than this many calendar days is treated as stale. Wide
+# enough to span a long weekend plus a holiday, tight enough to catch the
+# months-old NAV the provider sometimes returns for a dormant fund. Mutual funds
+# publish one NAV per day (often a day late), so they get more slack than ETFs.
+MAX_ASSET_STALE_DAYS = {"etf": 5, "mutual-fund": 8}
+
+
+def build_asset_freshness(candles, asset_type):
+    """Report how old the latest close/NAV is, and whether that is stale.
+
+    Yahoo occasionally serves a long-dormant frame for delisted or suspended
+    funds. Without this the report would present months-old levels as current.
+    """
+    latest_date = (candles[-1] or {}).get("date") if candles else None
+    limit = MAX_ASSET_STALE_DAYS.get(asset_type, 5)
+    label = "NAV" if asset_type == "mutual-fund" else "Close"
+    if not latest_date:
+        return {
+            "latestDate": None,
+            "ageDays": None,
+            "stale": False,
+            "limitDays": limit,
+            "detail": f"Latest {label} date was not returned by the data provider.",
+        }
+
+    try:
+        age_days = (datetime.now(tz=timezone.utc).date() - date.fromisoformat(str(latest_date))).days
+    except (TypeError, ValueError):
+        return {
+            "latestDate": str(latest_date),
+            "ageDays": None,
+            "stale": False,
+            "limitDays": limit,
+            "detail": f"Latest {label} date could not be parsed.",
+        }
+
+    stale = age_days > limit
+    if stale:
+        detail = (
+            f"Latest {label} is from {latest_date}, {age_days} days old "
+            f"(over the {limit}-day limit) - treat levels and returns as out of date."
+        )
+    else:
+        detail = f"Latest {label} is from {latest_date} ({age_days} days old)."
+    return {
+        "latestDate": str(latest_date),
+        "ageDays": age_days,
+        "stale": stale,
+        "limitDays": limit,
+        "detail": detail,
     }
 
 
@@ -6432,24 +7492,95 @@ def build_asset_plan(asset_type, current, currency, levels, performance, risk, p
     }
 
 
-def score_asset_suitability(momentum, risk, confidence, profile):
+def score_asset_suitability(momentum, risk, confidence, profile, risk_adjusted=None, rolling=None, benchmark=None):
+    """Investment merit of the fund, on the evidence available.
+
+    The previous version was 35% momentum, 28% risk, 22% data confidence, and
+    15% cost. Two things were wrong with that. Data confidence is a statement
+    about the feed, not about the fund, so a well-documented poor fund scored
+    above a thinly-documented good one. And momentum as the largest term made it
+    a trend-following score, which is the wrong lens for a buy-and-hold vehicle.
+
+    The weights now lead with return per unit of risk and consistency across
+    rolling windows, which is how a fund is actually selected. Data confidence is
+    reported separately and gates the score rather than contributing to it.
+    """
     expense = expense_ratio_percent(profile.get("expenseRatio"))
     cost_score = 70
     if is_finite(expense):
         cost_score = clamp(92 - expense * 18, 35, 95)
-    return round(weighted_average([
-        (momentum["score"], 0.35),
-        (risk["score"], 0.28),
-        (confidence["score"], 0.22),
-        (cost_score, 0.15),
-    ]))
+
+    components = [
+        (risk["score"], 0.16, "Risk profile"),
+        (cost_score, 0.16, "Cost"),
+        (momentum["score"], 0.12, "Momentum"),
+    ]
+
+    sharpe = (risk_adjusted or {}).get("sharpe")
+    if is_finite(sharpe):
+        # Sharpe 0 -> 40, 1.0 -> 80, 1.5 -> 100. Below the risk-free rate scores
+        # under 40 and can reach zero.
+        components.append((clamp(40 + sharpe * 40, 0, 100), 0.30, "Risk-adjusted return"))
+
+    positive_share = (rolling or {}).get("positiveSharePercent")
+    if (rolling or {}).get("available") and is_finite(positive_share):
+        components.append((clamp(positive_share, 0, 100), 0.18, "Rolling-return consistency"))
+
+    excess = (benchmark or {}).get("excessReturn")
+    if (benchmark or {}).get("available") and is_finite(excess):
+        # +/-5pp a year against the reference spans the full range.
+        components.append((clamp(50 + excess * 10, 0, 100), 0.08, "Versus market reference"))
+
+    score = round(weighted_average([(value, weight) for value, weight, _label in components]))
+    return int(clamp(score, 0, 100))
 
 
-def summarize_asset_report(asset_label, suitability_score, momentum, risk, profile):
+def build_asset_suitability_report(score, confidence, freshness, risk_adjusted, rolling, benchmark):
+    """The suitability score plus what it was and was not able to include."""
+    included = ["Risk profile", "Cost", "Momentum"]
+    if is_finite((risk_adjusted or {}).get("sharpe")):
+        included.append("Risk-adjusted return")
+    if (rolling or {}).get("available"):
+        included.append("Rolling-return consistency")
+    if (benchmark or {}).get("available"):
+        included.append("Versus market reference")
+
+    missing = [item for item in (
+        "Risk-adjusted return", "Rolling-return consistency", "Versus market reference",
+    ) if item not in included]
+
+    # Data quality gates the score instead of being averaged into it: a thin or
+    # stale feed makes the number unreliable rather than making the fund bad.
+    reliable = confidence["score"] >= 55 and not (freshness or {}).get("stale")
+    return {
+        "score": score,
+        "label": "Strong" if score >= 72 else "Balanced" if score >= 52 else "Weak",
+        "included": included,
+        "missing": missing,
+        "dataConfidence": confidence["score"],
+        "reliable": reliable,
+        "note": (
+            "Data confidence and freshness are reported separately rather than averaged into this score, "
+            "because a poorly documented fund is not the same thing as a poor fund."
+            + ("" if reliable else " Treat this score as indicative only until the flagged data gaps are checked.")
+        ),
+    }
+
+
+def summarize_asset_report(asset_label, suitability_score, momentum, risk, profile, risk_adjusted=None, benchmark=None):
     cost = expense_ratio_percent(profile.get("expenseRatio"))
     cost_text = f" Expense ratio: {cost:.2f}%." if is_finite(cost) else " Expense ratio was not available."
     label = "Strong" if suitability_score >= 72 else "Balanced" if suitability_score >= 52 else "Weak"
-    return f"{label} {asset_label} setup: {momentum['label'].lower()} momentum with {risk['label'].lower()}.{cost_text}"
+    text = f"{label} {asset_label} setup: {momentum['label'].lower()} momentum with {risk['label'].lower()}.{cost_text}"
+    # Lead the summary with the two figures a fund is actually judged on rather
+    # than momentum alone.
+    sharpe = (risk_adjusted or {}).get("sharpe")
+    if is_finite(sharpe):
+        text += f" Sharpe {sharpe:.2f} over {risk_adjusted.get('windowLabel') or 'the risk window'}."
+    excess = (benchmark or {}).get("excessReturn")
+    if (benchmark or {}).get("available") and is_finite(excess):
+        text += f" {abs(excess):.1f}pp a year {'ahead of' if excess >= 0 else 'behind'} {benchmark.get('benchmarkName')}."
+    return text
 
 
 def build_asset_references(symbol, long_name, quote_data, meta, asset_type):
@@ -9094,15 +10225,42 @@ def fetch_nse_json(path):
     raise RuntimeError("NSE India is temporarily unavailable. Please retry in a moment.") from last_error
 
 
+def nse_session(force_new=False):
+    """Cookie-bearing opener for NSE, reused across calls.
+
+    NSE rejects requests without the cookies its homepage sets, so every call
+    used to build a fresh jar and fetch the homepage first - doubling the round
+    trips. A single stock's option chain needs one contract-info call plus one
+    per expiry, which meant ten round trips where five would do. The jar is kept
+    until it ages out or the server rejects it.
+    """
+    global _nse_session_state
+    with _nse_session_lock:
+        state = _nse_session_state
+        fresh = (
+            state
+            and not force_new
+            and time.time() - state["createdAt"] < NSE_SESSION_TTL_SECONDS
+        )
+        if fresh:
+            return state["opener"]
+
+        cookie_jar = CookieJar()
+        opener = build_opener(HTTPSHandler(context=SSL_CONTEXT), HTTPCookieProcessor(cookie_jar))
+        with opener.open(Request(NSE_BASE_URL, headers=NSE_HEADERS), timeout=20) as response:
+            response.read()
+        _nse_session_state = {"opener": opener, "createdAt": time.time()}
+        return opener
+
+
 def fetch_nse_json_with_session(path):
     endpoint = path if str(path).startswith("http") else f"{NSE_BASE_URL}{path}"
-    cookie_jar = CookieJar()
-    opener = build_opener(HTTPSHandler(context=SSL_CONTEXT), HTTPCookieProcessor(cookie_jar))
     last_error = None
     for attempt in range(3):
         try:
-            with opener.open(Request(NSE_BASE_URL, headers=NSE_HEADERS), timeout=20) as response:
-                response.read()
+            # A rejected cookie is the one failure a retry cannot fix on its own,
+            # so the second attempt onwards starts from a new jar.
+            opener = nse_session(force_new=attempt > 0)
             with opener.open(Request(endpoint, headers=NSE_HEADERS), timeout=20) as response:
                 text = response.read().decode("utf-8", errors="replace")
             return json.loads(text)
@@ -9119,7 +10277,44 @@ def fetch_nse_json_with_session(path):
     raise RuntimeError("NSE India option-chain endpoint is temporarily unavailable.") from last_error
 
 
+def endpoint_family(endpoint):
+    """Host plus route, with the instrument and query string stripped.
+
+    Used to remember that a whole endpoint is refusing anonymous callers rather
+    than rediscovering it per symbol. Some providers put the symbol in the path
+    (``/v10/finance/quoteSummary/INFY.NS``), so a segment that looks like an
+    instrument is dropped - otherwise the memo would hold one useless entry per
+    symbol and never suppress anything.
+    """
+    parsed = urlparse(str(endpoint or ""))
+    segments = [
+        segment
+        for segment in parsed.path.split("/")
+        if segment and "." not in segment and not segment.startswith("^") and segment != segment.upper()
+    ]
+    return f"{parsed.netloc}/{'/'.join(segments[:4])}"
+
+
+def note_unauthorized(endpoint):
+    with _cache_lock:
+        _unauthorized_endpoints[endpoint_family(endpoint)] = time.time() + UNAUTHORIZED_ENDPOINT_TTL_SECONDS
+
+
+def is_unauthorized_endpoint(endpoint):
+    expires_at = _unauthorized_endpoints.get(endpoint_family(endpoint))
+    return bool(expires_at and expires_at > time.time())
+
+
 def fetch_text(endpoint, json_request=False, sec=False):
+    # Yahoo's quote and quoteSummary endpoints answer 401 to anonymous callers,
+    # and they are called on every single report. Retrying them per symbol spends
+    # request budget on a result that cannot change, and the provider answers 429
+    # once that budget runs out - which then breaks the chart call the report
+    # actually depends on. So a 401 is remembered per endpoint and short-circuited
+    # until the TTL lapses, in case access is restored.
+    if is_unauthorized_endpoint(endpoint):
+        raise RuntimeError("Data provider returned 401.")
+
     headers = {
         "Accept": "application/json,text/plain,*/*" if json_request else "text/html,application/xhtml+xml",
         "User-Agent": SEC_USER_AGENT if sec else "Mozilla/5.0 StockResearchDesk/0.1",
@@ -9131,6 +10326,8 @@ def fetch_text(endpoint, json_request=False, sec=False):
             with urlopen(request, timeout=20, context=SSL_CONTEXT) as response:
                 return response.read().decode("utf-8", errors="replace")
         except HTTPError as error:
+            if error.code == 401:
+                note_unauthorized(endpoint)
             if error.code not in {429, 500, 502, 503, 504}:
                 raise RuntimeError(f"Data provider returned {error.code}.") from error
             last_error = error
@@ -9165,11 +10362,13 @@ def cached(key, loader, ttl=CACHE_TTL_SECONDS):
     try:
         data = loader()
     except Exception:
+        # Serving slightly stale data beats failing the whole report when one
+        # upstream endpoint is briefly down.
         if cached_value:
             cached_value["expiresAt"] = time.time() + min(ttl, 60)
             return cached_value["data"]
         raise
-    _cache[key] = {"data": data, "expiresAt": time.time() + ttl}
+    set_cached(key, data, ttl)
     return data
 
 
@@ -9181,8 +10380,31 @@ def get_cached(key, include_expired=False):
 
 
 def set_cached(key, data, ttl=CACHE_TTL_SECONDS):
-    _cache[key] = {"data": data, "expiresAt": time.time() + ttl}
+    # Loaders run on a thread pool, so writes are serialised. Reads stay lock-free:
+    # dict lookups are atomic under the GIL and a racing read at worst misses.
+    with _cache_lock:
+        _cache[key] = {"data": data, "expiresAt": time.time() + ttl}
+        if len(_cache) > MAX_CACHE_ENTRIES:
+            evict_cache_entries()
     return data
+
+
+def evict_cache_entries():
+    """Drop expired keys, then oldest, back to the entry ceiling.
+
+    Called with ``_cache_lock`` held. Without this the dict grows for the life of
+    the process: every symbol anyone looks up leaves a report behind.
+    """
+    now = time.time()
+    for key, value in list(_cache.items()):
+        if value["expiresAt"] <= now:
+            _cache.pop(key, None)
+    if len(_cache) <= MAX_CACHE_ENTRIES:
+        return
+    for key, _ in sorted(_cache.items(), key=lambda item: item[1]["expiresAt"])[
+        : len(_cache) - MAX_CACHE_ENTRIES
+    ]:
+        _cache.pop(key, None)
 
 
 def clear_cache(key):

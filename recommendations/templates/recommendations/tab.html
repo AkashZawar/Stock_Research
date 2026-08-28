@@ -4,6 +4,24 @@
           upside). Driven by public/app.js via /api/recommendations.
         {% endcomment %}
         <section id="recommendationsView" class="tab-view is-hidden">
+          <details class="tab-about panel-accent-rose">
+            <summary>What is this tab for?</summary>
+            <div class="tab-about-body">
+              <p><strong>Use this for a ready-made shortlist of ideas.</strong> It collects stock calls that already
+                carry analyst coverage or institutional (FII/DII) backing and presents them as actionable trades with
+                levels attached. Treat these as leads to verify, not conclusions - run anything that interests you
+                through the Stock Analysis tab before acting.</p>
+              <h4>What it shows you</h4>
+              <ul>
+                <li><b>Recommendation list</b> - each idea with its buy level, sell target, and stop loss</li>
+                <li><b>Expected upside</b> - the move implied from the current price to the target</li>
+                <li><b>Suggested hold duration</b> - the horizon the call is framed on</li>
+                <li><b>Heatmap view</b> - the same ideas ranked visually by conviction and upside</li>
+                <li><b>Intraday 3-5% watchlist</b> - names screened for a same-session move</li>
+              </ul>
+            </div>
+          </details>
+
           <section class="monitor-header">
             <div>
               <p class="eyebrow">Recommendations</p>

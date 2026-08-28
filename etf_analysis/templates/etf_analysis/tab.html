@@ -5,6 +5,28 @@
           /api/etf/search and /api/etf/analyze.
         {% endcomment %}
         <section id="etfView" class="tab-view is-hidden">
+          <details class="tab-about panel-accent-cyan">
+            <summary>What is this tab for?</summary>
+            <div class="tab-about-body">
+              <p><strong>Use this to judge whether an ETF is worth holding, and how well it tracks.</strong> For an index
+                tracker the return alone tells you little - what matters is the return per unit of risk, how consistent
+                it has been across entry dates, and how closely it follows its index after costs. Figures are measured
+                on a split- and dividend-adjusted series over ten years of history where available.</p>
+              <h4>What it shows you</h4>
+              <ul>
+                <li><b>ETF profile</b> - category, expense ratio, AUM, and NAV where the provider publishes them</li>
+                <li><b>Performance and risk</b> - returns to 5Y CAGR, annualized volatility, and max drawdown</li>
+                <li><b>Rolling 1-year returns</b> - the spread of every one-year holding period, so a good start date
+                  cannot flatter the record</li>
+                <li><b>Return per unit of risk</b> - Sharpe and Sortino against a stated risk-free rate</li>
+                <li><b>Versus market reference</b> - excess return, beta, tracking error, and up/down capture</li>
+                <li><b>Top holdings and sectors</b> - what you are actually buying</li>
+                <li><b>Allocation plan and data checks</b> - a suitability read plus which inputs were available and
+                  how fresh the price is</li>
+              </ul>
+            </div>
+          </details>
+
           <section class="asset-workbench">
             <section class="monitor-header asset-header panel-accent-cyan">
               <div>
@@ -56,10 +78,10 @@
                   </article>
                   <article class="asset-shortlist-card">
                     <span>03</span>
-                    <strong>ICICI Prudential Nifty 50 ETF</strong>
-                    <small>ICICINIFTY.NS · Low-cost index candidate</small>
+                    <strong>Invesco India Nifty 50 ETF</strong>
+                    <small>IVZINNIFTY.NS · Low-cost index candidate</small>
                     <p>Use as a cross-check against other Nifty 50 ETFs for costs, liquidity, and index replication quality.</p>
-                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="ICICINIFTY.NS">Analyze</button>
+                    <button type="button" data-asset-shortlist-type="etf" data-asset-shortlist-symbol="IVZINNIFTY.NS">Analyze</button>
                   </article>
                   <article class="asset-shortlist-card">
                     <span>04</span>
@@ -132,6 +154,8 @@
                 </div>
               </section>
 
+              <p id="etfStaleWarning" class="asset-stale-warning is-hidden"></p>
+
               <section class="score-grid">
                 <article class="metric-card">
                   <span>Suitability</span>
@@ -159,14 +183,36 @@
                 <article class="analysis-panel panel-accent-cyan">
                   <h3>ETF Profile</h3>
                   <div id="etfProfileMetrics" class="metric-table"></div>
+                  <p id="etfProfileNote" class="asset-basis-note"></p>
                 </article>
                 <article class="analysis-panel panel-accent-blue">
                   <h3>Performance & Risk</h3>
                   <div id="etfPerformanceMetrics" class="metric-table"></div>
+                  <p id="etfReturnBasis" class="asset-basis-note"></p>
                 </article>
                 <article class="analysis-panel panel-accent-emerald">
                   <h3>Allocation Plan</h3>
                   <div id="etfPlanList" class="asset-plan-list"></div>
+                </article>
+              </section>
+
+              <section class="detail-grid">
+                <article class="analysis-panel panel-accent-blue">
+                  <h3>Rolling 1-Year Returns</h3>
+                  <p class="section-summary" id="etfRollingSummary"></p>
+                  <div id="etfRollingMetrics" class="metric-table"></div>
+                </article>
+                <article class="analysis-panel panel-accent-emerald">
+                  <h3>Return Per Unit of Risk</h3>
+                  <p class="section-summary" id="etfRiskAdjustedSummary"></p>
+                  <div id="etfRiskAdjustedMetrics" class="metric-table"></div>
+                  <p id="etfRiskAdjustedNote" class="asset-basis-note"></p>
+                </article>
+                <article class="analysis-panel panel-accent-violet">
+                  <h3>Versus Market Reference</h3>
+                  <p class="section-summary" id="etfBenchmarkSummary"></p>
+                  <div id="etfBenchmarkMetrics" class="metric-table"></div>
+                  <p id="etfBenchmarkNote" class="asset-basis-note"></p>
                 </article>
               </section>
 

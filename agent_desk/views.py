@@ -1,28 +1,22 @@
-"""Views for the Stock Analysis tab.
+"""Views for the Agent Desk tab.
 
-- ``search``: ticker/name search suggestions (``/api/search``).
-- ``analyze``: build the full stock research report (``/api/analyze``) and
-  log the request. The heavy lifting lives in ``core.services``.
+``analyze``: run the multi-agent desk for one symbol
+(``/api/agent-desk/analyze?symbol=...&rounds=2``). Data loading is delegated to
+``core.services`` (which caches the report, so opening this tab right after the
+Stock Analysis tab costs no extra network calls) and the reasoning lives in
+``agent_desk.agents``.
 """
 from django.http import JsonResponse
 
 from core import services
 from core.view_helpers import record_stock_search
 
-
-def search(request):
-    query = request.GET.get("q", "").strip()
-    if len(query) < 1:
-        return JsonResponse({"results": []})
-
-    try:
-        return JsonResponse({"results": services.search_symbols(query)})
-    except Exception as error:
-        return JsonResponse({"error": str(error)}, status=500)
+from . import agents
 
 
 def analyze(request):
     raw_input = request.GET.get("symbol", "").strip()
+    rounds = agents.normalize_rounds(request.GET.get("rounds", agents.DEFAULT_DEBATE_ROUNDS))
     symbol = ""
     status_code = 500
     error_message = ""
@@ -32,7 +26,7 @@ def analyze(request):
             status_code = 400
             error_message = services.INVALID_INSTRUMENT_MESSAGE
             return JsonResponse(services.invalid_instrument_payload(raw_input), status=status_code)
-        payload = services.analyze_symbol(symbol)
+        payload = agents.build_agent_report(symbol, rounds)
         status_code = 200
         return JsonResponse(payload)
     except Exception as error:

@@ -5,6 +5,29 @@
           public/app.js via /api/mutual-funds/search and /api/mutual-funds/analyze.
         {% endcomment %}
         <section id="fundView" class="tab-view is-hidden">
+          <details class="tab-about panel-accent-teal">
+            <summary>What is this tab for?</summary>
+            <div class="tab-about-body">
+              <p><strong>Use this to assess a fund scheme before an SIP or a lump sum.</strong> A headline one-year
+                number depends heavily on when you happened to start, so this tab leans on rolling returns and
+                risk-adjusted measures to show what a range of entry dates actually produced. Search by scheme name -
+                Direct Growth plans are ranked first.</p>
+              <h4>What it shows you</h4>
+              <ul>
+                <li><b>Fund profile</b> - category, expense ratio, AUM, and latest NAV where published</li>
+                <li><b>Performance and risk</b> - returns to 5Y CAGR, volatility, downside deviation, and max drawdown</li>
+                <li><b>Rolling 1-year returns</b> - median, quartiles, best and worst windows, and how often a year
+                  finished positive</li>
+                <li><b>Return per unit of risk</b> - Sharpe and Sortino against a stated risk-free rate</li>
+                <li><b>Versus market reference</b> - excess return over the index grossed up for its dividend yield,
+                  plus beta and active risk</li>
+                <li><b>Annual returns and comparison</b> - calendar-year record against category peers</li>
+                <li><b>Top holdings, allocation plan, and data checks</b> - portfolio, a suitability read, and which
+                  inputs were available</li>
+              </ul>
+            </div>
+          </details>
+
           <section class="asset-workbench">
             <section class="monitor-header asset-header panel-accent-teal">
               <div>
@@ -15,7 +38,7 @@
               <form class="asset-search-form" id="fundForm" data-asset-type="mutual-fund">
                 <label for="fundInput">Mutual fund symbol or scheme name</label>
                 <div class="asset-search-row">
-                  <input id="fundInput" name="symbol" list="fundSuggestions" placeholder="VFIAX, FXAIX, SBI Bluechip, Parag Parikh" autocomplete="off" required>
+                  <input id="fundInput" name="symbol" list="fundSuggestions" placeholder="Parag Parikh Flexi Cap, SBI Small Cap, VFIAX" autocomplete="off" required>
                   <datalist id="fundSuggestions"></datalist>
                   <button type="submit">Analyze Fund</button>
                 </div>
@@ -49,10 +72,10 @@
                   </article>
                   <article class="asset-shortlist-card">
                     <span>02</span>
-                    <strong>ICICI Prudential Value Fund - Direct Growth</strong>
-                    <small>Value fund · valuation discipline</small>
+                    <strong>HDFC Flexi Cap Fund - Direct Growth</strong>
+                    <small>Flexi cap · valuation discipline</small>
                     <p>Check long-term category rank, drawdown, fund manager consistency, and current sector concentration.</p>
-                    <button type="button" data-asset-shortlist-type="mutual-fund" data-asset-shortlist-mode="search" data-asset-shortlist-symbol="ICICI Prudential Value Fund Direct Growth">Search in app</button>
+                    <button type="button" data-asset-shortlist-type="mutual-fund" data-asset-shortlist-mode="search" data-asset-shortlist-symbol="HDFC Flexi Cap Fund Direct Growth">Search in app</button>
                   </article>
                   <article class="asset-shortlist-card">
                     <span>03</span>
@@ -70,10 +93,10 @@
                   </article>
                   <article class="asset-shortlist-card">
                     <span>05</span>
-                    <strong>HDFC Balanced Advantage Fund - Direct Growth</strong>
-                    <small>Hybrid dynamic allocation · lower equity shock</small>
-                    <p>Review for staggered allocation and volatility control; check equity/debt mix and tax suitability.</p>
-                    <button type="button" data-asset-shortlist-type="mutual-fund" data-asset-shortlist-mode="search" data-asset-shortlist-symbol="HDFC Balanced Advantage Fund Direct Growth">Search in app</button>
+                    <strong>UTI Nifty 50 Index Fund - Direct Growth</strong>
+                    <small>Passive index · lowest-cost core holding</small>
+                    <p>Use as the passive benchmark: any active fund above should justify its extra cost against this return.</p>
+                    <button type="button" data-asset-shortlist-type="mutual-fund" data-asset-shortlist-mode="search" data-asset-shortlist-symbol="UTI Nifty 50 Index Fund Direct Growth">Search in app</button>
                   </article>
                 </div>
               </section>
@@ -96,6 +119,8 @@
                   <strong id="fundChange"></strong>
                 </div>
               </section>
+
+              <p id="fundStaleWarning" class="asset-stale-warning is-hidden"></p>
 
               <section class="score-grid">
                 <article class="metric-card">
@@ -124,14 +149,36 @@
                 <article class="analysis-panel panel-accent-teal">
                   <h3>Fund Profile</h3>
                   <div id="fundProfileMetrics" class="metric-table"></div>
+                  <p id="fundProfileNote" class="asset-basis-note"></p>
                 </article>
                 <article class="analysis-panel panel-accent-blue">
                   <h3>Performance & Risk</h3>
                   <div id="fundPerformanceMetrics" class="metric-table"></div>
+                  <p id="fundReturnBasis" class="asset-basis-note"></p>
                 </article>
                 <article class="analysis-panel panel-accent-emerald">
                   <h3>Allocation Plan</h3>
                   <div id="fundPlanList" class="asset-plan-list"></div>
+                </article>
+              </section>
+
+              <section class="detail-grid">
+                <article class="analysis-panel panel-accent-blue">
+                  <h3>Rolling 1-Year Returns</h3>
+                  <p class="section-summary" id="fundRollingSummary"></p>
+                  <div id="fundRollingMetrics" class="metric-table"></div>
+                </article>
+                <article class="analysis-panel panel-accent-emerald">
+                  <h3>Return Per Unit of Risk</h3>
+                  <p class="section-summary" id="fundRiskAdjustedSummary"></p>
+                  <div id="fundRiskAdjustedMetrics" class="metric-table"></div>
+                  <p id="fundRiskAdjustedNote" class="asset-basis-note"></p>
+                </article>
+                <article class="analysis-panel panel-accent-violet">
+                  <h3>Versus Market Reference</h3>
+                  <p class="section-summary" id="fundBenchmarkSummary"></p>
+                  <div id="fundBenchmarkMetrics" class="metric-table"></div>
+                  <p id="fundBenchmarkNote" class="asset-basis-note"></p>
                 </article>
               </section>
 

@@ -42,8 +42,16 @@ def analyze_asset(request, asset_type):
         error_message = str(error)
         if services.is_invalid_instrument_error(error_message):
             status_code = 400
-            error_message = services.INVALID_INSTRUMENT_MESSAGE
-            return JsonResponse(services.invalid_instrument_payload(raw_input), status=status_code)
+            # The symbol parsed but the provider has no data for it, so report it
+            # as expired rather than mistyped and keep it out of the suggestions.
+            payload = services.invalid_instrument_payload(raw_input, symbol)
+            error_message = payload["error"]
+            return JsonResponse(payload, status=status_code)
+        if services.is_insufficient_history_error(error_message):
+            # A real instrument with a stub history is a data-availability
+            # answer, not a server fault - keep the explanation and use 400.
+            status_code = 400
+            return JsonResponse({"error": error_message}, status=status_code)
         status_code = 500
         return JsonResponse({"error": error_message}, status=status_code)
     finally:

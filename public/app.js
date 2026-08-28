@@ -2,10 +2,11 @@
  * app.js - the single-page frontend for the workspace shell (/app).
  *
  * Responsibilities:
- * - Tab switching between Stock Analysis, Recommendations, Market Monitor,
- *   ETF Analysis and Mutual Funds (setActiveTab).
+ * - Tab switching between Stock Analysis, Agent Desk, Recommendations,
+ *   Market Monitor, ETF Analysis and Mutual Funds (setActiveTab).
  * - Calling the JSON APIs and rendering the results:
  *     /api/search, /api/analyze              -> stock report
+ *     /api/agent-desk/analyze                -> multi-agent desk verdict
  *     /api/etf/* , /api/mutual-funds/*       -> asset reports
  *     /api/market-monitor                    -> monitor tables/heatmaps
  *     /api/recommendations                   -> recommendation table
@@ -27,6 +28,8 @@ const errorState = document.querySelector("#errorState");
 const reportEl = document.querySelector("#report");
 const canvas = document.querySelector("#priceChart");
 const analysisTab = document.querySelector("#analysisTab");
+const agentTab = document.querySelector("#agentTab");
+const agentHandoffButton = document.querySelector("#agentHandoffButton");
 const recommendationsTab = document.querySelector("#recommendationsTab");
 const etfTab = document.querySelector("#etfTab");
 const fundTab = document.querySelector("#fundTab");
@@ -35,6 +38,11 @@ const monitorTab = document.querySelector("#monitorTab");
 const tradeTab = document.querySelector("#tradeTab");
 const searchLogTab = document.querySelector("#searchLogTab");
 const analysisView = document.querySelector("#analysisView");
+const agentView = document.querySelector("#agentView");
+const agentForm = document.querySelector("#agentForm");
+const agentInput = document.querySelector("#agentInput");
+const agentSuggestions = document.querySelector("#agentSuggestions");
+const agentRounds = document.querySelector("#agentRounds");
 const recommendationsView = document.querySelector("#recommendationsView");
 const etfView = document.querySelector("#etfView");
 const fundView = document.querySelector("#fundView");
@@ -107,6 +115,9 @@ const assetContexts = {
 };
 
 let latestReport = null;
+let latestAgentReport = null;
+let agentSearchTimer = null;
+let agentSearchController = null;
 let latestMonitor = null;
 let latestRecommendations = null;
 let latestTradeReferences = null;
@@ -147,6 +158,29 @@ form.addEventListener("submit", async (event) => {
 });
 
 analysisTab.addEventListener("click", () => setActiveTab("analysis"));
+agentTab?.addEventListener("click", () => {
+  setActiveTab("agent");
+  // Seamless hand-off: carry the symbol over from the Stock Analysis tab so the
+  // desk runs on the report the user was already looking at.
+  if (!agentInput.value.trim() && latestReport?.symbol) {
+    agentInput.value = latestReport.symbol;
+  }
+  if (!latestAgentReport) {
+    agentInput.focus();
+  }
+});
+// One-click hand-off from the Stock Analysis report into the desk. The report is
+// already cached in core.services, so this costs no extra network calls.
+agentHandoffButton?.addEventListener("click", async () => {
+  const symbol = latestReport?.symbol;
+  if (!symbol) {
+    return;
+  }
+  agentInput.value = symbol;
+  setActiveTab("agent");
+  await runAgentDesk(symbol);
+});
+
 recommendationsTab?.addEventListener("click", () => {
   setActiveTab("recommendations");
   if (!latestRecommendations) {
@@ -287,6 +321,30 @@ for (const context of Object.values(assetContexts)) {
   });
 }
 
+agentForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const symbol = agentInput.value.trim();
+  if (!symbol) {
+    return;
+  }
+  setActiveTab("agent");
+  await runAgentDesk(symbol);
+});
+
+agentInput?.addEventListener("input", () => {
+  clearTimeout(agentSearchTimer);
+  const query = agentInput.value.trim();
+  if (query.length < 1) {
+    if (agentSearchController) {
+      agentSearchController.abort();
+      agentSearchController = null;
+    }
+    agentSuggestions.innerHTML = "";
+    return;
+  }
+  agentSearchTimer = setTimeout(() => searchAgentSymbols(query), 180);
+});
+
 symbolInput.addEventListener("input", () => {
   clearTimeout(searchTimer);
   const query = symbolInput.value.trim();
@@ -348,10 +406,12 @@ function setActiveTab(tab) {
   const isWatchlist = tab === "watchlist" && Boolean(watchlistView);
   const isMonitor = tab === "monitor";
   const isRecommendations = tab === "recommendations" && Boolean(recommendationsView);
+  const isAgent = tab === "agent" && Boolean(agentView);
   const isTrade = tab === "trade" && Boolean(tradeView);
   const isLogs = tab === "logs" && Boolean(searchLogView);
-  const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isRecommendations && !isTrade && !isLogs;
+  const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isRecommendations && !isAgent && !isTrade && !isLogs;
   analysisTab.classList.toggle("is-active", isAnalysis);
+  agentTab?.classList.toggle("is-active", isAgent);
   recommendationsTab?.classList.toggle("is-active", isRecommendations);
   etfTab.classList.toggle("is-active", isEtf);
   fundTab.classList.toggle("is-active", isFund);
@@ -360,6 +420,7 @@ function setActiveTab(tab) {
   tradeTab?.classList.toggle("is-active", isTrade);
   searchLogTab?.classList.toggle("is-active", isLogs);
   analysisView.classList.toggle("is-hidden", !isAnalysis);
+  agentView?.classList.toggle("is-hidden", !isAgent);
   recommendationsView?.classList.toggle("is-hidden", !isRecommendations);
   etfView.classList.toggle("is-hidden", !isEtf);
   fundView.classList.toggle("is-hidden", !isFund);
@@ -2427,8 +2488,12 @@ function renderAssetReport(prefix, report) {
   document.querySelector(`#${prefix}Confidence`).textContent = scoreText(report.scores.confidence);
   document.querySelector(`#${prefix}ConfidenceText`).textContent = report.confidence.label;
 
+  renderAssetStaleWarning(prefix, report.freshness);
   renderAssetProfile(prefix, report);
   renderAssetPerformance(prefix, report);
+  renderAssetRollingReturns(prefix, report);
+  renderAssetRiskAdjusted(prefix, report);
+  renderAssetBenchmark(prefix, report);
   renderAssetAnnualReturns(prefix, report.annualReturns);
   renderAssetPlan(prefix, report.plan);
   renderAssetHoldings(prefix, report.holdings);
@@ -2441,31 +2506,143 @@ function renderAssetReport(prefix, report) {
   validateRenderedData(document.querySelector(`#${prefix}Report`));
 }
 
+// A stale NAV/close makes every level, return, and plan below it historical, so
+// say so above the scores rather than only in the data-checks list.
+function renderAssetStaleWarning(prefix, freshness) {
+  const banner = document.querySelector(`#${prefix}StaleWarning`);
+  if (!banner) {
+    return;
+  }
+  const stale = Boolean(freshness && freshness.stale);
+  banner.classList.toggle("is-hidden", !stale);
+  banner.textContent = stale ? freshness.detail || "" : "";
+}
+
 function renderAssetProfile(prefix, report) {
   const profile = report.profile || {};
+  // The fund-details endpoint answers 401 for anonymous callers, so for most
+  // Indian symbols these fields are permanently empty. Falling through to the
+  // generic loading placeholder showed eight rows of "Loading, ETA 10-30s" on a
+  // report that was already complete, which reads as a broken page rather than
+  // as a provider limitation. Say so once, plainly, instead.
+  const published = profile.detailsAvailable !== false;
+  // Kept short because it repeats down the column; the note below the table
+  // carries the explanation once.
+  const absent = (label) => (published ? loadingText(label, DATA_LOADING_ETA_PROVIDER) : "Not published");
+  const stat = (value, format, label) => (Number.isFinite(value) ? format() : absent(label));
+
   renderTable(`#${prefix}ProfileMetrics`, [
     ["Category", displayText(profile.category, "category", DATA_LOADING_ETA_PROVIDER)],
-    ["Family", displayText(profile.family, "family", DATA_LOADING_ETA_PROVIDER)],
+    ["Family", profile.family || absent("family")],
     ["Type", displayText(profile.legalType || report.assetLabel, "asset type", DATA_LOADING_ETA_PROVIDER)],
-    ["Total assets / AUM", formatLarge(profile.totalAssets, report.currency)],
-    ["NAV / price", formatMoney(profile.navPrice, report.currency)],
-    ["Expense ratio", formatExpenseRatio(profile.expenseRatio)],
-    ["Yield", formatRatioPercent(profile.yield)],
-    ["YTD return", formatRatioPercent(profile.ytdReturn)],
-    ["3Y beta", formatNumber(profile.beta3Year)],
-    ["Inception", profile.inceptionDate ? formatDateTime(profile.inceptionDate) : loadingText("inception date", DATA_LOADING_ETA_PROVIDER)]
+    ["Total assets / AUM", stat(profile.totalAssets, () => formatLarge(profile.totalAssets, report.currency), "value")],
+    ["NAV / price", stat(profile.navPrice, () => formatMoney(profile.navPrice, report.currency), "price")],
+    ["Expense ratio", stat(profile.expenseRatio, () => formatExpenseRatio(profile.expenseRatio), "expense ratio")],
+    ["Yield", stat(profile.yield, () => formatRatioPercent(profile.yield), "percent")],
+    ["YTD return", stat(profile.ytdReturn, () => formatRatioPercent(profile.ytdReturn), "percent")],
+    ["3Y beta", stat(profile.beta3Year, () => formatNumber(profile.beta3Year), "value")],
+    ["Inception", profile.inceptionDate ? formatDateTime(profile.inceptionDate) : absent("inception date")]
   ]);
+
+  const noteEl = document.querySelector(`#${prefix}ProfileNote`);
+  if (noteEl) {
+    noteEl.textContent = published
+      ? ""
+      : "The provider does not serve fund factsheet fields (AUM, expense ratio, inception, yield) for this symbol "
+        + "without an authenticated session. Everything above and below is computed from the price and NAV history, "
+        + "which did load, so the return, risk, and benchmark figures are unaffected.";
+  }
 }
 
 function renderAssetPerformance(prefix, report) {
+  const risk = report.risk || {};
   const rows = (report.performance.rows || []).map((item) => [`${item.label} return`, formatPercentValue(item.return)]);
   rows.push(
-    ["Annualized volatility", formatPercentValue(report.risk.annualizedVolatility)],
-    ["Max drawdown", formatPercentValue(report.risk.maxDrawdown)],
+    [`Annualized volatility (${risk.volatilityWindowLabel || "risk window"})`, formatPercentValue(risk.annualizedVolatility)],
+    ["Downside deviation", formatPercentValue(risk.downsideDeviation)],
+    [`Max drawdown (${risk.drawdownWindowLabel || "full history"})`, formatPercentValue(risk.maxDrawdown)],
     ["SMA 50", formatMoney(report.momentum.sma50, report.currency)],
     ["SMA 200", formatMoney(report.momentum.sma200, report.currency)]
   );
   renderTable(`#${prefix}PerformanceMetrics`, rows);
+  // Whether the series was split-adjusted, and whether history had to be cut,
+  // changes what every return above means.
+  setText(`#${prefix}ReturnBasis`, [(report.returnBasis || {}).note, risk.windowNote].filter(Boolean).join(" "));
+}
+
+// A single 1Y number is one sample dominated by its start date. The rolling
+// distribution answers what a range of entry dates actually produced.
+function renderAssetRollingReturns(prefix, report) {
+  const rolling = report.rollingReturns || {};
+  if (!rolling.available) {
+    setText(`#${prefix}RollingSummary`, rolling.reason || "Rolling one-year returns need more history than the provider returned.");
+    renderTable(`#${prefix}RollingMetrics`, []);
+    return;
+  }
+
+  setText(`#${prefix}RollingSummary`, rolling.summary || "");
+  renderTable(`#${prefix}RollingMetrics`, [
+    ["Windows measured", String(rolling.observations ?? "-")],
+    ["Median", formatStat(rolling.median, "%")],
+    ["Average", formatStat(rolling.average, "%")],
+    ["25th percentile", formatStat(rolling.percentile25, "%")],
+    ["75th percentile", formatStat(rolling.percentile75, "%")],
+    ["Worst window", formatStat(rolling.worst, "%")],
+    ["Best window", formatStat(rolling.best, "%")],
+    ["Windows finishing positive", formatStat(rolling.positiveSharePercent, "%")]
+  ]);
+}
+
+function renderAssetRiskAdjusted(prefix, report) {
+  const data = report.riskAdjusted || {};
+  if (!data.available) {
+    setText(`#${prefix}RiskAdjustedSummary`, data.reason || "Risk-adjusted return could not be computed.");
+    renderTable(`#${prefix}RiskAdjustedMetrics`, []);
+    setText(`#${prefix}RiskAdjustedNote`, "");
+    return;
+  }
+
+  setText(`#${prefix}RiskAdjustedSummary`, data.summary || "");
+  renderTable(`#${prefix}RiskAdjustedMetrics`, [
+    ["Window", data.windowLabel || "-"],
+    ["Annualized return", formatStat(data.annualizedReturn, "%")],
+    ["Annualized volatility", formatStat(data.annualizedVolatility, "%")],
+    ["Downside deviation", formatStat(data.downsideDeviation, "%")],
+    ["Risk-free rate used", formatStat(data.riskFreeRatePercent, "%")],
+    ["Excess return", formatStat(data.excessReturn, "%")],
+    ["Sharpe ratio", formatStat(data.sharpe)],
+    ["Sortino ratio", formatStat(data.sortino)],
+    ["Read", data.label || "-"]
+  ]);
+  setText(`#${prefix}RiskAdjustedNote`, data.assumptionNote || "");
+}
+
+// A fund return in isolation says nothing; this is the comparison that makes it
+// interpretable, and for an index tracker it is the main selection criterion.
+function renderAssetBenchmark(prefix, report) {
+  const data = report.benchmark || {};
+  if (!data.available) {
+    setText(`#${prefix}BenchmarkSummary`, data.summary || "No market reference comparison is available.");
+    renderTable(`#${prefix}BenchmarkMetrics`, []);
+    setText(`#${prefix}BenchmarkNote`, "");
+    return;
+  }
+
+  setText(`#${prefix}BenchmarkSummary`, data.summary || "");
+  renderTable(`#${prefix}BenchmarkMetrics`, [
+    ["Reference", `${data.benchmarkName || "-"} (${data.benchmarkSymbol || "-"})`],
+    ["Window", `${data.windowLabel || "-"} · ${data.observations ?? "-"} weekly observations`],
+    ["Fund return (annualized)", formatStat(data.fundReturn, "%")],
+    ["Reference price return", formatStat(data.benchmarkPriceReturn, "%")],
+    ["Reference dividend yield (assumed)", formatStat(data.benchmarkDividendYield, "%")],
+    ["Reference total return", formatStat(data.benchmarkReturn, "%")],
+    ["Excess return", formatStat(data.excessReturn, "%")],
+    [data.trackingErrorLabel || "Active risk", formatStat(data.trackingError, "%")],
+    ["Beta", formatStat(data.beta)],
+    ["Up capture", formatStat(data.upCapture, "%")],
+    ["Down capture", formatStat(data.downCapture, "%")]
+  ]);
+  setText(`#${prefix}BenchmarkNote`, data.note || "");
 }
 
 function renderAssetAnnualReturns(prefix, annualReturns) {
@@ -4606,6 +4783,17 @@ function formatPercentValue(value) {
   return `${value.toFixed(2)}%`;
 }
 
+// Fund statistics can be permanently unavailable rather than pending: a young
+// fund has no five-year CAGR and capture ratios need enough paired observations
+// to mean anything. Those are settled answers, so they must not render as a
+// loading placeholder the way formatPercentValue would.
+function formatStat(value, suffix = "") {
+  if (!Number.isFinite(value)) {
+    return "Not enough history";
+  }
+  return `${value.toFixed(2)}${suffix}`;
+}
+
 function formatPointChange(value) {
   if (!Number.isFinite(value)) {
     return loadingText("change");
@@ -4692,15 +4880,545 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+/* ---------------------------------------------------------------------------
+ * Agent Desk tab (/api/agent-desk/analyze)
+ *
+ * Renders the multi-agent pipeline: analyst team -> bull/bear debate ->
+ * trader proposal -> risk team -> portfolio manager sign-off, plus the data
+ * grounding panel that explains how much of the verdict is actually backed by
+ * verified inputs.
+ * ------------------------------------------------------------------------- */
+function showAgentState(state) {
+  for (const [id, match] of [
+    ["#agentEmpty", "empty"],
+    ["#agentLoading", "loading"],
+    ["#agentError", "error"],
+    ["#agentReport", "report"]
+  ]) {
+    document.querySelector(id)?.classList.toggle("is-hidden", state !== match);
+  }
+}
+
+async function runAgentDesk(symbol) {
+  showAgentState("loading");
+  try {
+    const rounds = agentRounds?.value || "2";
+    const response = await fetch(
+      `/api/agent-desk/analyze?symbol=${encodeURIComponent(symbol)}&rounds=${encodeURIComponent(rounds)}`
+    );
+    const payload = await response.json();
+    if (!response.ok) {
+      if (payload.suggestions) {
+        showInvalidSearchPopup(payload, symbol);
+        showAgentState(latestAgentReport ? "report" : "empty");
+        return;
+      }
+      throw new Error(payload.error || "Could not run the agent desk.");
+    }
+    latestAgentReport = payload;
+    showAgentState("report");
+    renderAgentReport(payload);
+  } catch (error) {
+    document.querySelector("#agentError").textContent = error.message;
+    showAgentState("error");
+  } finally {
+    latestSearchLogs = null;
+  }
+}
+
+async function searchAgentSymbols(query) {
+  if (agentSearchController) {
+    agentSearchController.abort();
+  }
+  const controller = new AbortController();
+  agentSearchController = controller;
+  try {
+    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+    const payload = await response.json();
+    if (agentSearchController !== controller) {
+      return;
+    }
+    renderSuggestionOptions(agentSuggestions, payload.results || []);
+  } catch (error) {
+    if (error.name !== "AbortError" && agentSearchController === controller) {
+      agentSuggestions.innerHTML = "";
+    }
+  } finally {
+    if (agentSearchController === controller) {
+      agentSearchController = null;
+    }
+  }
+}
+
+function renderAgentReport(payload) {
+  renderAgentVerdict(payload);
+  renderAgentScoreGrid(payload);
+  renderAgentAnalysts(payload);
+  renderAgentConflicts(payload);
+  renderAgentDebate(payload);
+  renderAgentProposal(payload);
+  renderAgentRisk(payload);
+  renderAgentGrounding(payload);
+}
+
+function renderAgentVerdict(payload) {
+  const decision = payload.decision || {};
+  const quote = payload.quote || {};
+  const currency = payload.currency || "";
+  const name = payload.longName || payload.symbol || "";
+
+  document.querySelector("#agentVerdictSpeaker").textContent = decision.speaker || "Portfolio Manager";
+  document.querySelector("#agentVerdictTitle").textContent = `${name} (${payload.symbol || ""})`;
+  document.querySelector("#agentVerdictMeta").textContent = [
+    Number.isFinite(quote.price) ? `${formatMoney(quote.price, currency)}` : "",
+    Number.isFinite(quote.changePercent) ? `${signed(quote.changePercent)}%` : "",
+    payload.generatedAt ? `Desk run ${formatDateTime(payload.generatedAt)}` : "",
+    `${payload.debateRounds || 0} debate round(s)`
+  ].filter(Boolean).join(" | ");
+
+  const statusEl = document.querySelector("#agentVerdictStatus");
+  statusEl.textContent = decision.status || "";
+  statusEl.className = `pill ${agentStatusClass(decision.status)}`;
+
+  const actionEl = document.querySelector("#agentVerdictAction");
+  actionEl.textContent = decision.action || "";
+  actionEl.className = `pill ${agentActionClass(decision.action)}`;
+
+  document.querySelector("#agentVerdictSummary").textContent = decision.summary || "";
+
+  const confidence = decision.deskConfidence || {};
+  document.querySelector("#agentVerdictGrid").innerHTML = [
+    agentVerdictCell("Suggested size", Number.isFinite(decision.positionSizePercent) ? `${decision.positionSizePercent}% of book` : "No position"),
+    agentVerdictCell("Desk confidence", `${scoreText(confidence.score)} (${confidence.label || "-"})`),
+    // Two numbers behind the confidence score: how many distinct drivers carry
+    // the winning side, and how many desks stand behind it. Six readings from
+    // one desk is not six confirmations.
+    agentVerdictCell(
+      "Evidence breadth",
+      `${confidence.independentDrivers ?? "-"} driver${confidence.independentDrivers === 1 ? "" : "s"} · ${confidence.contributingDesks ?? "-"} desk${confidence.contributingDesks === 1 ? "" : "s"}`
+    ),
+    agentVerdictCell("Conviction", scoreText(decision.conviction)),
+    agentVerdictCell("Invalidation", Number.isFinite(decision.invalidation) ? formatMoney(decision.invalidation, currency) : "Not defined"),
+    agentVerdictCell("Risk / reward", Number.isFinite(decision.riskReward) ? `${decision.riskReward}:1` : "Not available")
+  ].join("");
+
+  const blockingEl = document.querySelector("#agentBlockingList");
+  const blocking = decision.blocking || [];
+  blockingEl.classList.toggle("is-hidden", blocking.length === 0);
+  blockingEl.innerHTML = blocking
+    .map((item) => `<p class="agent-flag is-blocking"><strong>Blocked</strong><span>${escapeHtml(item)}</span></p>`)
+    .join("");
+
+  const conditionEl = document.querySelector("#agentConditionList");
+  const conditions = decision.conditions || [];
+  conditionEl.classList.toggle("is-hidden", conditions.length === 0);
+  conditionEl.innerHTML = conditions
+    .map((item) => `<p class="agent-flag"><strong>Condition</strong><span>${escapeHtml(item)}</span></p>`)
+    .join("");
+}
+
+function agentVerdictCell(label, value) {
+  return `<article class="agent-verdict-cell"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
+}
+
+function renderAgentScoreGrid(payload) {
+  const consensus = payload.consensus || {};
+  const debate = payload.debate || {};
+  const grounding = payload.grounding || {};
+  const proposal = payload.proposal || {};
+  const risk = payload.risk || {};
+
+  document.querySelector("#agentScoreGrid").innerHTML = [
+    agentScoreCard("Desk consensus", scoreText(consensus.score), consensus.stance || "", agentStanceClass(consensus.stance)),
+    agentScoreCard("Debate edge", `${debate.edge >= 0 ? "+" : ""}${debate.edge ?? 0}`, `${debate.winner || "undecided"} ahead`, agentEdgeClass(debate.edge)),
+    agentScoreCard("Data grounding", scoreText(grounding.score), `${grounding.verified || 0}/${grounding.total || 0} verified`, agentGroundingClass(grounding.score)),
+    agentScoreCard("Conviction", scoreText(proposal.conviction), proposal.convictionLabel || "", ""),
+    agentScoreCard("Risk stance", risk.selected ? titleCase(risk.selected) : "-", Number.isFinite(risk.positionSizePercent) ? `${risk.positionSizePercent}% size` : "Size undefined", "")
+  ].join("");
+}
+
+function agentScoreCard(label, value, note, toneClass) {
+  return `
+    <article class="metric-card agent-metric-card ${toneClass}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(note)}</small>
+    </article>
+  `;
+}
+
+function renderAgentAnalysts(payload) {
+  const consensus = payload.consensus || {};
+  const pill = document.querySelector("#agentConsensusPill");
+  pill.textContent = `${consensus.agreement ?? 0}% agreement`;
+  pill.className = `pill ${agentStanceClass(consensus.stance)}`;
+  document.querySelector("#agentConsensusSummary").textContent = consensus.summary || "";
+
+  document.querySelector("#agentAnalystGrid").innerHTML = (payload.analysts || [])
+    .map((analyst) => {
+      const coverage = analyst.coverage || {};
+      const metrics = (analyst.metrics || [])
+        .map((item) => `<div><dt>${escapeHtml(item.label)}</dt><dd>${escapeHtml(String(item.value))}</dd></div>`)
+        .join("");
+      const evidence = (analyst.evidence || [])
+        .map((item) => `<li class="is-bull">${escapeHtml(item)}</li>`)
+        .join("");
+      const concerns = (analyst.concerns || [])
+        .map((item) => `<li class="is-bear">${escapeHtml(item)}</li>`)
+        .join("");
+      const missing = (coverage.missingFields || []).length
+        ? `<p class="agent-analyst-missing">Not available: ${escapeHtml((coverage.missingFields || []).join(", "))}</p>`
+        : "";
+      return `
+        <article class="agent-analyst-card ${agentStanceClass(analyst.stance)}">
+          <header>
+            <div>
+              <strong>${escapeHtml(analyst.role || "")}</strong>
+              <small>${escapeHtml(analyst.focus || "")}</small>
+            </div>
+            <span class="agent-analyst-score">${escapeHtml(scoreText(analyst.score))}</span>
+          </header>
+          <p class="agent-analyst-summary">${escapeHtml(analyst.summary || "")}</p>
+          <div class="agent-analyst-bars">
+            ${agentBar("Stance", titleCase(analyst.stance), analyst.score)}
+            ${agentBar("Data confidence", `${analyst.confidence ?? 0}%`, analyst.confidence)}
+          </div>
+          <dl class="agent-analyst-metrics">${metrics}</dl>
+          <ul class="agent-analyst-findings">${evidence}${concerns}</ul>
+          ${missing}
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function agentBar(label, valueText, percent) {
+  const width = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
+  return `
+    <div class="agent-bar">
+      <span>${escapeHtml(label)}</span>
+      <div class="agent-bar-track"><i style="width:${width}%"></i></div>
+      <em>${escapeHtml(valueText)}</em>
+    </div>
+  `;
+}
+
+function renderAgentConflicts(payload) {
+  const conflicts = payload.conflicts || [];
+  const panel = document.querySelector("#agentConflictPanel");
+  panel.classList.toggle("is-hidden", conflicts.length === 0);
+  document.querySelector("#agentConflictCount").textContent = `${conflicts.length} open`;
+  document.querySelector("#agentConflictSummary").textContent = conflicts.length
+    ? "These desks read the same data differently. Unresolved splits reduce the desk confidence and cut position size."
+    : "";
+  document.querySelector("#agentConflictList").innerHTML = conflicts
+    .map((conflict) => `
+      <article class="agent-conflict">
+        <header>
+          <span class="agent-conflict-gap">${escapeHtml(String(conflict.gap))}-pt split</span>
+          <strong>${escapeHtml(conflict.left?.role || "")} vs ${escapeHtml(conflict.right?.role || "")}</strong>
+        </header>
+        <p>${escapeHtml(conflict.detail || "")}</p>
+        <p class="agent-conflict-fix">${escapeHtml(conflict.resolution || "")}</p>
+      </article>
+    `)
+    .join("");
+}
+
+function renderAgentDebate(payload) {
+  const debate = payload.debate || {};
+  const edgePill = document.querySelector("#agentDebateEdge");
+  edgePill.textContent = `Edge ${debate.edge >= 0 ? "+" : ""}${debate.edge ?? 0}`;
+  edgePill.className = `pill ${agentEdgeClass(debate.edge)}`;
+
+  const verdict = debate.managerVerdict || {};
+  document.querySelector("#agentDebateVerdict").textContent =
+    `${verdict.speaker || "Research Manager"}: ${verdict.stance || ""}. ${verdict.detail || ""}`;
+
+  const bull = Number.isFinite(debate.bullStrength) ? debate.bullStrength : 0;
+  const bear = Number.isFinite(debate.bearStrength) ? debate.bearStrength : 0;
+  const total = bull + bear;
+  const bullPercent = total ? Math.round((bull / total) * 100) : 50;
+  const bullEl = document.querySelector("#agentDebateBull");
+  const bearEl = document.querySelector("#agentDebateBear");
+  bullEl.style.width = `${bullPercent}%`;
+  bearEl.style.width = `${100 - bullPercent}%`;
+  bullEl.textContent = `Bull ${bullPercent}%`;
+  bearEl.textContent = `Bear ${100 - bullPercent}%`;
+
+  document.querySelector("#agentDebateRounds").innerHTML = (debate.exchanges || [])
+    .map((exchange) => `
+      <article class="agent-round">
+        <span class="agent-round-label">Round ${escapeHtml(String(exchange.round))}</span>
+        ${agentSpeech(exchange.bull, "bull")}
+        ${agentSpeech(exchange.bear, "bear")}
+      </article>
+    `)
+    .join("");
+
+  renderAgentFactorLedger(debate);
+
+  const unresolved = debate.unresolved || [];
+  const unresolvedEl = document.querySelector("#agentUnresolved");
+  unresolvedEl.classList.toggle("is-hidden", unresolved.length === 0);
+  unresolvedEl.innerHTML = unresolved.length
+    ? `<strong>Objections left standing</strong><ul>${unresolved
+        .map((item) => `<li>${escapeHtml(item.text)} <em>- ${escapeHtml(item.source)}</em></li>`)
+        .join("")}</ul>`
+    : "";
+}
+
+// Shows how the raw findings collapsed into drivers and how each desk voted.
+// Without this the edge is a bare number and there is no way to see that six
+// bearish points were really one downtrend counted six times.
+function renderAgentFactorLedger(debate) {
+  const container = document.querySelector("#agentFactorLedger");
+  if (!container) {
+    return;
+  }
+
+  const side = (rows, tone, label) => {
+    if (!rows.length) {
+      return `<div class="agent-factor-side is-${tone}"><strong>${label}</strong><p class="muted">No directional driver.</p></div>`;
+    }
+    const items = rows
+      .map(
+        (row) => `
+          <li>
+            <span>${escapeHtml(row.label)}</span>
+            <em>${escapeHtml(String(row.points))} reading${row.points === 1 ? "" : "s"}</em>
+            <strong>${row.contribution.toFixed(1)}</strong>
+          </li>
+        `
+      )
+      .join("");
+    return `<div class="agent-factor-side is-${tone}"><strong>${label}</strong><ul>${items}</ul></div>`;
+  };
+
+  const votes = (debate.deskVotes || [])
+    .map(
+      (row) => `
+        <li>
+          <span>${escapeHtml(row.role)}</span>
+          <em>${escapeHtml(row.detail)}</em>
+          <strong>${row.bull.toFixed(1)} / ${row.bear.toFixed(1)}</strong>
+        </li>
+      `
+    )
+    .join("");
+
+  container.innerHTML = `
+    <p class="agent-factor-intro">
+      Correlated readings are grouped into drivers before scoring, so restating one
+      observation cannot outvote several independent ones. Each desk then argues at its
+      assigned weight rather than in proportion to how many readings its data feed produced.
+    </p>
+    <div class="agent-factor-grid">
+      ${side(debate.bullFactors || [], "bull", "Bull drivers")}
+      ${side(debate.bearFactors || [], "bear", "Bear drivers")}
+    </div>
+    <div class="agent-factor-votes">
+      <strong>Desk votes (bull / bear)</strong>
+      <ul>${votes}</ul>
+    </div>
+  `;
+}
+
+function agentSpeech(side, tone) {
+  if (!side) {
+    return "";
+  }
+  const points = (side.points || [])
+    .map((point) => `<li>${escapeHtml(point.text)} <em>${escapeHtml(point.source)}</em></li>`)
+    .join("");
+  return `
+    <div class="agent-speech is-${tone}">
+      <strong>${escapeHtml(side.speaker || "")}</strong>
+      <p>${escapeHtml(side.claim || "")}</p>
+      <ul>${points}</ul>
+    </div>
+  `;
+}
+
+function renderAgentProposal(payload) {
+  const proposal = payload.proposal || {};
+  const currency = payload.currency || "";
+  const pill = document.querySelector("#agentProposalConviction");
+  pill.textContent = `${proposal.action || "-"} | ${proposal.convictionLabel || "-"} conviction`;
+  pill.className = `pill ${agentActionClass(proposal.action)}`;
+  document.querySelector("#agentProposalRationale").textContent =
+    `${proposal.actionDetail || ""} ${proposal.rationale || ""}`.trim();
+
+  const entry = proposal.entryZone || {};
+  const targets = proposal.targets || [];
+  const suitability = proposal.swingSuitability || {};
+  document.querySelector("#agentProposalLevels").innerHTML = [
+    agentLevelRow("Action", proposal.action || "-"),
+    agentLevelRow("Timeframe", proposal.timeframe || "-"),
+    agentLevelRow("Pullback entry", Number.isFinite(entry.low) && Number.isFinite(entry.high)
+      ? `${formatMoney(entry.low, currency)} - ${formatMoney(entry.high, currency)}`
+      : "Not defined"),
+    agentLevelRow("Breakout trigger", Number.isFinite(proposal.breakoutTrigger) ? formatMoney(proposal.breakoutTrigger, currency) : "Not defined"),
+    agentLevelRow("Invalidation", Number.isFinite(proposal.invalidation) ? formatMoney(proposal.invalidation, currency) : "Not defined"),
+    agentLevelRow("Targets", targets.length ? targets.map((value) => formatMoney(value, currency)).join(" / ") : "Not defined"),
+    agentLevelRow("Risk / reward", Number.isFinite(proposal.riskReward) ? `${proposal.riskReward}:1` : "Not available"),
+    agentLevelRow("Stop distance", Number.isFinite(proposal.plannedRiskPercent) ? `${proposal.plannedRiskPercent}%` : "Not available"),
+    agentLevelRow("Swing engine agrees", suitability.label ? `${suitability.label} (${scoreText(suitability.score)})` : "Not available")
+  ].join("");
+}
+
+function agentLevelRow(label, value) {
+  return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+}
+
+function renderAgentRisk(payload) {
+  const risk = payload.risk || {};
+  const verdict = risk.verdict || {};
+  const pill = document.querySelector("#agentRiskStance");
+  pill.textContent = verdict.stance || "-";
+  pill.className = "pill";
+  document.querySelector("#agentRiskVerdict").textContent = verdict.detail || "";
+
+  document.querySelector("#agentRiskList").innerHTML = (risk.members || [])
+    .map((member) => `
+      <article class="agent-risk-card ${member.key === risk.selected ? "is-selected" : ""}">
+        <header>
+          <strong>${escapeHtml(member.speaker || "")}</strong>
+          <span>${escapeHtml(Number.isFinite(member.positionSizePercent) ? `${member.positionSizePercent}% size` : "Size n/a")}</span>
+        </header>
+        <p>${escapeHtml(member.argument || "")}</p>
+        ${member.key === risk.selected ? '<span class="agent-risk-chosen">Selected by the risk manager</span>' : ""}
+      </article>
+    `)
+    .join("");
+}
+
+function renderAgentGrounding(payload) {
+  const grounding = payload.grounding || {};
+  const pill = document.querySelector("#agentGroundingScore");
+  pill.textContent = `${scoreText(grounding.score)} ${grounding.label || ""}`.trim();
+  pill.className = `pill ${agentGroundingClass(grounding.score)}`;
+  document.querySelector("#agentGroundingSummary").textContent = grounding.summary || "";
+
+  document.querySelector("#agentGroundingList").innerHTML = (grounding.checks || [])
+    .map((check) => `
+      <article class="agent-grounding-check is-${escapeHtml(check.status)}">
+        <span class="agent-grounding-status">${escapeHtml(titleCase(check.status))}</span>
+        <strong>${escapeHtml(check.label || "")}</strong>
+        <small>${escapeHtml(check.detail || "")}</small>
+      </article>
+    `)
+    .join("");
+
+  // Spell out why this tab's desk confidence can sit well below the Stock
+  // Analysis tab's confidence score - they measure different things.
+  const reportConfidence = Number.isFinite(grounding.reportConfidence)
+    ? `The Stock Analysis tab reports ${scoreText(grounding.reportConfidence)} confidence in the underlying data; `
+      + "desk confidence above is lower whenever inputs are unverified or the desks disagree."
+    : "";
+
+  document.querySelector("#agentNote").textContent = [
+    payload.source ? `Source: ${payload.source}.` : "",
+    reportConfidence,
+    payload.note || ""
+  ].filter(Boolean).join(" ");
+}
+
+function agentStanceClass(stance) {
+  if (stance === "bullish") {
+    return "is-bullish";
+  }
+  if (stance === "bearish") {
+    return "is-bearish";
+  }
+  return "is-neutral";
+}
+
+function agentEdgeClass(edge) {
+  if (!Number.isFinite(edge)) {
+    return "is-neutral";
+  }
+  if (edge >= 8) {
+    return "is-bullish";
+  }
+  if (edge <= -8) {
+    return "is-bearish";
+  }
+  return "is-neutral";
+}
+
+function agentGroundingClass(score) {
+  if (!Number.isFinite(score)) {
+    return "is-neutral";
+  }
+  if (score >= 75) {
+    return "is-bullish";
+  }
+  if (score >= 55) {
+    return "is-neutral";
+  }
+  return "is-bearish";
+}
+
+function agentStatusClass(status) {
+  if (status === "Approved") {
+    return "is-bullish";
+  }
+  if (status === "Rejected") {
+    return "is-bearish";
+  }
+  return "is-neutral";
+}
+
+function agentActionClass(action) {
+  if (action === "Buy" || action === "Accumulate") {
+    return "is-bullish";
+  }
+  if (action === "Avoid" || action === "Reduce") {
+    return "is-bearish";
+  }
+  return "is-neutral";
+}
+
+function titleCase(value) {
+  const text = String(value || "");
+  return text ? text[0].toUpperCase() + text.slice(1) : "";
+}
+
 if (watchlistRows) {
   renderWatchlist();
 }
 showState("empty");
+showAgentState("empty");
 
-const initialSymbol = new URLSearchParams(window.location.search).get("symbol");
-if (initialSymbol && initialSymbol.trim()) {
-  const bootSymbol = initialSymbol.trim();
-  symbolInput.value = bootSymbol;
+// Deep links: /app?symbol=TCS opens the Stock Analysis report (used by the
+// landing page), and /app?tab=agent&symbol=TCS opens the Agent Desk directly.
+const bootParams = new URLSearchParams(window.location.search);
+const initialSymbol = (bootParams.get("symbol") || "").trim();
+const initialTab = (bootParams.get("tab") || "").trim().toLowerCase();
+
+// Tabs that accept ?tab=...&symbol=... deep links, e.g.
+// /app?tab=fund&symbol=Parag%20Parikh%20Flexi%20Cap.
+const DEEP_LINK_ASSET_TABS = {
+  etf: "etf",
+  fund: "fund",
+};
+
+if (initialTab === "agent" && agentView) {
+  setActiveTab("agent");
+  if (initialSymbol) {
+    agentInput.value = initialSymbol;
+    runAgentDesk(initialSymbol);
+  }
+} else if (DEEP_LINK_ASSET_TABS[initialTab]) {
+  const context = assetContexts[DEEP_LINK_ASSET_TABS[initialTab]];
+  setActiveTab(initialTab);
+  if (context && initialSymbol) {
+    context.input.value = initialSymbol;
+    analyzeAsset(context, initialSymbol);
+  }
+} else if (initialSymbol) {
+  symbolInput.value = initialSymbol;
   setActiveTab("analysis");
-  analyze(bootSymbol);
+  analyze(initialSymbol);
 }

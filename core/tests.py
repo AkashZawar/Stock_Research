@@ -8,6 +8,7 @@ windows, quality reports, and the search-log API.
 
 Run with ``python manage.py test``.
 """
+import time
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -1481,6 +1482,667 @@ class AssetAnalysisTests(SimpleTestCase):
         self.assertIn("AdvisorKhoj annual return comparison was available.", report["confidence"]["checks"])
 
 
+class AssetNameResolutionTests(SimpleTestCase):
+    """Yahoo mirrors the scheme id into shortName for Indian funds."""
+
+    def test_symbol_echoed_as_a_name_is_rejected(self):
+        name = services.display_name(["0P0000YWL1.BO", "Parag Parikh Flexi Cap Dir Gr"], "0P0000YWL1.BO")
+
+        self.assertEqual(name, "Parag Parikh Flexi Cap Dir Gr")
+
+    def test_symbol_echo_check_ignores_case_and_padding(self):
+        self.assertEqual(services.display_name(["  0p0000ywl1.bo  ", "Real Fund"], "0P0000YWL1.BO"), "Real Fund")
+
+    def test_symbol_is_the_last_resort_only(self):
+        self.assertEqual(services.display_name([None, "", "   "], "VFIAX"), "VFIAX")
+
+    def test_first_real_name_wins(self):
+        self.assertEqual(services.display_name(["Vanguard 500", "Ignored"], "VFIAX"), "Vanguard 500")
+
+    def test_chart_meta_name_is_used_when_quote_endpoints_are_empty(self):
+        # Yahoo's quote/quoteSummary endpoints answer 401 anonymously, so the
+        # chart meta is the only name source for most funds.
+        candles = [
+            {
+                "date": f"2026-01-{(index % 28) + 1:02d}",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1000,
+            }
+            for index in range(260)
+        ]
+        # A fund outside the curated universe, so the chart meta is the only
+        # name source available.
+        report = services.build_asset_report(
+            "0P0001RO8V.BO",
+            "mutual-fund",
+            {"longName": "Parag Parikh Arbitrage Dir Gr", "shortName": "0P0001RO8V.BO"},
+            candles,
+            {},
+            {},
+        )
+
+        self.assertEqual(report["longName"], "Parag Parikh Arbitrage Dir Gr")
+
+    def test_a_curated_name_beats_a_provider_internal_code(self):
+        candles = [
+            {
+                "date": f"2026-01-{(index % 28) + 1:02d}",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1000,
+            }
+            for index in range(260)
+        ]
+        report = services.build_asset_report(
+            "HDFCNIFTY.NS",
+            "etf",
+            {"longName": "HDFCAMC - HDFCNIFTY"},
+            candles,
+            {},
+            {},
+        )
+
+        self.assertEqual(report["longName"], "HDFC Nifty 50 ETF")
+
+
+class AssetResolutionTests(SimpleTestCase):
+    """A bare word must not be trusted as a ticker on the ETF/MF tabs."""
+
+    def test_qualified_tickers_and_fund_ids_are_treated_as_tickers(self):
+        for symbol in ("NIFTYBEES.NS", "0P0000YWL1.BO", "MON100", "^NSEI"):
+            self.assertTrue(services.looks_like_asset_ticker(symbol), symbol)
+
+    def test_bare_words_are_not_treated_as_tickers(self):
+        for symbol in ("GOLD", "NIFTY", "SILVER", ""):
+            self.assertFalse(services.looks_like_asset_ticker(symbol), symbol)
+
+    def test_a_bare_word_is_routed_through_search_instead_of_used_raw(self):
+        # "gold" used to resolve to the US equity ticker GOLD on the mutual-fund
+        # tab because it matched the ticker regex.
+        with patch.object(services, "search_assets", return_value=[]) as search:
+            self.assertEqual(services.resolve_asset_input("gold", "mutual-fund"), "")
+        search.assert_called_once()
+
+    def test_a_local_universe_hit_short_circuits_search(self):
+        with patch.object(services, "search_assets") as search:
+            self.assertEqual(services.resolve_asset_input("NIFTYBEES", "etf"), "NIFTYBEES.NS")
+        search.assert_not_called()
+
+    def test_wrong_asset_type_results_are_never_chosen(self):
+        results = [{"symbol": "GOLD", "name": "Barrick Gold", "exchange": "NYSE", "type": "EQUITY"}]
+
+        self.assertIsNone(services.choose_asset_search_result(results, "gold", "mutual-fund"))
+
+    def test_matching_asset_type_is_chosen(self):
+        results = [
+            {"symbol": "GOLD", "name": "Barrick Gold", "exchange": "NYSE", "type": "EQUITY"},
+            {"symbol": "VFIAX", "name": "Vanguard 500", "exchange": "Nasdaq", "type": "MUTUALFUND"},
+        ]
+
+        self.assertEqual(services.choose_asset_search_result(results, "vanguard", "mutual-fund")["symbol"], "VFIAX")
+
+
+class AssetMatchPlausibilityTests(SimpleTestCase):
+    """Resolution must not silently swap in a different fund."""
+
+    def make(self, name, symbol="0P1.BO", tags=None):
+        return {"symbol": symbol, "name": name, "exchange": "BSE", "type": "MUTUALFUND", "tags": tags or []}
+
+    def test_a_different_fund_house_is_rejected(self):
+        # This exact pair used to resolve, analysing the wrong fund.
+        candidate = self.make("Nippon India Small Cap Fund Direct Growth")
+
+        self.assertFalse(services.asset_match_is_plausible(candidate, "ICICI Prudential Value Fund Direct Growth"))
+
+    def test_a_different_category_is_rejected(self):
+        candidate = self.make("SBI Small Cap Fund Direct Growth")
+
+        self.assertFalse(services.asset_match_is_plausible(candidate, "Motilal Oswal Midcap Fund Direct Growth"))
+
+    def test_the_right_fund_is_accepted(self):
+        candidate = self.make("Parag Parikh Flexi Cap Fund Direct Growth")
+
+        self.assertTrue(services.asset_match_is_plausible(candidate, "Parag Parikh Flexi Cap"))
+
+    def test_spacing_differences_are_tolerated(self):
+        candidate = self.make("Parag Parikh Flexi Cap Fund Direct Growth")
+
+        self.assertTrue(services.asset_match_is_plausible(candidate, "parag parikh flexicap"))
+
+    def test_generic_scheme_words_alone_do_not_block_a_match(self):
+        candidate = self.make("SBI Small Cap Fund Direct Growth")
+
+        self.assertTrue(services.asset_match_is_plausible(candidate, "fund direct growth"))
+
+    def test_a_tag_can_satisfy_a_query_word(self):
+        candidate = self.make("Nippon India ETF Junior BeES", symbol="JUNIORBEES.NS", tags=["Nifty Next 50"])
+
+        self.assertTrue(services.asset_match_is_plausible(candidate, "nifty next 50"))
+
+    def test_an_implausible_result_is_not_chosen_even_when_the_type_matches(self):
+        results = [self.make("Nippon India Small Cap Fund Direct Growth")]
+
+        self.assertIsNone(services.choose_asset_search_result(results, "HDFC Balanced Advantage Fund", "mutual-fund"))
+
+
+class AssetSuggestionFallbackTests(SimpleTestCase):
+    """"Do you mean anything from below?" must have something below it."""
+
+    def test_a_shared_word_offers_funds_from_the_same_house(self):
+        with patch.object(services, "safe_search_assets", return_value=[]):
+            results = services.asset_suggestions("SBI Bluechip Fund", "mutual-fund")
+
+        self.assertTrue(results)
+        self.assertTrue(any("SBI" in item["name"] for item in results))
+
+    def test_an_unmatched_query_still_returns_the_curated_list(self):
+        with patch.object(services, "safe_search_assets", return_value=[]):
+            results = services.asset_suggestions("zzzzz nonexistent", "mutual-fund")
+
+        self.assertTrue(results)
+
+    def test_real_search_results_are_preferred_over_the_fallback(self):
+        found = [{"symbol": "VFIAX", "name": "Vanguard 500", "exchange": "Nasdaq", "type": "MUTUALFUND"}]
+        with patch.object(services, "safe_search_assets", return_value=found):
+            results = services.asset_suggestions("vanguard", "mutual-fund")
+
+        self.assertEqual(results, found)
+
+    def test_etf_suggestions_stay_within_the_etf_universe(self):
+        with patch.object(services, "safe_search_assets", return_value=[]):
+            results = services.asset_suggestions("zzzzz nonexistent", "etf")
+
+        self.assertTrue(all(item["type"] == "ETF" for item in results))
+
+
+class AssetUniverseTests(SimpleTestCase):
+    def test_tickers_without_usable_history_are_not_offered(self):
+        # ICICINIFTY.NS 404s; NIFTYIETF.NS and AXISNIFTY.NS return only a few
+        # daily candles, which fails the minimum-history check on analyze.
+        symbols = {symbol for symbol, _name, _exchange, _tags in services.ETF_UNIVERSE}
+
+        self.assertNotIn("ICICINIFTY.NS", symbols)
+        self.assertNotIn("NIFTYIETF.NS", symbols)
+        self.assertNotIn("AXISNIFTY.NS", symbols)
+        self.assertIn("NIF100IETF.NS", symbols)
+
+    def test_indian_funds_are_searchable_locally(self):
+        for query in ("parag", "quant small", "uti nifty"):
+            results = services.local_asset_search_symbols(query, "mutual-fund")
+            self.assertTrue(results, query)
+
+    def test_growth_plans_outrank_idcw_variants(self):
+        results = [
+            {"symbol": "0P1.BO", "name": "SBI Small Cap Fund Reg IDCW-R", "exchange": "BSE", "type": "MUTUALFUND"},
+            {"symbol": "0P2.BO", "name": "SBI Small Cap Fund Dir Gr", "exchange": "BSE", "type": "MUTUALFUND"},
+        ]
+
+        ordered = services.sort_asset_search_results(results, "sbi small cap", "mutual-fund")
+
+        self.assertEqual(ordered[0]["symbol"], "0P2.BO")
+
+    def test_plan_ranking_does_not_apply_to_etfs(self):
+        item = {"symbol": "GOLDBEES.NS", "name": "Nippon India ETF Gold BeES", "exchange": "NSE", "type": "ETF"}
+
+        self.assertEqual(services.fund_plan_rank(item, "etf"), 0)
+
+
+class InsufficientHistoryTests(SimpleTestCase):
+    def test_thin_history_is_recognised(self):
+        message = f"{services.INSUFFICIENT_HISTORY_PREFIX}: the data provider returned only 4 daily rows for X.NS"
+
+        self.assertTrue(services.is_insufficient_history_error(message))
+
+    def test_unrelated_errors_are_not_recognised(self):
+        self.assertFalse(services.is_insufficient_history_error("Data provider returned 500."))
+        self.assertFalse(services.is_insufficient_history_error(""))
+
+
+def make_price_candles(closes, start_day=1, adjusted=True):
+    """Daily candles from a close series, starting 2020-01-01 and skipping weekends."""
+    candles = []
+    cursor = date(2020, 1, 1) + timedelta(days=start_day - 1)
+    for value in closes:
+        while cursor.weekday() >= 5:
+            cursor += timedelta(days=1)
+        candle = {
+            "date": cursor.isoformat(),
+            "open": value, "high": value, "low": value, "close": value, "volume": 1000,
+        }
+        if adjusted:
+            candle["adjClose"] = value
+        candles.append(candle)
+        cursor += timedelta(days=1)
+    return candles
+
+
+class AssetReturnSeriesTests(SimpleTestCase):
+    """Long-horizon return maths has to run on a corporate-action-safe series."""
+
+    def test_the_adjusted_close_is_preferred_when_it_covers_the_series(self):
+        candles = make_price_candles([100.0] * 50)
+        for candle in candles:
+            candle["adjClose"] = 90.0
+
+        rows, basis = services.build_asset_return_series(candles)
+
+        self.assertTrue(basis["adjusted"])
+        self.assertEqual([row["close"] for row in rows], [90.0] * 50)
+
+    def test_a_partial_adjusted_series_falls_back_to_the_raw_close(self):
+        candles = make_price_candles([100.0] * 50)
+        for candle in candles[:20]:
+            candle["adjClose"] = None
+
+        rows, basis = services.build_asset_return_series(candles)
+
+        self.assertFalse(basis["adjusted"])
+        self.assertEqual([row["close"] for row in rows], [100.0] * 50)
+
+    def test_an_unadjusted_split_truncates_the_history_before_it(self):
+        # A 1:10 split that the provider failed to adjust: 40 sessions at 1000
+        # then 40 at 100. Measuring across it would report a 90% "drawdown".
+        candles = make_price_candles([1000.0] * 40 + [100.0] * 40, adjusted=False)
+
+        rows, basis = services.build_asset_return_series(candles)
+
+        self.assertEqual(basis["droppedSessions"], 40)
+        self.assertEqual(len(rows), 40)
+        self.assertTrue(all(row["close"] == 100.0 for row in rows))
+        self.assertIsNotNone(basis["discontinuityDate"])
+        self.assertIn("corporate action", basis["note"])
+
+    def test_a_clean_series_is_kept_whole(self):
+        candles = make_price_candles([100.0 + index for index in range(80)])
+
+        rows, basis = services.build_asset_return_series(candles)
+
+        self.assertEqual(basis["droppedSessions"], 0)
+        self.assertIsNone(basis["discontinuityDate"])
+        self.assertEqual(len(rows), 80)
+
+    def test_a_real_crash_below_the_threshold_is_not_treated_as_a_split(self):
+        candles = make_price_candles([100.0] * 30 + [70.0] * 30, adjusted=False)
+
+        _rows, basis = services.build_asset_return_series(candles)
+
+        self.assertEqual(basis["droppedSessions"], 0)
+
+    def test_a_two_day_bad_divisor_glitch_is_repaired_not_truncated(self):
+        # The real NIFTYBEES fault: two December 2019 sessions quoted at a tenth
+        # of the surrounding price, then straight back. Truncating at the return
+        # leg threw away every earlier session for the sake of two bad rows.
+        candles = make_price_candles([100.0] * 40 + [10.0, 10.1] + [100.5] * 40, adjusted=False)
+
+        rows, basis = services.build_asset_return_series(candles)
+
+        self.assertEqual(basis["repairedSessions"], 2)
+        self.assertEqual(basis["droppedSessions"], 0)
+        self.assertIsNone(basis["discontinuityDate"])
+        self.assertEqual(len(rows), 80)
+        self.assertTrue(all(row["close"] > 50 for row in rows))
+
+    def test_a_repaired_glitch_no_longer_fakes_a_drawdown(self):
+        candles = make_price_candles([100.0] * 40 + [10.0, 10.1] + [100.5] * 40, adjusted=False)
+        rows, _basis = services.build_asset_return_series(candles)
+
+        risk = services.build_asset_risk_report([row["close"] for row in rows])
+
+        self.assertGreater(risk["maxDrawdown"], -5.0)
+
+    def test_a_persistent_step_is_still_treated_as_a_split(self):
+        # Does not revert, so there is no way to recover the earlier scale.
+        candles = make_price_candles([1000.0] * 40 + [100.0] * 40, adjusted=False)
+
+        _rows, basis = services.build_asset_return_series(candles)
+
+        self.assertEqual(basis["repairedSessions"], 0)
+        self.assertEqual(basis["droppedSessions"], 40)
+
+    def test_a_spike_longer_than_the_glitch_window_is_treated_as_a_split(self):
+        candles = make_price_candles([1000.0] * 30 + [100.0] * 20 + [1000.0] * 30, adjusted=False)
+
+        _rows, basis = services.build_asset_return_series(candles)
+
+        self.assertEqual(basis["repairedSessions"], 0)
+        self.assertIsNotNone(basis["discontinuityDate"])
+
+    def test_an_unadjusted_close_is_not_advertised_as_adjusted(self):
+        # Yahoo returns adjClose identical to close for many Indian ETFs, which
+        # is not an adjustment even though the field is populated.
+        candles = make_price_candles([100.0 + index for index in range(60)])
+
+        _rows, basis = services.build_asset_return_series(candles)
+
+        self.assertFalse(basis["adjusted"])
+        self.assertIn("no usable adjustment", basis["note"])
+        self.assertIn("reinvests", basis["note"])
+
+    def test_a_genuinely_adjusted_series_is_labelled_as_such(self):
+        candles = make_price_candles([100.0 + index for index in range(60)])
+        for candle in candles:
+            candle["adjClose"] = candle["close"] * 0.92
+
+        _rows, basis = services.build_asset_return_series(candles)
+
+        self.assertTrue(basis["adjusted"])
+        self.assertIn("dividend-adjusted", basis["note"])
+
+
+class AssetRollingReturnTests(SimpleTestCase):
+    def test_rolling_windows_describe_the_distribution_not_one_sample(self):
+        # Steady 20% a year compounding: every rolling one-year window should
+        # land near 20% and all of them should be positive.
+        daily = 1.20 ** (1 / services.TRADING_SESSIONS_PER_YEAR)
+        closes = [100.0 * daily ** index for index in range(services.TRADING_SESSIONS_PER_YEAR * 3)]
+
+        rolling = services.build_asset_rolling_returns(closes)
+
+        self.assertTrue(rolling["available"])
+        self.assertEqual(rolling["positiveSharePercent"], 100.0)
+        self.assertAlmostEqual(rolling["median"], 20.0, delta=0.5)
+        self.assertAlmostEqual(rolling["worst"], 20.0, delta=0.5)
+
+    def test_a_short_history_reports_why_rather_than_guessing(self):
+        rolling = services.build_asset_rolling_returns([100.0] * 100)
+
+        self.assertFalse(rolling["available"])
+        self.assertIn("Needs more than", rolling["reason"])
+
+    def test_percentiles_are_ordered(self):
+        closes = [100.0 + (index % 90) for index in range(services.TRADING_SESSIONS_PER_YEAR * 2)]
+
+        rolling = services.build_asset_rolling_returns(closes)
+
+        self.assertLessEqual(rolling["worst"], rolling["percentile25"])
+        self.assertLessEqual(rolling["percentile25"], rolling["median"])
+        self.assertLessEqual(rolling["median"], rolling["percentile75"])
+        self.assertLessEqual(rolling["percentile75"], rolling["best"])
+
+
+class AssetRiskAdjustedTests(SimpleTestCase):
+    def test_a_flat_return_above_the_risk_free_rate_reports_a_positive_excess(self):
+        daily = 1.12 ** (1 / services.TRADING_SESSIONS_PER_YEAR)
+        closes = [100.0 * daily ** index for index in range(800)]
+
+        report = services.build_asset_risk_adjusted_report(closes, "INR")
+
+        self.assertTrue(report["available"])
+        self.assertEqual(report["riskFreeRatePercent"], services.ASSET_RISK_FREE_RATES["INR"])
+        self.assertAlmostEqual(report["annualizedReturn"], 12.0, delta=0.5)
+        self.assertGreater(report["excessReturn"], 0)
+
+    def test_the_risk_free_rate_is_currency_aware_and_stated(self):
+        self.assertEqual(services.risk_free_rate_for("INR"), services.ASSET_RISK_FREE_RATES["INR"])
+        self.assertEqual(services.risk_free_rate_for("usd"), services.ASSET_RISK_FREE_RATES["USD"])
+        self.assertEqual(services.risk_free_rate_for("ZZZ"), services.DEFAULT_RISK_FREE_RATE)
+
+    def test_downside_deviation_ignores_upside_moves(self):
+        rising = [100.0 * 1.01 ** index for index in range(300)]
+
+        self.assertEqual(services.annualized_downside_deviation(rising), 0.0)
+        self.assertGreater(services.annualized_volatility(rising), 0)
+
+    def test_a_thin_series_reports_unavailable_rather_than_a_number(self):
+        report = services.build_asset_risk_adjusted_report([100.0] * 30, "INR")
+
+        self.assertFalse(report["available"])
+        self.assertIn("Not enough history", report["reason"])
+
+
+class AssetBenchmarkTests(SimpleTestCase):
+    def make_benchmark(self, candles, symbol="^NSEI", name="Nifty 50"):
+        return {"symbol": symbol, "name": name, "candles": candles}
+
+    def test_a_perfect_tracker_reports_unit_beta_and_no_tracking_error(self):
+        closes = [100.0 * 1.0004 ** index for index in range(600)]
+        candles = make_price_candles(closes)
+        rows, _basis = services.build_asset_return_series(candles)
+
+        report = services.build_asset_benchmark_report(
+            rows, self.make_benchmark(candles), "etf", "Example Nifty 50 ETF", ["Nifty 50"],
+        )
+
+        self.assertTrue(report["available"])
+        self.assertTrue(report["isTrackingBenchmark"])
+        self.assertEqual(report["trackingErrorLabel"], "Tracking error")
+        self.assertAlmostEqual(report["beta"], 1.0, delta=0.01)
+        self.assertAlmostEqual(report["trackingError"], 0.0, delta=0.01)
+        # Matching the price index exactly means the fund handed back none of the
+        # index's dividends, which is a shortfall of the index yield, not a draw.
+        self.assertAlmostEqual(report["benchmarkPriceReturn"], report["fundReturn"], delta=0.01)
+        self.assertAlmostEqual(report["excessReturn"], -services.INDEX_DIVIDEND_YIELDS["^NSEI"], delta=0.01)
+
+    def test_the_reference_is_grossed_up_by_its_dividend_yield(self):
+        closes = [100.0 * 1.0004 ** index for index in range(600)]
+        candles = make_price_candles(closes)
+        rows, _basis = services.build_asset_return_series(candles)
+
+        report = services.build_asset_benchmark_report(
+            rows, self.make_benchmark(candles), "etf", "Example Nifty 50 ETF", ["Nifty 50"],
+        )
+
+        yield_used = services.INDEX_DIVIDEND_YIELDS["^NSEI"]
+        self.assertEqual(report["benchmarkDividendYield"], yield_used)
+        self.assertAlmostEqual(
+            report["benchmarkReturn"], report["benchmarkPriceReturn"] + yield_used, delta=0.02,
+        )
+        self.assertIn("price index", report["note"])
+
+    def test_the_dividend_yield_assumption_is_per_index_with_a_fallback(self):
+        self.assertEqual(services.index_dividend_yield_for("^GSPC"), services.INDEX_DIVIDEND_YIELDS["^GSPC"])
+        self.assertEqual(services.index_dividend_yield_for("^nsei"), services.INDEX_DIVIDEND_YIELDS["^NSEI"])
+        self.assertEqual(services.index_dividend_yield_for("^UNKNOWN"), services.DEFAULT_INDEX_DIVIDEND_YIELD)
+
+    def test_an_unrelated_fund_reads_as_active_risk_not_tracking_error(self):
+        fund = make_price_candles([100.0 * 1.0008 ** index for index in range(600)])
+        index = make_price_candles([100.0 * 1.0002 ** index for index in range(600)])
+        rows, _basis = services.build_asset_return_series(fund)
+
+        report = services.build_asset_benchmark_report(
+            rows, self.make_benchmark(index), "mutual-fund", "Example Gold Fund", ["Gold"],
+        )
+
+        self.assertFalse(report["isTrackingBenchmark"])
+        self.assertEqual(report["trackingErrorLabel"], "Active risk")
+        self.assertGreater(report["excessReturn"], 0)
+
+    def test_nifty_next_50_is_not_mistaken_for_a_nifty_50_tracker(self):
+        self.assertTrue(services.tracks_benchmark("^NSEI", "Example Nifty 50 Index Fund", []))
+        self.assertFalse(services.tracks_benchmark("^NSEI", "Nippon India ETF Junior BeES", ["Nifty Next 50"]))
+        self.assertFalse(services.tracks_benchmark("^NSEI", "Nippon India ETF Bank BeES", ["Banking"]))
+
+    def test_dates_are_aligned_so_a_missing_nav_day_cannot_offset_the_series(self):
+        fund = make_price_candles([100.0, 101.0, 102.0, 103.0, 104.0])
+        index = [row for row in make_price_candles([200.0, 202.0, 204.0, 206.0, 208.0]) if row["date"] != fund[2]["date"]]
+
+        paired = services.align_closes_by_date(fund, index)
+
+        self.assertEqual(len(paired), 4)
+        self.assertNotIn(fund[2]["date"], [row[0] for row in paired])
+
+    def test_too_little_overlap_reports_unavailable(self):
+        fund = make_price_candles([100.0] * 30)
+
+        report = services.build_asset_benchmark_report(
+            fund, self.make_benchmark(fund), "etf", "Example ETF", [],
+        )
+
+        self.assertFalse(report["available"])
+        self.assertIn("matched dates", report["summary"])
+
+    def test_a_missing_benchmark_is_reported_honestly(self):
+        report = services.build_asset_benchmark_report(
+            make_price_candles([100.0] * 300), None, "etf", "Example ETF", [],
+        )
+
+        self.assertFalse(report["available"])
+        self.assertFalse(report["expected"])
+
+    def test_capture_ratios_read_above_and_below_one_hundred(self):
+        index_returns = [0.01, -0.01] * 40
+        # Captures every up move fully and only half of each down move.
+        fund_returns = [0.01 if value > 0 else -0.005 for value in index_returns]
+
+        self.assertAlmostEqual(services.capture_ratio(fund_returns, index_returns, "up"), 100.0, places=6)
+        self.assertAlmostEqual(services.capture_ratio(fund_returns, index_returns, "down"), 50.0, places=6)
+
+
+class AssetSuitabilityTests(SimpleTestCase):
+    def base_inputs(self):
+        return {
+            "momentum": {"score": 50, "label": "Neutral"},
+            "risk": {"score": 60, "label": "Moderate risk"},
+            "confidence": {"score": 80},
+            "profile": {"expenseRatio": 0.005},
+        }
+
+    def test_data_confidence_no_longer_changes_the_investment_score(self):
+        inputs = self.base_inputs()
+        well_documented = services.score_asset_suitability(
+            inputs["momentum"], inputs["risk"], {"score": 95}, inputs["profile"],
+        )
+        thinly_documented = services.score_asset_suitability(
+            inputs["momentum"], inputs["risk"], {"score": 20}, inputs["profile"],
+        )
+
+        self.assertEqual(well_documented, thinly_documented)
+
+    def test_a_better_sharpe_ratio_raises_the_score(self):
+        inputs = self.base_inputs()
+        weak = services.score_asset_suitability(
+            inputs["momentum"], inputs["risk"], inputs["confidence"], inputs["profile"],
+            {"sharpe": 0.0}, None, None,
+        )
+        strong = services.score_asset_suitability(
+            inputs["momentum"], inputs["risk"], inputs["confidence"], inputs["profile"],
+            {"sharpe": 1.5}, None, None,
+        )
+
+        self.assertGreater(strong, weak)
+
+    def test_rolling_consistency_raises_the_score(self):
+        inputs = self.base_inputs()
+        erratic = services.score_asset_suitability(
+            inputs["momentum"], inputs["risk"], inputs["confidence"], inputs["profile"],
+            None, {"available": True, "positiveSharePercent": 40.0}, None,
+        )
+        consistent = services.score_asset_suitability(
+            inputs["momentum"], inputs["risk"], inputs["confidence"], inputs["profile"],
+            None, {"available": True, "positiveSharePercent": 95.0}, None,
+        )
+
+        self.assertGreater(consistent, erratic)
+
+    def test_the_report_lists_what_it_could_and_could_not_include(self):
+        report = services.build_asset_suitability_report(
+            64, {"score": 80}, {"stale": False},
+            {"sharpe": 0.9}, {"available": True}, {"available": False},
+        )
+
+        self.assertIn("Risk-adjusted return", report["included"])
+        self.assertIn("Versus market reference", report["missing"])
+        self.assertTrue(report["reliable"])
+
+    def test_stale_data_marks_the_score_unreliable_without_changing_it(self):
+        stale = services.build_asset_suitability_report(
+            64, {"score": 80}, {"stale": True}, {"sharpe": 0.9}, {"available": True}, {"available": True},
+        )
+
+        self.assertEqual(stale["score"], 64)
+        self.assertFalse(stale["reliable"])
+        self.assertIn("indicative only", stale["note"])
+
+
+class AssetProfileAvailabilityTests(SimpleTestCase):
+    """The payload must say when factsheet fields are structurally unavailable."""
+
+    def test_an_empty_summary_is_reported_as_unavailable(self):
+        profile = services.extract_asset_profile({}, {}, {}, "etf")
+
+        self.assertFalse(profile["detailsAvailable"])
+
+    def test_a_populated_summary_is_reported_as_available(self):
+        profile = services.extract_asset_profile(
+            {"summaryDetail": {"annualReportExpenseRatio": {"raw": 0.0005}}}, {}, {}, "etf",
+        )
+
+        self.assertTrue(profile["detailsAvailable"])
+        self.assertEqual(profile["expenseRatio"], 0.0005)
+
+    def test_the_flag_survives_the_full_report(self):
+        candles = make_price_candles([100.0 + index for index in range(400)])
+
+        report = services.build_asset_report("TESTETF.NS", "etf", {}, candles, {}, {})
+
+        self.assertIn("detailsAvailable", report["profile"])
+        self.assertFalse(report["profile"]["detailsAvailable"])
+
+    def test_nav_falls_back_to_the_latest_close(self):
+        # The NAV is the last close, which always loads, so reporting it as
+        # missing alongside the genuinely absent factsheet fields was wrong.
+        candles = make_price_candles([100.0 + index for index in range(400)])
+
+        report = services.build_asset_report("TESTFUND.BO", "mutual-fund", {}, candles, {}, {})
+
+        self.assertEqual(report["profile"]["navPrice"], report["quote"]["price"])
+        self.assertEqual(report["profile"]["navPrice"], candles[-1]["close"])
+
+
+class AssetFreshnessTests(SimpleTestCase):
+    def make_candles(self, latest_date):
+        return [{"date": latest_date, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1}]
+
+    def test_a_recent_close_is_not_stale(self):
+        today = datetime.now(tz=timezone.utc).date().isoformat()
+
+        freshness = services.build_asset_freshness(self.make_candles(today), "etf")
+
+        self.assertFalse(freshness["stale"])
+        self.assertEqual(freshness["ageDays"], 0)
+
+    def test_an_old_nav_is_flagged_as_stale(self):
+        old = (datetime.now(tz=timezone.utc).date() - timedelta(days=90)).isoformat()
+
+        freshness = services.build_asset_freshness(self.make_candles(old), "mutual-fund")
+
+        self.assertTrue(freshness["stale"])
+        self.assertIn("out of date", freshness["detail"])
+
+    def test_mutual_funds_get_more_slack_than_etfs(self):
+        self.assertGreater(
+            services.MAX_ASSET_STALE_DAYS["mutual-fund"],
+            services.MAX_ASSET_STALE_DAYS["etf"],
+        )
+
+    def test_a_stale_report_loses_confidence(self):
+        fresh = services.build_asset_confidence_report(
+            [{}] * 260, {}, [], {}, None, {"stale": False, "detail": "fresh"}
+        )
+        stale = services.build_asset_confidence_report(
+            [{}] * 260, {}, [], {}, None, {"stale": True, "detail": "stale"}
+        )
+
+        self.assertLess(stale["score"], fresh["score"])
+
+    def test_a_missing_date_does_not_raise(self):
+        freshness = services.build_asset_freshness([], "etf")
+
+        self.assertFalse(freshness["stale"])
+        self.assertIsNone(freshness["ageDays"])
+
+    def test_an_unparseable_date_does_not_raise(self):
+        freshness = services.build_asset_freshness(self.make_candles("not-a-date"), "etf")
+
+        self.assertFalse(freshness["stale"])
+        self.assertIsNone(freshness["ageDays"])
+
+
 class SearchSuggestionTests(SimpleTestCase):
     def test_local_suggestions_include_initial_character_matches(self):
         results = services.local_search_symbols("r")
@@ -1689,8 +2351,41 @@ class StockSearchLogTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         payload = response.json()
-        self.assertEqual(payload["error"], services.INVALID_INSTRUMENT_MESSAGE)
+        # The input parsed to a ticker and the provider had no data for it, so the
+        # error names that ticker instead of claiming the name was unreadable.
+        self.assertIn("RELANCE.NS", payload["error"])
+        self.assertIn("returned no data", payload["error"])
+        self.assertEqual(payload["resolvedSymbol"], "RELANCE.NS")
         self.assertEqual(payload["suggestions"]["stocks"][0]["symbol"], "RELIANCE.NS")
+
+    @patch("core.services.instrument_suggestions")
+    def test_a_failed_symbol_is_not_suggested_as_its_own_fix(self, instrument_suggestions):
+        # TATAMOTORS.NS parses, sits in the curated universe, and 404s since the
+        # demerger. Offering it back as the top suggestion made the only obvious
+        # next click reproduce the same error.
+        instrument_suggestions.return_value = {
+            "stocks": [
+                {"symbol": "TATAMOTORS.NS", "name": "Tata Motors", "kind": "stock"},
+                {"symbol": "TATAPOWER.NS", "name": "Tata Power", "kind": "stock"},
+            ],
+            "etfs": [],
+            "mutualFunds": [],
+        }
+
+        payload = services.invalid_instrument_payload("TATAMOTORS.NS", "TATAMOTORS.NS")
+
+        self.assertEqual(
+            [row["symbol"] for row in payload["suggestions"]["stocks"]], ["TATAPOWER.NS"],
+        )
+
+    @patch("core.services.instrument_suggestions")
+    def test_an_unparseable_input_keeps_the_original_message(self, instrument_suggestions):
+        instrument_suggestions.return_value = {"stocks": [], "etfs": [], "mutualFunds": []}
+
+        payload = services.invalid_instrument_payload("zzzzzz")
+
+        self.assertEqual(payload["error"], services.INVALID_INSTRUMENT_MESSAGE)
+        self.assertEqual(payload["resolvedSymbol"], "")
 
     def test_search_logs_endpoint_returns_recent_logs(self):
         StockSearchLog.objects.create(
@@ -1709,3 +2404,165 @@ class StockSearchLogTests(TestCase):
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["results"][0]["symbol"], "TCS.NS")
         self.assertEqual(payload["results"][0]["deviceLabel"], "Mac desktop")
+
+
+class EndpointFamilyTests(SimpleTestCase):
+    """The 401 memo has to group by route, not by symbol, or it never fires."""
+
+    def test_a_path_symbol_is_stripped_so_all_symbols_share_one_entry(self):
+        first = services.endpoint_family(
+            "https://query2.finance.yahoo.com/v10/finance/quoteSummary/INFY.NS?modules=price"
+        )
+        second = services.endpoint_family(
+            "https://query2.finance.yahoo.com/v10/finance/quoteSummary/TCS.NS?modules=price"
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, "query2.finance.yahoo.com/v10/finance/quoteSummary")
+
+    def test_a_query_string_symbol_is_ignored(self):
+        self.assertEqual(
+            services.endpoint_family("https://query1.finance.yahoo.com/v7/finance/quote?symbols=INFY.NS"),
+            "query1.finance.yahoo.com/v7/finance/quote",
+        )
+
+    def test_different_routes_on_one_host_stay_separate(self):
+        # The chart endpoint works anonymously; suppressing it because quote is
+        # unauthorized would break every report.
+        quote_family = services.endpoint_family("https://query1.finance.yahoo.com/v7/finance/quote?symbols=X.NS")
+        chart_family = services.endpoint_family("https://query1.finance.yahoo.com/v8/finance/chart/X.NS?range=2y")
+
+        self.assertNotEqual(quote_family, chart_family)
+
+    def test_an_index_symbol_is_stripped(self):
+        self.assertEqual(
+            services.endpoint_family("https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"),
+            "query1.finance.yahoo.com/v8/finance/chart",
+        )
+
+
+class UnauthorizedEndpointMemoTests(SimpleTestCase):
+    def setUp(self):
+        services._unauthorized_endpoints.clear()
+        self.addCleanup(services._unauthorized_endpoints.clear)
+
+    def test_a_noted_endpoint_is_reported_unauthorized_for_any_symbol(self):
+        services.note_unauthorized("https://query1.finance.yahoo.com/v7/finance/quote?symbols=INFY.NS")
+
+        self.assertTrue(
+            services.is_unauthorized_endpoint("https://query1.finance.yahoo.com/v7/finance/quote?symbols=SBIN.NS")
+        )
+
+    def test_an_unrelated_endpoint_is_unaffected(self):
+        services.note_unauthorized("https://query1.finance.yahoo.com/v7/finance/quote?symbols=INFY.NS")
+
+        self.assertFalse(
+            services.is_unauthorized_endpoint("https://query1.finance.yahoo.com/v8/finance/chart/INFY.NS")
+        )
+
+    def test_the_memo_lapses_so_restored_access_is_picked_up(self):
+        endpoint = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=INFY.NS"
+        services._unauthorized_endpoints[services.endpoint_family(endpoint)] = time.time() - 1
+
+        self.assertFalse(services.is_unauthorized_endpoint(endpoint))
+
+    def test_a_suppressed_endpoint_makes_no_network_call(self):
+        endpoint = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=INFY.NS"
+        services.note_unauthorized(endpoint)
+
+        with patch("core.services.urlopen") as urlopen:
+            with self.assertRaises(RuntimeError):
+                services.fetch_text(endpoint, json_request=True)
+
+        urlopen.assert_not_called()
+
+
+class CacheEvictionTests(SimpleTestCase):
+    def setUp(self):
+        services._cache.clear()
+        self.addCleanup(services._cache.clear)
+
+    def test_the_cache_stays_within_its_ceiling(self):
+        for index in range(services.MAX_CACHE_ENTRIES + 250):
+            services.set_cached(f"evict-test:{index}", index, ttl=300)
+
+        self.assertLessEqual(len(services._cache), services.MAX_CACHE_ENTRIES)
+
+    def test_expired_entries_are_dropped_before_live_ones(self):
+        services.set_cached("live-key", "live", ttl=300)
+        services._cache["stale-key"] = {"data": "stale", "expiresAt": time.time() - 1}
+
+        services.evict_cache_entries()
+
+        self.assertIn("live-key", services._cache)
+        self.assertNotIn("stale-key", services._cache)
+
+
+class OptionChainExpiryFetchTests(SimpleTestCase):
+    """The expiry legs now run concurrently, so order and partial failure matter."""
+
+    def setUp(self):
+        services._cache.clear()
+        self.addCleanup(services._cache.clear)
+
+    def fake_contract_info(self, expiries):
+        return {"expiryDates": expiries}
+
+    def test_strike_rows_follow_provider_expiry_order_not_completion_order(self):
+        expiries = ["29-Sep-2026", "27-Oct-2026", "23-Nov-2026"]
+
+        def fetch(path):
+            if "contract-info" in path:
+                return self.fake_contract_info(expiries)
+            # The later expiry returns fastest, so completion order would invert.
+            for index, expiry in enumerate(expiries):
+                if quote_plus_safe(expiry) in path:
+                    time.sleep(0.05 * (len(expiries) - index))
+                    return {"records": {"timestamp": expiry, "underlyingValue": 100 + index,
+                                        "data": [{"strikePrice": index}]}}
+            raise AssertionError(f"unexpected path {path}")
+
+        with patch("core.services.fetch_nse_json_with_session", side_effect=fetch):
+            payload = services.get_nse_option_chain_payload("NTPC")
+
+        strikes = [row["strikePrice"] for row in payload["records"]["data"]]
+        self.assertEqual(strikes, [0, 1, 2])
+
+    def test_one_failed_expiry_does_not_lose_the_others(self):
+        expiries = ["29-Sep-2026", "27-Oct-2026"]
+
+        def fetch(path):
+            if "contract-info" in path:
+                return self.fake_contract_info(expiries)
+            if quote_plus_safe(expiries[0]) in path:
+                raise RuntimeError("NSE India returned 503.")
+            return {"records": {"timestamp": expiries[1], "underlyingValue": 101,
+                                "data": [{"strikePrice": 1}]}}
+
+        with patch("core.services.fetch_nse_json_with_session", side_effect=fetch):
+            payload = services.get_nse_option_chain_payload("NTPC")
+
+        self.assertEqual([row["strikePrice"] for row in payload["records"]["data"]], [1])
+
+    def test_every_selected_expiry_is_requested_once(self):
+        expiries = ["29-Sep-2026", "27-Oct-2026", "23-Nov-2026"]
+        seen = []
+
+        def fetch(path):
+            if "contract-info" in path:
+                return self.fake_contract_info(expiries)
+            seen.append(path)
+            return {"records": {"timestamp": "", "underlyingValue": None, "data": []}}
+
+        with patch("core.services.fetch_nse_json_with_session", side_effect=fetch):
+            services.get_nse_option_chain_payload("NTPC")
+
+        self.assertEqual(len(seen), len(expiries))
+        self.assertEqual(len(set(seen)), len(expiries))
+
+
+def quote_plus_safe(value):
+    """Match how the option-chain URL encodes an expiry label."""
+    from urllib.parse import quote as url_quote
+
+    return url_quote(value)

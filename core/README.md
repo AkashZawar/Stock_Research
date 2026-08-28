@@ -2,9 +2,9 @@
 
 `core` is the general/shared Django app. Everything reused across tabs lives
 here: the analysis engine, the database models, request helpers, the page
-shells, and the cross-cutting JSON APIs. The five per-tab apps
-(`stock_analysis`, `recommendations`, `market_monitor`, `etf_analysis`,
-`mutual_funds`) all import from `core`.
+shells, and the cross-cutting JSON APIs. The six per-tab apps
+(`stock_analysis`, `agent_desk`, `recommendations`, `market_monitor`,
+`etf_analysis`, `mutual_funds`) all import from `core`.
 
 ## Files
 
@@ -37,3 +37,35 @@ shells, and the cross-cutting JSON APIs. The five per-tab apps
 3. It returns `JsonResponse(...)`; `core.view_helpers.record_stock_search`
    logs the request.
 4. The browser (`public/app.js`) renders the JSON into the matching tab.
+
+## Fetching and caching
+
+Every report needs several independent upstream calls, so they are issued
+together rather than one after another - a report is only as slow as its slowest
+provider. `_analyze_symbol` and `_analyze_asset` fan out with a
+`ThreadPoolExecutor`; `settle_map` does the same for a list and preserves input
+order, so callers can merge results deterministically.
+
+Notes on the cost of each provider, which is why the code is shaped this way:
+
+- **NSE option chain** is the slowest leg of a stock report. It needs one
+  contract-info call plus one call per expiry, and NSE rejects requests without
+  the cookies its homepage sets. The cookie jar is therefore shared through
+  `nse_session()` instead of being rebuilt per call, and the expiry legs run
+  concurrently. Together those took the open-interest leg from about 3.2s to
+  about 0.9s, and a cold stock report from 4-6s to under 2s. A single failed
+  expiry is skipped rather than failing the chain.
+- **Yahoo `quote` and `quoteSummary`** answer 401 to anonymous callers. They are
+  still attempted, because access may come back, but a 401 is remembered per
+  endpoint (`note_unauthorized`) and short-circuited for
+  `UNAUTHORIZED_ENDPOINT_TTL_SECONDS` so the app stops spending request budget
+  on a result that cannot change. This matters because exhausting that budget
+  earns a 429 on the `chart` endpoint, which *does* work and which every report
+  depends on. `endpoint_family` strips the symbol so the memo is per route, not
+  per symbol.
+- **The cache** (`cached` / `get_cached` / `set_cached`) is a process-local dict
+  with a TTL. Writes take `_cache_lock` because loaders run on the thread pool,
+  and `evict_cache_entries` bounds it at `MAX_CACHE_ENTRIES` (expired keys first,
+  then oldest) so a long-running server does not grow for every symbol anyone
+  looks up. When a loader raises and a stale entry exists, the stale value is
+  served briefly rather than failing the whole report.

@@ -1,0 +1,183 @@
+        {% comment %}
+          Agent Desk tab partial (included by core/base.html).
+          Runs a multi-agent research desk (analyst team -> bull/bear debate ->
+          trader -> risk team -> portfolio manager) over the same report the
+          Stock Analysis tab uses. Driven by public/app.js via
+          /api/agent-desk/analyze and /api/search.
+        {% endcomment %}
+        <section id="agentView" class="tab-view is-hidden">
+          <details class="tab-about panel-accent-violet">
+            <summary>What is this tab for?</summary>
+            <div class="tab-about-body">
+              <p><strong>Use this when you want the argument, not just the answer.</strong> It takes the same verified
+                report as the Stock Analysis tab and runs it through four specialist desks that argue both sides, so you
+                can see which evidence actually drives the call and where the desks disagree. Every claim is derived
+                arithmetically from the data - there is no language model involved, so the same input always gives the
+                same verdict.</p>
+              <h4>What it shows you</h4>
+              <ul>
+                <li><b>Analyst team</b> - technical, fundamental, positioning, and macro desks with a stance and
+                  confidence each</li>
+                <li><b>Desk disagreements</b> - where one desk is bullish and another bearish on the same stock</li>
+                <li><b>Bull vs bear debate</b> - the strongest argument for each side, grouped so one trend restated
+                  four ways only counts once</li>
+                <li><b>Factor ledger</b> - every independent driver on both sides and how much each desk contributed</li>
+                <li><b>Trader proposal</b> - the resulting action with entry, stop, and target</li>
+                <li><b>Risk team</b> - position size across conservative, balanced, and aggressive tiers</li>
+                <li><b>Data grounding</b> - how much of the underlying data was actually available, which caps the
+                  desk's confidence</li>
+              </ul>
+              <p>Debate rounds only control how much of the transcript is shown - it does not change the verdict.</p>
+            </div>
+          </details>
+
+          <section class="agent-workbench">
+            <section class="monitor-header agent-header panel-accent-violet">
+              <div>
+                <p class="eyebrow">Agent Desk</p>
+                <h2>Multi-agent research desk</h2>
+                <p class="muted">Four analyst desks, a bull/bear debate, a risk team, and a final sign-off - all built from the same verified report as the Stock Analysis tab.</p>
+              </div>
+              <form class="agent-search-form" id="agentForm">
+                <label for="agentInput">Ticker or stock name</label>
+                <div class="agent-search-row">
+                  <input id="agentInput" name="symbol" list="agentSuggestions" placeholder="RELIANCE, TCS, HAL.NS" autocomplete="off" required>
+                  <datalist id="agentSuggestions"></datalist>
+                  <label class="agent-rounds" for="agentRounds">
+                    <span>Debate rounds</span>
+                    <select id="agentRounds" name="rounds">
+                      <option value="1">1</option>
+                      <option value="2" selected>2</option>
+                      <option value="3">3</option>
+                    </select>
+                  </label>
+                  <button type="submit">Run desk</button>
+                </div>
+              </form>
+            </section>
+
+            <section id="agentEmpty" class="empty-state">
+              <h2>No desk run yet</h2>
+              <p>Enter a ticker to convene the desk. Each agent reads the same verified data, argues its case, and the portfolio manager signs off or blocks the trade.</p>
+              <div class="agent-pipeline" aria-label="Agent pipeline">
+                <article class="agent-pipeline-step">
+                  <span>01</span>
+                  <strong>Analyst team</strong>
+                  <small>Technical, fundamentals, positioning, and macro desks score the setup and grade their own data coverage.</small>
+                </article>
+                <article class="agent-pipeline-step">
+                  <span>02</span>
+                  <strong>Research debate</strong>
+                  <small>Bull and bear researchers argue the strongest points first, over one to three rounds.</small>
+                </article>
+                <article class="agent-pipeline-step">
+                  <span>03</span>
+                  <strong>Trader</strong>
+                  <small>Turns the debate into an action with entry, invalidation, and targets from the research-levels engine.</small>
+                </article>
+                <article class="agent-pipeline-step">
+                  <span>04</span>
+                  <strong>Risk team</strong>
+                  <small>Aggressive, balanced, and conservative sizing based on ATR, the stop distance, and event risk.</small>
+                </article>
+                <article class="agent-pipeline-step">
+                  <span>05</span>
+                  <strong>Portfolio manager</strong>
+                  <small>Approves, adds conditions, or blocks the trade when data grounding is too thin.</small>
+                </article>
+              </div>
+            </section>
+
+            <section id="agentLoading" class="loading-state is-hidden">
+              <div class="spinner"></div>
+              <p>Convening the desk... <span class="eta-blur">ETA 10-30s</span></p>
+            </section>
+
+            <section id="agentError" class="error-state is-hidden"></section>
+
+            <section id="agentReport" class="agent-report is-hidden">
+              <section class="agent-verdict panel-accent-slate" id="agentVerdict">
+                <div class="agent-verdict-head">
+                  <div>
+                    <p class="eyebrow" id="agentVerdictSpeaker">Portfolio Manager</p>
+                    <h2 id="agentVerdictTitle"></h2>
+                    <p class="muted" id="agentVerdictMeta"></p>
+                  </div>
+                  <div class="agent-verdict-badges">
+                    <span class="pill" id="agentVerdictStatus"></span>
+                    <span class="pill" id="agentVerdictAction"></span>
+                  </div>
+                </div>
+                <p class="section-summary" id="agentVerdictSummary"></p>
+                <div class="agent-verdict-grid" id="agentVerdictGrid"></div>
+                <div id="agentBlockingList" class="agent-flag-list agent-flag-list--blocking"></div>
+                <div id="agentConditionList" class="agent-flag-list"></div>
+              </section>
+
+              <section class="score-grid agent-score-grid" id="agentScoreGrid"></section>
+
+              <section class="analysis-panel panel-accent-blue agent-panel">
+                <div class="section-head">
+                  <h3>Analyst Team</h3>
+                  <span class="pill" id="agentConsensusPill"></span>
+                </div>
+                <p class="section-summary" id="agentConsensusSummary"></p>
+                <div class="agent-analyst-grid" id="agentAnalystGrid"></div>
+              </section>
+
+              <section class="analysis-panel panel-accent-rose agent-panel" id="agentConflictPanel">
+                <div class="section-head">
+                  <h3>Desk Disagreements</h3>
+                  <span class="pill" id="agentConflictCount"></span>
+                </div>
+                <p class="section-summary" id="agentConflictSummary"></p>
+                <div class="agent-conflict-list" id="agentConflictList"></div>
+              </section>
+
+              <section class="analysis-panel panel-accent-amber agent-panel">
+                <div class="section-head">
+                  <h3>Bull vs Bear Debate</h3>
+                  <span class="pill" id="agentDebateEdge"></span>
+                </div>
+                <p class="section-summary" id="agentDebateVerdict"></p>
+                <div class="agent-debate-meter" id="agentDebateMeter" role="img" aria-label="Debate strength split">
+                  <span class="agent-debate-bull" id="agentDebateBull"></span>
+                  <span class="agent-debate-bear" id="agentDebateBear"></span>
+                </div>
+                <div class="agent-debate-rounds" id="agentDebateRounds"></div>
+                <div class="agent-factor-ledger" id="agentFactorLedger"></div>
+                <div class="agent-unresolved" id="agentUnresolved"></div>
+              </section>
+
+              <section class="detail-grid agent-detail-grid">
+                <article class="analysis-panel panel-accent-emerald agent-panel">
+                  <div class="section-head">
+                    <h3>Trader Proposal</h3>
+                    <span class="pill" id="agentProposalConviction"></span>
+                  </div>
+                  <p class="section-summary" id="agentProposalRationale"></p>
+                  <dl class="levels-list agent-levels" id="agentProposalLevels"></dl>
+                </article>
+
+                <article class="analysis-panel panel-accent-cyan agent-panel">
+                  <div class="section-head">
+                    <h3>Risk Team</h3>
+                    <span class="pill" id="agentRiskStance"></span>
+                  </div>
+                  <p class="section-summary" id="agentRiskVerdict"></p>
+                  <div class="agent-risk-list" id="agentRiskList"></div>
+                </article>
+              </section>
+
+              <section class="analysis-panel panel-accent-teal agent-panel">
+                <div class="section-head">
+                  <h3>Data Grounding</h3>
+                  <span class="pill" id="agentGroundingScore"></span>
+                </div>
+                <p class="section-summary" id="agentGroundingSummary"></p>
+                <div class="agent-grounding-grid" id="agentGroundingList"></div>
+                <p class="muted agent-note" id="agentNote"></p>
+              </section>
+            </section>
+          </section>
+        </section>

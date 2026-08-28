@@ -6,6 +6,28 @@
           Populated by public/app.js from /api/analyze and /api/search.
         {% endcomment %}
         <section id="analysisView" class="tab-view">
+          <details class="tab-about panel-accent-teal">
+            <summary>What is this tab for?</summary>
+            <div class="tab-about-body">
+              <p><strong>Use this to research one stock end to end.</strong> Search a ticker and it builds a single
+                report that combines price action, fundamentals, ownership, and derivatives into a scored view with
+                concrete entry, stop, and target levels. This is the starting point for the other tabs - the Agent Desk
+                reruns this same report as a debate.</p>
+              <h4>What it shows you</h4>
+              <ul>
+                <li><b>Quote and score cards</b> - price, change, and the overall technical, fundamental, and
+                  reliability scores</li>
+                <li><b>Research levels</b> - support, resistance, and the swing trade plan with entry, stop, and targets</li>
+                <li><b>Technical analysis</b> - trend, moving averages, RSI, MACD, ATR, and volume participation</li>
+                <li><b>Fundamental analysis</b> - growth, margins, leverage, valuation, and sell-side targets</li>
+                <li><b>Ownership and catalysts</b> - promoter, FII, and DII holding trends plus upcoming events</li>
+                <li><b>Open interest</b> - NSE option-chain positioning across near expiries</li>
+                <li><b>Accuracy and reliability</b> - which inputs were actually available, plus scenarios and a
+                  cross-check of the conclusion</li>
+              </ul>
+            </div>
+          </details>
+
           <section id="emptyState" class="empty-state empty-state--art">
             <figure class="empty-state-figure">
               <img class="empty-state-art" src="{% static 'empty-bull.png' %}" alt="Angry stock market bull">
@@ -30,6 +52,9 @@
                 <h2 id="stockName"></h2>
                 <p class="muted" id="generatedText"></p>
                 <p id="reportVerdict" class="section-summary quote-verdict"></p>
+                <button type="button" id="agentHandoffButton" class="agent-handoff-button">
+                  Run agent desk on this report
+                </button>
               </div>
               <div id="marketClock" class="market-clock is-closed" aria-live="polite">
                 <span class="market-clock-icon" aria-hidden="true"></span>
