@@ -47,8 +47,12 @@
 
           <section id="ipoError" class="error-state is-hidden"></section>
 
-          {# Shown when NSE is unreachable and the tables fall back to grey-market
-             sources alone. A warning rather than an error: there is still data. #}
+          {% comment %}
+            Shown when NSE is unreachable and the tables fall back to grey-market
+            sources alone. A warning rather than an error: there is still data.
+            Use this block tag for multi-line notes; the hash form is parsed on a
+            single line only and otherwise renders to the page as visible text.
+          {% endcomment %}
           <section id="ipoDegraded" class="notice is-hidden"></section>
 
           <section id="ipoContent" class="ipo-content is-hidden">

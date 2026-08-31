@@ -1028,7 +1028,7 @@ function renderIpo(payload) {
 
   if (ipoDegraded) {
     ipoDegraded.textContent = nseDown
-      ? "NSE India is not responding, so recent listings, subscription and OFS are unavailable. The issues below come from grey-market trackers alone - treat them as sentiment, not exchange data."
+      ? "NSE India is not responding, so listing history, subscription figures and OFS cannot be shown. The issues below still come from the grey-market trackers - treat them as sentiment, not exchange data, and check the price band with your broker before applying. Use Refresh IPOs to try the exchange again."
       : "";
     ipoDegraded.classList.toggle("is-hidden", !nseDown);
   }

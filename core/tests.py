@@ -2445,3 +2445,45 @@ class SettleNamedLoadersTests(SimpleTestCase):
         services.settle_named_loaders({"feed": lambda: [1]}, errors=errors)
 
         self.assertEqual(errors, {})
+
+
+class TemplateRenderingTests(SimpleTestCase):
+    """The workspace page is assembled from one partial per tab.
+
+    A stray template tag in any partial is invisible in review but ships a
+    developer note to users as page text, so assert on the rendered output.
+    """
+
+    def rendered_page(self):
+        response = self.client.get("/app")
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_no_raw_template_syntax_reaches_the_page(self):
+        # Django only parses ``{# ... #}`` on a single line; spread over two it
+        # is emitted verbatim. That shipped a developer note to production as
+        # visible text, so fail the build rather than trust review to catch it.
+        page = self.rendered_page()
+
+        for token in ("{#", "#}", "{%", "%}", "{{", "}}"):
+            self.assertNotIn(token, page, f"unrendered template syntax {token!r} reached the page")
+
+    def test_no_developer_commentary_reaches_the_page(self):
+        page = self.rendered_page().lower()
+
+        for phrase in ("shown when nse is unreachable", "driven by public/app.js", "included by core/base.html"):
+            self.assertNotIn(phrase, page, f"developer comment {phrase!r} reached the page")
+
+    def test_every_tab_partial_is_included(self):
+        page = self.rendered_page()
+
+        for view_id in (
+            "analysisView",
+            "agentView",
+            "ipoView",
+            "etfView",
+            "fundView",
+            "monitorView",
+            "recommendationsView",
+        ):
+            self.assertIn(f'id="{view_id}"', page)
