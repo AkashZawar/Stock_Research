@@ -6,6 +6,7 @@ the recommendation flag, section assembly, and the ``/api/ipo`` endpoint.
 
 Run with ``python manage.py test ipo``.
 """
+import json
 import time
 from datetime import date
 from unittest.mock import patch
@@ -237,6 +238,13 @@ class RecentlyListedTests(SimpleTestCase):
 
 
 class PipelineTests(SimpleTestCase):
+    def setUp(self):
+        # The pipeline consults the fallback subscription source; without this
+        # the test would reach the network and depend on the day's listings.
+        patcher = patch.object(services, "fetch_subscription_fallback", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def upcoming(self, **overrides):
         row = {
             "companyName": "ESDS Software Solution Limited",
@@ -253,7 +261,7 @@ class PipelineTests(SimpleTestCase):
 
     def test_an_open_issue_is_merged_with_its_live_subscription(self):
         current = [dict(self.upcoming(), category="Total", noOfTime="6.13")]
-        with patch.object(services, "fetch_bid_details", return_value={"qib": 0.03, "nii": 18.17, "retail": 4.45, "total": 6.13}):
+        with patch.object(services, "fetch_issue_detail", return_value={"subscription": {"qib": 0.03, "nii": 18.17, "retail": 4.45, "total": 6.13}, "profile": {}}):
             rows = services.build_pipeline([self.upcoming()], current, {}, date(2026, 8, 31))
 
         self.assertEqual(len(rows), 1)
@@ -264,7 +272,7 @@ class PipelineTests(SimpleTestCase):
 
     def test_an_issue_opening_inside_the_window_is_kept_as_upcoming(self):
         row = self.upcoming(symbol="DEEPA", status="Forthcoming", issueStartDate="01-Sep-2026", issueEndDate="03-Sep-2026")
-        with patch.object(services, "fetch_bid_details", return_value={}):
+        with patch.object(services, "fetch_issue_detail", return_value={"subscription": {}, "profile": {}}):
             rows = services.build_pipeline([row], [], {}, date(2026, 8, 31))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "Upcoming")
@@ -272,13 +280,13 @@ class PipelineTests(SimpleTestCase):
 
     def test_an_issue_opening_beyond_the_window_is_dropped(self):
         row = self.upcoming(status="Forthcoming", issueStartDate="30-Sep-2026", issueEndDate="03-Oct-2026")
-        with patch.object(services, "fetch_bid_details", return_value={}):
+        with patch.object(services, "fetch_issue_detail", return_value={"subscription": {}, "profile": {}}):
             rows = services.build_pipeline([row], [], {}, date(2026, 8, 31))
         self.assertEqual(rows, [])
 
     def test_a_closed_issue_is_dropped_from_the_pipeline(self):
         row = self.upcoming(status="Closed", issueStartDate="18-Aug-2026", issueEndDate="20-Aug-2026")
-        with patch.object(services, "fetch_bid_details", return_value={}):
+        with patch.object(services, "fetch_issue_detail", return_value={"subscription": {}, "profile": {}}):
             rows = services.build_pipeline([row], [], {}, date(2026, 8, 31))
         self.assertEqual(rows, [])
 
@@ -294,7 +302,7 @@ class PipelineTests(SimpleTestCase):
             "issueEndDate": "02-Sep-2026",
             "noOfTime": "0.13",
         }
-        with patch.object(services, "fetch_bid_details", return_value={}):
+        with patch.object(services, "fetch_issue_detail", return_value={"subscription": {}, "profile": {}}):
             rows = services.build_pipeline([], [sme], {}, date(2026, 8, 31))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["board"], "SME")
@@ -310,14 +318,14 @@ class PipelineTests(SimpleTestCase):
             "issueEndDate": "02-Sep-2026",
         }
         quotes = {"src": [{"company": "Ashutosh Fibre", "gmp": 37.0, "bandHigh": 92.0, "expectedListing": None}]}
-        with patch.object(services, "fetch_bid_details", return_value={}):
+        with patch.object(services, "fetch_issue_detail", return_value={"subscription": {}, "profile": {}}):
             rows = services.build_pipeline([], [sme], quotes, date(2026, 8, 31))
         self.assertEqual(rows[0]["priceBandHigh"], 92.0)
         self.assertEqual(rows[0]["gmp"]["expectedListingPrice"], 129.0)
 
     def test_open_issues_sort_ahead_of_upcoming_ones(self):
         upcoming = self.upcoming(symbol="DEEPA", status="Forthcoming", issueStartDate="01-Sep-2026", issueEndDate="03-Sep-2026")
-        with patch.object(services, "fetch_bid_details", return_value={}):
+        with patch.object(services, "fetch_issue_detail", return_value={"subscription": {}, "profile": {}}):
             rows = services.build_pipeline([upcoming, self.upcoming()], [], {}, date(2026, 8, 31))
         self.assertEqual([row["status"] for row in rows], ["Open", "Upcoming"])
 
@@ -586,6 +594,13 @@ class GmpSourceResilienceTests(SimpleTestCase):
 
 
 class DashboardAssemblyTests(SimpleTestCase):
+    def setUp(self):
+        # The pipeline consults the fallback subscription source; without this
+        # the test would reach the network and depend on the day's listings.
+        patcher = patch.object(services, "fetch_subscription_fallback", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_dashboard_reports_every_gmp_source_down_without_failing(self):
         with patch.object(services, "fetch_upcoming_issues", lambda: []), \
              patch.object(services, "fetch_current_issues", lambda: []), \
@@ -746,6 +761,14 @@ class GmpMetadataParsingTests(SimpleTestCase):
 class GmpOnlyPipelineTests(SimpleTestCase):
     """The pipeline built when NSE is unreachable."""
 
+    def setUp(self):
+        # Stubbed for every test in this class: the builder now consults the
+        # fallback subscription source, and an unpatched test would reach the
+        # network and take its result from whatever is listed that day.
+        patcher = patch.object(services, "fetch_subscription_fallback", return_value=[])
+        self.fallback = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def quotes(self, **overrides):
         row = {
             "company": "Lumino Industries",
@@ -765,6 +788,24 @@ class GmpOnlyPipelineTests(SimpleTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["source"], "gmp")
         self.assertIsNone(rows[0]["analysisSymbol"])
+        self.assertIsNone(rows[0]["subscription"])
+
+    def test_the_fallback_source_fills_subscription_when_nse_is_gone(self):
+        self.fallback.return_value = [
+            {"company": "Lumino Industries", "board": "Mainboard", "qib": 232.79, "nii": 185.21,
+             "retail": 40.27, "total": 124.02, "source": "Chittorgarh"}
+        ]
+        rows = services.build_pipeline_from_gmp(self.quotes(), date(2026, 8, 29))
+        self.assertEqual(rows[0]["subscription"]["total"], 124.02)
+        self.assertEqual(rows[0]["subscription"]["qib"], 232.79)
+        # Attributed, because it is not the exchange's own figure.
+        self.assertEqual(rows[0]["subscription"]["source"], "Chittorgarh")
+
+    def test_a_company_the_fallback_does_not_list_keeps_an_empty_subscription(self):
+        self.fallback.return_value = [
+            {"company": "Some Other Issue", "board": "Mainboard", "total": 4.0}
+        ]
+        rows = services.build_pipeline_from_gmp(self.quotes(), date(2026, 8, 29))
         self.assertIsNone(rows[0]["subscription"])
 
     def test_status_board_and_dates_survive_from_the_aggregator(self):
@@ -832,6 +873,13 @@ class GmpOnlyPipelineTests(SimpleTestCase):
 
 class NseOutageTests(SimpleTestCase):
     """What the tab does when NSE answers nothing at all."""
+    def setUp(self):
+        # The pipeline consults the fallback subscription source; without this
+        # the test would reach the network and depend on the day's listings.
+        patcher = patch.object(services, "fetch_subscription_fallback", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
 
     def gmp_rows(self):
         return (
@@ -887,6 +935,24 @@ class NseOutageTests(SimpleTestCase):
         payload = self.build_with_nse_down()
         self.assertNotIn("NSE India", payload["source"])
 
+    def test_the_note_calls_subscription_missing_only_when_it_really_is(self):
+        note = " ".join(self.build_with_nse_down()["notes"])
+        self.assertIn("Subscription is unavailable", note)
+
+    def test_the_note_credits_the_fallback_when_it_filled_subscription_in(self):
+        # The note used to say subscription was unavailable while a fallback was
+        # visibly filling the column, which reads as a bug in the page.
+        with patch.object(
+            services,
+            "fetch_subscription_fallback",
+            return_value=[{"company": "Lumino Industries", "board": "Mainboard",
+                           "total": 124.02, "source": "Chittorgarh"}],
+        ):
+            payload = self.build_with_nse_down()
+        note = " ".join(payload["notes"])
+        self.assertIn("Subscription is coming from Chittorgarh", note)
+        self.assertNotIn("Subscription is unavailable", note)
+
     def test_it_still_fails_loudly_when_no_source_of_any_kind_responds(self):
         def blocked():
             raise RuntimeError("NSE India returned 403.")
@@ -912,3 +978,218 @@ class NseOutageTests(SimpleTestCase):
             {"upcoming": "NSE India returned 403.", "current": "NSE India returned 403."}
         )
         self.assertEqual(reason, "NSE India returned 403.")
+
+
+class IssueDetailParsingTests(SimpleTestCase):
+    """The subscription split and the expandable profile, from one NSE payload."""
+
+    def payload(self):
+        # Shaped like a real /api/ipo-detail response, trimmed to the fields
+        # that are read. Note NSE gives no noOfTime for the QIB sub-categories,
+        # only shares bid, which is why they are shown as a share of the book.
+        return {
+            "companyName": "LUMINO",
+            "bidDetails": [
+                {"srNo": "1", "category": "Qualified Institutional Buyers(QIBs)", "noOfTime": "211.25", "noOfsharesBid": "3737545084"},
+                {"srNo": "1(a)", "category": "Foreign Institutional Investors(FIIs)", "noOfTime": "", "noOfsharesBid": "608741770"},
+                {"srNo": "1(b)", "category": "Domestic Financial Institutions", "noOfTime": "", "noOfsharesBid": "1885360022"},
+                {"srNo": "1(c)", "category": "Mutual funds", "noOfTime": "", "noOfsharesBid": "136777004"},
+                {"srNo": "1(d)", "category": "Others", "noOfTime": "", "noOfsharesBid": "1106666288"},
+                {"srNo": "2", "category": "Non Institutional Investors", "noOfTime": "155.42", "noOfsharesBid": "2062239634"},
+                {"srNo": "3", "category": "Retail Individual Investors(RIIs)", "noOfTime": "26.02", "noOfsharesBid": "805586782"},
+            ],
+            "issueInfo": {
+                "dataList": [
+                    {"title": "Symbol", "value": "LUMINO"},
+                    {"title": "Issue Size", "value": '"Fresh Issue of up to Rs. 5000 million"'},
+                    {"title": "Issue Type", "value": "Book Building"},
+                    {"title": "Face Value", "value": "Rs. 5 per Equity Share"},
+                    {"title": "Price Range", "value": "Rs. 78/- to Rs. 82/- per Equity Share"},
+                    {"title": "Book Running Lead Managers", "value": '"JM Financial Limited"'},
+                    {"title": "Name of the Registrar", "value": "Bigshare Services Private Limited"},
+                    {"title": "Bid Lot", "value": "182 Equity Shares and in multiples thereof"},
+                    {"title": None, "value": "*As per SEBI circular ... boilerplate"},
+                ]
+            },
+        }
+
+    def test_the_headline_categories_are_read_as_times_subscribed(self):
+        split = services.parse_bid_details(self.payload())
+        self.assertEqual(split, {"qib": 211.25, "nii": 155.42, "retail": 26.02})
+
+    def test_the_qib_book_is_split_into_fii_dii_and_mutual_funds(self):
+        split = services.parse_institutional_split(self.payload())
+        self.assertEqual(split["fii"]["sharesBid"], 608741770.0)
+        self.assertEqual(split["dii"]["sharesBid"], 1885360022.0)
+        self.assertEqual(split["mutualFunds"]["sharesBid"], 136777004.0)
+        # Shares of the QIB book, so they account for all of it.
+        self.assertAlmostEqual(sum(entry["shareOfQib"] for entry in split.values()), 100.0, places=0)
+        self.assertEqual(split["dii"]["shareOfQib"], 50.44)
+
+    def test_a_category_nobody_bid_in_is_left_out_rather_than_shown_as_zero(self):
+        payload = self.payload()
+        payload["bidDetails"] = [row for row in payload["bidDetails"] if row["srNo"] != "1(a)"]
+        self.assertNotIn("fii", services.parse_institutional_split(payload))
+
+    def test_the_profile_keeps_offer_facts_and_drops_boilerplate(self):
+        profile = services.parse_issue_profile(self.payload())
+        self.assertEqual(profile["issueType"], "Book Building")
+        self.assertEqual(profile["faceValue"], "Rs. 5 per Equity Share")
+        self.assertEqual(profile["registrar"], "Bigshare Services Private Limited")
+        # Surrounding quotes are an artefact of the feed, not part of the value.
+        self.assertEqual(profile["leadManagers"], "JM Financial Limited")
+        self.assertEqual(profile["issueSizeText"], "Fresh Issue of up to Rs. 5000 million")
+        self.assertNotIn("*As per SEBI circular ... boilerplate", profile.values())
+
+    def test_an_empty_payload_yields_empty_sections_rather_than_raising(self):
+        self.assertEqual(services.parse_bid_details({}), {})
+        self.assertEqual(services.parse_institutional_split({}), {})
+        self.assertEqual(services.parse_issue_profile({}), {})
+
+    def test_a_malformed_symbol_never_reaches_the_network(self):
+        with patch.object(services, "fetch_nse_json_with_session") as fetch:
+            result = services.fetch_issue_detail("../etc/passwd", "EQ")
+        fetch.assert_not_called()
+        self.assertEqual(result, {"subscription": {}, "profile": {}})
+
+
+class SubscriptionFallbackTests(SimpleTestCase):
+    """The non-NSE subscription source used when the exchange gives nothing."""
+
+    PAGE = """
+      <table>
+        <tr><th>IPO Name</th><th>QIB</th><th>NII</th><th>Retail</th><th>Total</th></tr>
+        <tr><td>Lumino Industries</td><td>33.66</td><td>135.58</td><td>28.71</td><td>7.91</td></tr>
+      </table>
+      <table>
+        <tr><th>IPO Name</th><th>QIB</th><th>NII</th><th>Individual</th><th>Total</th></tr>
+        <tr><td>Ashutosh Fibre</td><td>0.00</td><td>1.84</td><td>2.13</td><td>1.46</td></tr>
+      </table>
+    """
+
+    def scrape(self):
+        body = json.dumps([{"content": {"rendered": self.PAGE}}])
+        with patch.object(services, "fetch_html", return_value=body):
+            return services.scrape_subscription_ipocentral()
+
+    def setUp(self):
+        # The fetch is cached process-wide, so a leftover entry from another
+        # test would answer before the scraper is ever consulted.
+        self.reset()
+        self.addCleanup(self.reset)
+
+    def reset(self):
+        services.clear_cache_prefix("ipo:subscription")
+        services._subscription_cooldown.clear()
+        services._subscription_failures.clear()
+
+    def test_both_boards_are_read_and_labelled(self):
+        rows = self.scrape()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], {"company": "Lumino Industries", "board": "Mainboard", "total": 7.91, "qib": 33.66, "nii": 135.58, "retail": 28.71})
+        # The SME table calls the retail column "Individual"; it is the same leg.
+        self.assertEqual(rows[1]["board"], "SME")
+        self.assertEqual(rows[1]["retail"], 2.13)
+
+    def test_a_company_is_matched_across_the_naming_difference(self):
+        rows = [dict(row, source="IPO Central") for row in self.scrape()]
+        found = services.subscription_from_fallback("Lumino Industries Limited", "Mainboard", rows)
+        self.assertEqual(found["total"], 7.91)
+        self.assertEqual(found["source"], "IPO Central")
+
+    def test_an_unlisted_company_returns_nothing_rather_than_a_wrong_row(self):
+        self.assertIsNone(services.subscription_from_fallback("Some Other Issue", "Mainboard", self.scrape()))
+
+
+class SubscriptionSourceOrderTests(SimpleTestCase):
+    """Which republisher answers, and what happens when one is down."""
+
+    CHITTORGARH = [{"company": "Lumino Industries Ltd", "board": "Mainboard", "total": 124.02, "qib": 232.79}]
+    IPOCENTRAL = [{"company": "Lumino Industries", "board": "Mainboard", "total": 7.91, "qib": 33.66}]
+
+    def setUp(self):
+        self.reset()
+        self.addCleanup(self.reset)
+
+    def reset(self):
+        services.clear_cache_prefix("ipo:subscription")
+        services._subscription_cooldown.clear()
+        services._subscription_failures.clear()
+
+    def test_the_more_accurate_source_is_preferred_and_the_other_is_not_called(self):
+        # Chittorgarh tracks the exchange closely; IPO Central understated the
+        # same issue more than tenfold, so it must never win while the first
+        # source is answering.
+        with patch.object(services, "scrape_subscription_chittorgarh", return_value=self.CHITTORGARH), \
+             patch.object(services, "scrape_subscription_ipocentral") as second:
+            rows = services.fetch_subscription_fallback()
+        second.assert_not_called()
+        self.assertEqual(rows[0]["source"], "Chittorgarh")
+        self.assertEqual(rows[0]["total"], 124.02)
+
+    def test_the_second_source_takes_over_when_the_first_fails(self):
+        with patch.object(services, "scrape_subscription_chittorgarh", side_effect=RuntimeError("down")), \
+             patch.object(services, "scrape_subscription_ipocentral", return_value=self.IPOCENTRAL):
+            rows = services.fetch_subscription_fallback()
+        self.assertEqual(rows[0]["source"], "IPO Central")
+
+    def test_an_empty_answer_is_treated_as_no_answer(self):
+        # A source that responds with an empty table has told us nothing, so the
+        # next one should still be asked rather than the column left blank.
+        with patch.object(services, "scrape_subscription_chittorgarh", return_value=[]), \
+             patch.object(services, "scrape_subscription_ipocentral", return_value=self.IPOCENTRAL):
+            rows = services.fetch_subscription_fallback()
+        self.assertEqual(rows[0]["source"], "IPO Central")
+
+    def test_every_source_failing_degrades_to_empty_and_then_backs_off(self):
+        with patch.object(services, "scrape_subscription_chittorgarh", side_effect=RuntimeError("down")) as first, \
+             patch.object(services, "scrape_subscription_ipocentral", side_effect=RuntimeError("down")) as second:
+            self.assertEqual(services.fetch_subscription_fallback(), [])
+            self.assertEqual((first.call_count, second.call_count), (1, 1))
+            # Both are now in cooldown, so a second call touches neither.
+            self.assertEqual(services.fetch_subscription_fallback(), [])
+            self.assertEqual((first.call_count, second.call_count), (1, 1))
+
+
+class ChittorgarhSubscriptionTests(SimpleTestCase):
+    """Parsing of the live subscription report."""
+
+    def payload(self, segment_rows):
+        return json.dumps({"msg": 1, "reportTableData": segment_rows})
+
+    def rows(self):
+        mainboard = [{
+            "Company": '<a href="https://www.chittorgarh.com/ipo/lumino-industries-ipo/2013/">Lumino Industries Ltd.</a>'
+                       ' <span class="badge rounded-pill bg-danger">CT</span>',
+            "QIB (x)": "232.79", "sNII (x)": "195.10", "bNII (x)": "180.20", "NII (x)": "185.21",
+            "Retail (x)": "40.27", "Total (x)": "124.02", "Subscription as on": "31-Aug-2026 18:53",
+        }]
+        sme = [{
+            "Company": '<a href="/ipo/ashutosh-fibre-ipo/2751/">Ashutosh Fibre Ltd.</a>',
+            "QIB (x)": "0.00", "NII (x)": "1.84", "Retail (x)": "2.20", "Total (x)": "1.61",
+            "Subscription as on": "31-Aug-2026 18:55",
+        }]
+        bodies = [self.payload(mainboard), self.payload(sme)]
+        with patch.object(services, "fetch_html", side_effect=bodies):
+            return services.scrape_subscription_chittorgarh()
+
+    def test_both_segments_are_read_and_labelled_by_board(self):
+        rows = self.rows()
+        self.assertEqual([row["board"] for row in rows], ["Mainboard", "SME"])
+
+    def test_the_company_name_excludes_the_status_badge(self):
+        # "Lumino Industries Ltd. CT" would match nothing in the pipeline.
+        self.assertEqual(rows_company := self.rows()[0]["company"], "Lumino Industries Ltd")
+        self.assertNotIn("CT", rows_company)
+
+    def test_the_combined_nii_column_is_used_over_the_small_and_big_split(self):
+        # NSE reports one NII figure, so the comparable column is the combined
+        # one rather than either half.
+        self.assertEqual(self.rows()[0]["nii"], 185.21)
+
+    def test_the_reading_time_is_kept_so_staleness_can_be_shown(self):
+        self.assertEqual(self.rows()[0]["asOf"], "31-Aug-2026 18:53")
+
+    def test_a_refused_report_contributes_nothing_rather_than_raising(self):
+        with patch.object(services, "fetch_html", return_value=json.dumps({"msg": -1, "error": "No data found."})):
+            self.assertEqual(services.scrape_subscription_chittorgarh(), [])

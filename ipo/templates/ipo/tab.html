@@ -62,10 +62,32 @@
                 <span id="ipoPipelineCount" class="pill">Issues</span>
               </div>
               <p id="ipoPipelineSummary" class="section-summary"></p>
+
+              {% comment %}
+                Options are filled from the rows actually present, so a board or
+                status with nothing in it is never offered as a dead choice.
+              {% endcomment %}
+              <div class="ipo-filters">
+                <label class="ipo-filter" for="ipoBoardFilter">
+                  <span>Board</span>
+                  <select id="ipoBoardFilter">
+                    <option value="">All boards</option>
+                  </select>
+                </label>
+                <label class="ipo-filter" for="ipoStatusFilter">
+                  <span>Status</span>
+                  <select id="ipoStatusFilter">
+                    <option value="">All statuses</option>
+                  </select>
+                </label>
+                <button type="button" id="ipoFilterReset" class="ipo-filter-reset is-hidden">Clear filters</button>
+              </div>
+
               <div class="table-wrap">
                 <table class="monitor-table ipo-table">
                   <thead>
                     <tr>
+                      <th class="ipo-expand-head"><span class="ipo-sr-only">Details</span></th>
                       <th>Company</th>
                       <th>Board</th>
                       <th>Status</th>

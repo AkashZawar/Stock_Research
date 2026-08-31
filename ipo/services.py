@@ -610,6 +610,169 @@ def scrape_gmp_source(name):
     return rows
 
 
+# NSE is the only exchange-grade source for subscription, and when it is
+# unreachable the column has nothing behind it. Two republishers fill the gap,
+# tried in order of measured accuracy.
+#
+# Chittorgarh is first because it is the closest to the exchange and says how
+# old it is. Measured against NSE on Lumino Industries: NSE 104.69x overall /
+# 211.25x QIB, Chittorgarh 124.02x / 232.79x (a later timestamp, consolidated
+# across both exchanges), IPO Central 7.91x / 33.66x - understated more than
+# tenfold. IPO Central is kept only as a second chance if Chittorgarh is down.
+#
+# Neither is a peer of the exchange, so both are consulted only when NSE gave
+# nothing and every row sourced from them is attributed in the UI.
+SUBSCRIPTION_FALLBACK_URL = (
+    "https://ipocentral.in/wp-json/wp/v2/pages?slug=ipo-subscription-status-live-latest-data-nse-bse"
+)
+
+# Report 21 is the live subscription table. The path segments are
+# report/page/month/year/financialYear/sort/segment/subSegment; the segment must
+# be the literal "mainboard" or "sme" - passing 0 there returns "No params data
+# found", which is what makes this endpoint look broken from the outside.
+CHITTORGARH_SUBSCRIPTION_URL = (
+    "https://webnodejs.chittorgarh.com/cloud/report/data-read/21/1/{month}/{year}/0/0/{segment}/0?search="
+)
+
+
+def scrape_subscription_chittorgarh():
+    """Times-subscribed per category, from Chittorgarh's live subscription report.
+
+    Mainboard and SME are separate calls. The company cell is a link wrapped in
+    status badges, so only the anchor text is the name. Chittorgarh splits the
+    non-institutional book into small and big NII; the combined "NII" column is
+    used, to stay comparable with what NSE reports.
+    """
+    today = datetime.now(IST).date()
+    rows = []
+    for segment, board in (("mainboard", "Mainboard"), ("sme", "SME")):
+        url = CHITTORGARH_SUBSCRIPTION_URL.format(month=today.month, year=today.year, segment=segment)
+        payload = json.loads(fetch_html(url))
+        if not isinstance(payload, dict) or payload.get("msg") != 1:
+            continue
+        for row in payload.get("reportTableData") or []:
+            if not isinstance(row, dict):
+                continue
+            name = gmp_company_name(anchor_text(row.get("Company")))
+            total = to_number(row.get("Total (x)"))
+            if not name or total is None:
+                continue
+            entry = {"company": name, "board": board, "total": round2(total)}
+            for key, column in (("qib", "QIB (x)"), ("nii", "NII (x)"), ("retail", "Retail (x)")):
+                value = to_number(row.get(column))
+                if value is not None:
+                    entry[key] = round2(value)
+            as_of = clean_text(row.get("Subscription as on"))
+            if as_of:
+                entry["asOf"] = as_of
+            rows.append(entry)
+    return rows
+
+
+def anchor_text(value):
+    """The link text of a cell, ignoring the status badges rendered beside it.
+
+    Without this the name picks up the trailing badge - "Lumino Industries Ltd.
+    CT" - which no other source spells that way, so nothing would match.
+    """
+    match = re.search(r"<a[^>]*>(.*?)</a>", str(value or ""), re.S | re.I)
+    return clean_text(match.group(1) if match else value)
+
+
+def scrape_subscription_ipocentral():
+    """Times-subscribed per category, as republished by IPO Central.
+
+    Mainboard and SME arrive as two tables that differ only in one header cell:
+    the retail column is "Retail" on mainboard and "Individual" on SME. Unlike
+    NSE, this source does publish a category split for SME issues.
+    """
+    payload = json.loads(fetch_html(SUBSCRIPTION_FALLBACK_URL))
+    if not isinstance(payload, list) or not payload:
+        return []
+    body = ((payload[0] or {}).get("content") or {}).get("rendered") or ""
+
+    rows = []
+    for table in parse_html_tables(body):
+        header = table[0]
+        name_col = header_index(header, "ipo name")
+        total_col = header_index(header, "total")
+        if name_col is None or total_col is None:
+            continue
+        qib_col = header_index(header, "qib")
+        nii_col = header_index(header, "nii")
+        retail_col = header_index(header, "retail", "individual")
+        board = "SME" if header_index(header, "individual") is not None else "Mainboard"
+
+        for row in table[1:]:
+            name = gmp_company_name(cell_at(row, name_col))
+            total = to_number(cell_at(row, total_col))
+            if not name or total is None:
+                continue
+            entry = {"company": name, "board": board, "total": round2(total)}
+            for key, column in (("qib", qib_col), ("nii", nii_col), ("retail", retail_col)):
+                value = to_number(cell_at(row, column)) if column is not None else None
+                if value is not None:
+                    entry[key] = round2(value)
+            rows.append(entry)
+    return rows
+
+
+# Ordered by measured closeness to the exchange; the first one that answers with
+# rows wins, so the weaker source is only reached if the better one is down.
+SUBSCRIPTION_FALLBACKS = (
+    ("Chittorgarh", lambda: scrape_subscription_chittorgarh()),
+    ("IPO Central", lambda: scrape_subscription_ipocentral()),
+)
+
+
+def fetch_subscription_fallback():
+    """Cached fallback subscription table, with the same backoff as a GMP source."""
+    cache_key = "ipo:subscription:fallback"
+    rows = get_cached(cache_key)
+    if rows is not None:
+        return rows
+
+    for name, scraper in SUBSCRIPTION_FALLBACKS:
+        retry_at = _subscription_cooldown.get(name)
+        if retry_at and retry_at > time.time():
+            continue
+        try:
+            rows = scraper()
+        except Exception:
+            failures = _subscription_failures.get(name, 0) + 1
+            _subscription_failures[name] = failures
+            _subscription_cooldown[name] = time.time() + gmp_cooldown_for(failures)
+            continue
+        if not rows:
+            continue
+        _subscription_failures.pop(name, None)
+        _subscription_cooldown.pop(name, None)
+        rows = [dict(row, source=name) for row in rows]
+        set_cached(cache_key, rows, GMP_SOURCE_CACHE_SECONDS)
+        return rows
+    return []
+
+
+_subscription_cooldown = {}
+_subscription_failures = {}
+
+
+def subscription_from_fallback(company, board, rows):
+    """The fallback's figures for one company, or ``None`` if it does not list it."""
+    for row in rows or []:
+        if not names_match(company, row["company"]):
+            continue
+        # Board is advisory: the aggregator occasionally files an SME issue under
+        # the mainboard table, and a name match is the stronger signal.
+        if board and row.get("board") and row["board"] != board:
+            continue
+        return {
+            **{key: row[key] for key in ("qib", "nii", "retail", "total", "asOf") if key in row},
+            "source": row.get("source") or "aggregator",
+        }
+    return None
+
+
 def collect_gmp_quotes():
     """Fetch every aggregator concurrently; a source that fails is just absent."""
     results = settle_named_loaders(
@@ -724,15 +887,16 @@ def fetch_past_issues():
     return payload if isinstance(payload, list) else []
 
 
-def fetch_bid_details(symbol, series):
-    """Per-category subscription (QIB / NII / Retail) for one live issue.
+def fetch_issue_detail(symbol, series):
+    """Subscription split and issue profile for one live issue.
 
-    This only splits a number the current-issue feed already supplies, so it is
-    fetched on a tight budget: one extra request per open issue, and a stalling
-    NSE would otherwise multiply across them and hold up the whole dashboard.
+    Both come from the same ``/api/ipo-detail`` response, so they are parsed
+    from a single request rather than fetched twice. The budget stays tight:
+    one extra request per open issue, and a stalling NSE would otherwise
+    multiply across them and hold up the whole dashboard.
     """
     if not re.fullmatch(r"[A-Z0-9&_-]{1,20}", str(symbol or "")):
-        return {}
+        return {"subscription": {}, "profile": {}}
     series_value = "SME" if str(series or "").upper() == "SME" else "EQ"
     payload = fetch_nse_json_with_session(
         f"/api/ipo-detail?symbol={symbol}&series={series_value}",
@@ -740,7 +904,15 @@ def fetch_bid_details(symbol, series):
         attempts=2,
     )
     if not isinstance(payload, dict):
-        return {}
+        return {"subscription": {}, "profile": {}}
+    return {
+        "subscription": parse_bid_details(payload),
+        "profile": parse_issue_profile(payload),
+    }
+
+
+def parse_bid_details(payload):
+    """Times-subscribed per headline category."""
     details = {}
     for row in payload.get("bidDetails") or []:
         if not isinstance(row, dict):
@@ -760,6 +932,77 @@ def fetch_bid_details(symbol, series):
         elif category.startswith("total"):
             details["total"] = round2(times)
     return details
+
+
+# Within the QIB block NSE reports who actually bid, keyed by sub-serial rather
+# than by a stable name. Only shares bid are given here (no times-subscribed),
+# so these are shown as a share of the QIB book rather than as a multiple.
+QIB_SUBCATEGORIES = (
+    ("1(a)", "fii", "Foreign institutional"),
+    ("1(b)", "dii", "Domestic institutions"),
+    ("1(c)", "mutualFunds", "Mutual funds"),
+    ("1(d)", "otherQib", "Other QIB"),
+)
+
+
+def parse_institutional_split(payload):
+    """FII / DII / mutual-fund participation inside the QIB category."""
+    by_serial = {}
+    for row in payload.get("bidDetails") or []:
+        if isinstance(row, dict):
+            by_serial[str(row.get("srNo") or "").strip()] = row
+
+    split = {}
+    for serial, key, label in QIB_SUBCATEGORIES:
+        shares = to_number((by_serial.get(serial) or {}).get("noOfsharesBid"))
+        if shares is not None and shares > 0:
+            split[key] = {"label": label, "sharesBid": shares}
+
+    total = sum(entry["sharesBid"] for entry in split.values())
+    if total > 0:
+        for entry in split.values():
+            entry["shareOfQib"] = round2(entry["sharesBid"] / total * 100)
+    return split
+
+
+# The issue-information block is a flat title/value list holding roughly forty
+# entries, most of them procedural boilerplate (UPI cut-off times, ASBA notes,
+# circular links). Only these carry information about the offer itself.
+PROFILE_FIELDS = (
+    ("issueSizeText", "issue size"),
+    ("issueType", "issue type"),
+    ("faceValue", "face value"),
+    ("bidLot", "bid lot"),
+    ("priceRange", "price range"),
+    ("leadManagers", "book running lead managers"),
+    ("registrar", "name of the registrar"),
+)
+
+
+def parse_issue_profile(payload):
+    """Company and offer particulars for the expandable row."""
+    entries = {}
+    for item in (payload.get("issueInfo") or {}).get("dataList") or []:
+        if not isinstance(item, dict):
+            continue
+        title = clean_text(item.get("title")).lower().rstrip(":")
+        value = clean_text(item.get("value")).strip('"').strip()
+        if title and value:
+            entries[title] = value
+
+    profile = {}
+    for key, title in PROFILE_FIELDS:
+        if entries.get(title):
+            profile[key] = entries[title]
+
+    company = clean_text(payload.get("companyName"))
+    if company:
+        profile["companyName"] = company
+
+    institutional = parse_institutional_split(payload)
+    if institutional:
+        profile["institutional"] = institutional
+    return profile
 
 
 def board_of(series_or_type):
@@ -1039,10 +1282,14 @@ def build_pipeline(upcoming_issues, current_issues, quotes, today):
     # asked for - one extra NSE round trip each, and forthcoming issues would
     # return nothing anyway.
     open_rows = [item for item in candidates if item["_isOpen"]]
-    bid_results = settle_map(open_rows, lambda item: fetch_bid_details(item["symbol"], item["series"]), 6)
+    fallback_subscriptions = fetch_subscription_fallback() if open_rows else []
+    detail_results = settle_map(open_rows, lambda item: fetch_issue_detail(item["symbol"], item["series"]), 6)
     bids_by_symbol = {}
-    for item, (ok, value) in zip(open_rows, bid_results):
-        bids_by_symbol[item["symbol"]] = value if ok and isinstance(value, dict) else {}
+    profiles_by_symbol = {}
+    for item, (ok, value) in zip(open_rows, detail_results):
+        detail = value if ok and isinstance(value, dict) else {}
+        bids_by_symbol[item["symbol"]] = detail.get("subscription") or {}
+        profiles_by_symbol[item["symbol"]] = detail.get("profile") or {}
 
     rows = []
     for item in candidates:
@@ -1052,6 +1299,10 @@ def build_pipeline(upcoming_issues, current_issues, quotes, today):
         subscription = dict(bids_by_symbol.get(item["symbol"]) or {})
         if not is_finite(subscription.get("total")) and is_finite(item.get("overallSubscription")):
             subscription["total"] = round2(item["overallSubscription"])
+        # Only consulted once the exchange has come up empty, and only for an
+        # issue that is actually taking bids.
+        if not is_finite(subscription.get("total")) and is_open:
+            subscription = subscription_from_fallback(item["company"], item.get("board"), fallback_subscriptions) or subscription
         subscription = subscription or None
 
         band_high = item.get("priceBandHigh")
@@ -1066,6 +1317,7 @@ def build_pipeline(upcoming_issues, current_issues, quotes, today):
                 **{key: value for key, value in item.items() if key not in {"series", "overallSubscription"}},
                 "subscription": subscription,
                 "gmp": gmp,
+                "profile": profiles_by_symbol.get(item["symbol"]) or None,
                 "recommendation": upcoming_flag(gmp, subscription, is_open),
                 "analysisSymbol": f"{item['symbol']}.NS",
                 "_sortKey": (0 if is_open else 1, open_date or today),
@@ -1122,6 +1374,10 @@ def build_pipeline_from_gmp(quotes, today):
             if company and not any(names_match(company, seen) for seen in companies):
                 companies.append(company)
 
+    # With NSE gone this is the only subscription there is, so unlike the
+    # exchange path it is consulted for every row rather than as a last resort.
+    fallback_subscriptions = fetch_subscription_fallback()
+
     pipeline = []
     for company in companies:
         status = gmp_field_consensus(company, quotes, "status")
@@ -1141,20 +1397,23 @@ def build_pipeline_from_gmp(quotes, today):
         if not gmp:
             continue
 
+        board = gmp_field_consensus(company, quotes, "board")
+        subscription = subscription_from_fallback(company, board, fallback_subscriptions)
+
         pipeline.append(
             {
                 "symbol": "",
                 "company": company,
-                "board": gmp_field_consensus(company, quotes, "board"),
+                "board": board,
                 "status": status,
                 "openDate": iso_date(open_date),
                 "closeDate": iso_date(close_date),
                 "priceBandLow": None,
                 "priceBandHigh": round2(band_high) if is_finite(band_high) else None,
                 "issueSize": None,
-                "subscription": None,
+                "subscription": subscription,
                 "gmp": gmp,
-                "recommendation": upcoming_flag(gmp, None, status == "Open"),
+                "recommendation": upcoming_flag(gmp, subscription, status == "Open"),
                 "analysisSymbol": None,
                 "source": "gmp",
             }
@@ -1527,15 +1786,29 @@ def build_ipo_dashboard():
     notes = []
     if nse_down:
         # NSE carries the symbols, dates, board and subscription; the grey market
-        # sources carry neither. Falling back to them loses those columns but
+        # sources carry none of those. Falling back to them loses some columns but
         # keeps the tab answering its question, which an error page does not.
+        # Subscription is the exception: the republishers can still supply it.
         recently_listed = []
         pipeline = build_pipeline_from_gmp(quotes, today)
         ofs = {"available": False, "rows": [], "note": "NSE is not responding, and it is the only OFS source."}
+
+        # Say which columns are actually missing, rather than naming subscription
+        # as lost while a fallback is visibly filling it in.
+        subscription_source = next(
+            (row["subscription"]["source"] for row in pipeline
+             if (row.get("subscription") or {}).get("source")),
+            None,
+        )
+        subscription_note = (
+            f"Subscription is coming from {subscription_source} instead"
+            if subscription_source
+            else "Subscription is unavailable"
+        )
         notes.append(
-            "NSE India is not responding, so listing history, issue dates, "
-            "subscription and OFS are unavailable. The issues below come from the "
-            f"grey-market sources alone. ({nse_failure_reason(feed_errors)})"
+            "NSE India is not responding, so listing history, issue dates and OFS "
+            f"are unavailable. {subscription_note}, and the issues below come from "
+            f"the grey-market sources alone. ({nse_failure_reason(feed_errors)})"
         )
     else:
         recently_listed = build_recently_listed(past_issues, today)

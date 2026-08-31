@@ -57,6 +57,9 @@ const ipoGenerated = document.querySelector("#ipoGenerated");
 const ipoPipelineRows = document.querySelector("#ipoPipelineRows");
 const ipoPipelineCount = document.querySelector("#ipoPipelineCount");
 const ipoPipelineSummary = document.querySelector("#ipoPipelineSummary");
+const ipoBoardFilter = document.querySelector("#ipoBoardFilter");
+const ipoStatusFilter = document.querySelector("#ipoStatusFilter");
+const ipoFilterReset = document.querySelector("#ipoFilterReset");
 const ipoGmpSources = document.querySelector("#ipoGmpSources");
 const ipoListedRows = document.querySelector("#ipoListedRows");
 const ipoListedCount = document.querySelector("#ipoListedCount");
@@ -120,6 +123,11 @@ let agentSearchController = null;
 let latestMonitor = null;
 let latestRecommendations = null;
 let latestIpo = null;
+// The unfiltered pipeline, kept so the board/status dropdowns can re-filter
+// without refetching. Expanded rows are tracked by symbol so that a filter
+// change or a refresh does not silently collapse what the user opened.
+let latestIpoPipeline = [];
+const expandedIpoRows = new Set();
 let latestAssetReports = { etf: null, fund: null };
 let searchTimer = null;
 let assetSearchTimers = { etf: null, fund: null };
@@ -249,6 +257,41 @@ for (const container of [ipoPipelineRows, ipoListedRows, ipoOfsRows]) {
     await analyzeStockFromHeatmap(button.dataset.ipoSymbol);
   });
 }
+
+// The detail row is rendered alongside every issue and only hidden, so opening
+// one is a class toggle rather than a fetch.
+ipoPipelineRows?.addEventListener("click", (event) => {
+  const toggle = event.target.closest("[data-ipo-expand]");
+  if (!toggle) {
+    return;
+  }
+  const key = toggle.dataset.ipoExpand;
+  const detail = ipoPipelineRows.querySelector(`[data-ipo-detail="${CSS.escape(key)}"]`);
+  if (!detail) {
+    return;
+  }
+  const nowExpanded = detail.classList.toggle("is-hidden") === false;
+  toggle.setAttribute("aria-expanded", nowExpanded ? "true" : "false");
+  toggle.innerHTML = nowExpanded ? "&minus;" : "+";
+  toggle.title = nowExpanded ? "Hide details" : "Show details";
+  if (nowExpanded) {
+    expandedIpoRows.add(key);
+  } else {
+    expandedIpoRows.delete(key);
+  }
+});
+
+ipoBoardFilter?.addEventListener("change", applyIpoFilters);
+ipoStatusFilter?.addEventListener("change", applyIpoFilters);
+ipoFilterReset?.addEventListener("click", () => {
+  if (ipoBoardFilter) {
+    ipoBoardFilter.value = "";
+  }
+  if (ipoStatusFilter) {
+    ipoStatusFilter.value = "";
+  }
+  applyIpoFilters();
+});
 
 for (const context of Object.values(assetContexts)) {
   context.form.addEventListener("submit", async (event) => {
@@ -1056,11 +1099,65 @@ function renderIpo(payload) {
   );
 
   renderIpoGmpSources(payload);
-  renderIpoPipelineRows(pipeline);
+  latestIpoPipeline = pipeline;
+  syncIpoFilterOptions(pipeline);
+  renderIpoPipelineRows(filteredIpoPipeline());
   renderIpoListedRows(listed);
   renderIpoOfs(payload.ofs || {}, nseDown);
   annotateTableCells("#ipoContent .monitor-table");
   validateRenderedData(ipoContent);
+}
+
+// Filtering is client-side because the whole pipeline is already in hand: a
+// board/status change is a re-render, not another 15-second trip to NSE.
+function filteredIpoPipeline() {
+  const board = ipoBoardFilter?.value || "";
+  const status = ipoStatusFilter?.value || "";
+  return latestIpoPipeline.filter(
+    (item) => (!board || item.board === board) && (!status || item.status === status)
+  );
+}
+
+function syncIpoFilterOptions(items) {
+  fillIpoFilter(ipoBoardFilter, items, "board", "All boards");
+  fillIpoFilter(ipoStatusFilter, items, "status", "All statuses");
+  updateIpoFilterReset();
+}
+
+// Only values present in the data are offered, so the user cannot pick a
+// combination that yields an empty table. A selection that survives a refresh
+// is kept; one whose value has disappeared falls back to "all".
+function fillIpoFilter(select, items, key, allLabel) {
+  if (!select) {
+    return;
+  }
+  const values = [...new Set(items.map((item) => item[key]).filter(Boolean))].sort();
+  const previous = select.value;
+  select.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = allLabel;
+  select.appendChild(all);
+  for (const value of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  }
+  select.value = values.includes(previous) ? previous : "";
+}
+
+function updateIpoFilterReset() {
+  const active = Boolean(ipoBoardFilter?.value || ipoStatusFilter?.value);
+  ipoFilterReset?.classList.toggle("is-hidden", !active);
+}
+
+function applyIpoFilters() {
+  const rows = filteredIpoPipeline();
+  updateIpoFilterReset();
+  renderIpoPipelineRows(rows);
+  annotateTableCells("#ipoContent .monitor-table");
+  validateRenderedData(ipoPipelineRows);
 }
 
 function renderIpoGmpSources(payload) {
@@ -1129,6 +1226,26 @@ function formatIpoBand(low, high) {
   return Number.isFinite(single) ? formatMoney(single, "INR") : loadingText("price band");
 }
 
+// Share counts in an IPO book run to ten digits, which is unreadable in full.
+// Indian crore/lakh units are used because that is how the offer documents and
+// every domestic tracker state them.
+function formatCompactNumber(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+  const units = [
+    [10000000, "cr"],
+    [100000, "lakh"],
+    [1000, "k"]
+  ];
+  for (const [size, suffix] of units) {
+    if (Math.abs(value) >= size) {
+      return `${(value / size).toFixed(2).replace(/\.?0+$/, "")} ${suffix}`;
+    }
+  }
+  return String(Math.round(value));
+}
+
 function ipoGmpMarkup(gmp) {
   if (!gmp || !Number.isFinite(gmp.value)) {
     return `<span class="muted">Not quoted</span>`;
@@ -1175,10 +1292,20 @@ function ipoSubscriptionMarkup(subscription, status, board) {
       ? "No category split for SME"
       : "";
 
+  // Figures that did not come from the exchange are attributed, because they
+  // can lag it and should not be read as official. Where the source states how
+  // old its reading is, that is shown too - a stale multiple looks exactly like
+  // a fresh one otherwise.
+  const source = subscription.source;
+  const attribution = source
+    ? `via ${source}${subscription.asOf ? ` · ${subscription.asOf}` : ""}`
+    : "";
+
   return `
     <div class="ipo-subscription">
       <strong>${escapeHtml(`${subscription.total.toFixed(2)}x`)}</strong>
       ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
+      ${attribution ? `<small class="ipo-subscription-source">${escapeHtml(attribution)}</small>` : ""}
     </div>
   `;
 }
@@ -1189,15 +1316,24 @@ function renderIpoPipelineRows(items) {
   }
   ipoPipelineRows.innerHTML = "";
   if (!items.length) {
-    ipoPipelineRows.innerHTML =
-      "<tr><td colspan=\"9\">No IPO is open or opening in the next 7 days.</td></tr>";
+    // An empty table after filtering is a different situation from an empty
+    // pipeline, and saying so stops it reading as a failed fetch.
+    const filtered = latestIpoPipeline.length > 0;
+    ipoPipelineRows.innerHTML = `<tr><td colspan="10">${
+      filtered
+        ? "No issue matches these filters."
+        : "No IPO is open or opening in the next 7 days."
+    }</td></tr>`;
     return;
   }
 
   const fragment = document.createDocumentFragment();
   for (const item of items) {
+    const key = ipoRowKey(item);
+    const isExpanded = expandedIpoRows.has(key);
     const row = document.createElement("tr");
     row.className = `ipo-row is-${(item.recommendation?.flag || "grey")}`;
+    row.dataset.ipoRow = key;
     // A grey-market-only row exists because NSE was unreachable. Its blank
     // columns are not pending, they have no source at all, so they must not
     // render as loading placeholders that would spin forever.
@@ -1213,6 +1349,15 @@ function renderIpoPipelineRows(items) {
         : "";
 
     row.innerHTML = `
+      <td class="ipo-expand-cell">
+        <button
+          class="ipo-expand-toggle"
+          type="button"
+          data-ipo-expand="${escapeHtml(key)}"
+          aria-expanded="${isExpanded ? "true" : "false"}"
+          title="${isExpanded ? "Hide details" : "Show details"}"
+        >${isExpanded ? "&minus;" : "+"}</button>
+      </td>
       <td>
         ${
           item.analysisSymbol
@@ -1248,15 +1393,121 @@ function renderIpoPipelineRows(items) {
         }
       </td>
       <td>${
-        fromGmp
+        fromGmp && !item.subscription
           ? `<span class="muted">Needs NSE</span>`
           : ipoSubscriptionMarkup(item.subscription, item.status, item.board)
       }</td>
       <td>${ipoFlagMarkup(item.recommendation)}</td>
     `;
     fragment.appendChild(row);
+    fragment.appendChild(ipoDetailRow(item, key, isExpanded));
   }
   ipoPipelineRows.appendChild(fragment);
+}
+
+// Symbol is absent on grey-market-only rows, so the company name is the
+// fallback identity. Either way it only has to be unique within one table.
+function ipoRowKey(item) {
+  return item.symbol || item.company || "";
+}
+
+function ipoDetailRow(item, key, isExpanded) {
+  const row = document.createElement("tr");
+  row.className = "ipo-detail-row";
+  row.dataset.ipoDetail = key;
+  row.classList.toggle("is-hidden", !isExpanded);
+  row.innerHTML = `<td colspan="10">${ipoDetailMarkup(item)}</td>`;
+  return row;
+}
+
+function ipoDetailMarkup(item) {
+  const profile = item.profile || {};
+  const facts = [
+    ["Company", profile.companyName || item.company],
+    ["Symbol", item.symbol],
+    ["Board", item.board],
+    // Neither NSE's issue feeds nor its issue-information block carry an
+    // industry classification before listing, so this is stated as absent
+    // rather than dropped - the offer document is the only place it exists.
+    ["Sector", item.sector || "Not classified until listing (see RHP)"],
+    ["Issue size", ipoIssueSizeText(item)],
+    ["Issue type", profile.issueType],
+    ["Price range", profile.priceRange || formatIpoBand(item.priceBandLow, item.priceBandHigh)],
+    ["Face value", profile.faceValue],
+    ["Bid lot", profile.bidLot],
+    ["Lead managers", profile.leadManagers],
+    ["Registrar", profile.registrar]
+  ].filter(([, value]) => value);
+
+  return `
+    <div class="ipo-detail">
+      <div class="ipo-detail-block">
+        <h4>Company &amp; issue</h4>
+        <dl class="ipo-detail-facts">
+          ${facts
+            .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`)
+            .join("")}
+        </dl>
+      </div>
+      <div class="ipo-detail-block">
+        <h4>Institutional demand</h4>
+        ${ipoInstitutionalMarkup(item)}
+      </div>
+    </div>
+  `;
+}
+
+// The offer feed reports issue size in shares; the issue-information block
+// states it in rupees but only as prose. Both are shown when both exist,
+// because neither on its own answers "how big is this".
+function ipoIssueSizeText(item) {
+  const shares = Number.isFinite(item.issueSize) ? `${formatCompactNumber(item.issueSize)} shares` : "";
+  const text = item.profile?.issueSizeText || "";
+  return [shares, text].filter(Boolean).join(" - ");
+}
+
+function ipoInstitutionalMarkup(item) {
+  const split = item.profile?.institutional;
+  const qib = item.subscription?.qib;
+
+  if (!split) {
+    // Before bidding opens there is no book to report, which is not a failure.
+    return item.status === "Upcoming"
+      ? `<p class="muted">Bidding has not opened, so there is no institutional book yet.</p>`
+      : `<p class="muted">NSE publishes no FII/DII split for this issue.</p>`;
+  }
+
+  const legs = ["fii", "dii", "mutualFunds", "otherQib"]
+    .map((code) => [code, split[code]])
+    .filter(([, entry]) => entry);
+
+  return `
+    ${
+      Number.isFinite(qib)
+        ? `<p class="ipo-detail-lead">QIB book subscribed <strong>${escapeHtml(qib.toFixed(2))}x</strong></p>`
+        : ""
+    }
+    <ul class="ipo-institutional">
+      ${legs
+        .map(
+          ([, entry]) => `
+            <li>
+              <span class="ipo-institutional-label">${escapeHtml(entry.label)}</span>
+              <span class="ipo-institutional-bar"><span style="width:${Math.max(
+                0,
+                Math.min(100, Number(entry.shareOfQib) || 0)
+              )}%"></span></span>
+              <span class="ipo-institutional-value">${escapeHtml(
+                Number.isFinite(entry.shareOfQib) ? `${entry.shareOfQib.toFixed(1)}%` : ""
+              )}</span>
+              <small>${escapeHtml(formatCompactNumber(entry.sharesBid))} shares bid</small>
+            </li>
+          `
+        )
+        .join("")}
+    </ul>
+    <p class="muted ipo-detail-note">Share of the QIB book by shares bid. NSE reports no times-subscribed figure for these sub-categories.</p>
+  `;
 }
 
 // Yahoo carries no quote for many SME listings. That is a settled absence
@@ -3314,6 +3565,45 @@ function validateRenderedData(root = document) {
       element.setAttribute("aria-busy", "true");
     }
   }
+
+  settleStalePlaceholders(base);
+}
+
+// A placeholder promises the value is on its way. For a field the provider
+// simply never returned, nothing is on its way, and the spinner sits there
+// past its own ETA claiming otherwise. Anything still spinning once the
+// longest ETA has elapsed is treated as settled and says so instead.
+const PLACEHOLDER_SETTLE_MS = 60000;
+const settleTimers = new WeakMap();
+
+// Labels that describe the shape of a value rather than the value itself, so
+// "No percent reported" would read worse than plain "Not reported".
+const GENERIC_PLACEHOLDER_LABELS = new Set(["data", "value", "percent", "price", "rate", "range", "number"]);
+
+function settleStalePlaceholders(root) {
+  clearTimeout(settleTimers.get(root));
+  settleTimers.set(
+    root,
+    setTimeout(() => {
+      for (const element of root.querySelectorAll(".data-loading")) {
+        const label = element.querySelector("span:not(.data-loading-dot)")?.textContent || "";
+        const subject = label.replace(/^Loading\s+/i, "").replace(/\.\.\.$/, "").trim();
+        const settled = document.createElement("span");
+        settled.className = "muted data-unreported";
+        settled.textContent =
+          subject && !GENERIC_PLACEHOLDER_LABELS.has(subject.toLowerCase())
+            ? `No ${subject} reported`
+            : "Not reported";
+        element.replaceWith(settled);
+      }
+      for (const element of root.querySelectorAll("[aria-busy='true']")) {
+        element.removeAttribute("aria-busy");
+      }
+      for (const element of root.querySelectorAll(".is-loading-value, .has-loading-value")) {
+        element.classList.remove("is-loading-value", "has-loading-value");
+      }
+    }, PLACEHOLDER_SETTLE_MS)
+  );
 }
 
 function setText(selector, value) {

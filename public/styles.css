@@ -7899,3 +7899,207 @@ body {
   font-size: 0.78rem;
   line-height: 1.45;
 }
+
+/* Board / status filters */
+
+.ipo-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.ipo-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ipo-filter select {
+  min-width: 150px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.ipo-filter-reset {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.ipo-filter-reset:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+/* Expandable detail row */
+
+.ipo-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.ipo-expand-head,
+.ipo-expand-cell {
+  width: 34px;
+  padding-right: 0 !important;
+}
+
+.ipo-expand-toggle {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ipo-expand-toggle:hover,
+.ipo-expand-toggle[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--accent, var(--muted));
+}
+
+.ipo-detail-row > td {
+  padding: 0 16px 16px !important;
+  background: color-mix(in srgb, var(--muted) 5%, transparent);
+}
+
+.ipo-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 20px;
+  padding: 14px 0 4px;
+}
+
+@media (max-width: 900px) {
+  .ipo-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ipo-detail-block h4 {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ipo-detail-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 18px;
+  margin: 0;
+}
+
+.ipo-detail-facts dt {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ipo-detail-facts dd {
+  margin: 2px 0 0;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.ipo-detail-lead {
+  margin: 0 0 8px;
+  font-size: 0.84rem;
+}
+
+.ipo-institutional {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.ipo-institutional li {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) minmax(60px, 1fr) 48px;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+}
+
+.ipo-institutional-label {
+  color: var(--muted);
+}
+
+.ipo-institutional-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  overflow: hidden;
+}
+
+.ipo-institutional-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--cyan, var(--green));
+}
+
+.ipo-institutional-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.ipo-institutional li small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.ipo-detail-note {
+  margin: 10px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.ipo-subscription-source {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+/* A value the provider never sent, after its loading placeholder gave up. */
+.data-unreported {
+  font-style: italic;
+  opacity: 0.8;
+}

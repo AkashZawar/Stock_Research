@@ -34,6 +34,9 @@ from `core.services`.
 | Issue price, price band, dates, issue size | NSE `/api/all-upcoming-issues?category=ipo` |
 | Live subscription (overall) | NSE `/api/ipo-current-issue` |
 | Subscription by QIB / NII / Retail | NSE `/api/ipo-detail?symbol=&series=` |
+| Subscription when NSE is unreachable | Chittorgarh report 21 JSON, then IPO Central `wp-json` (fallbacks, attributed in the UI) |
+| Issue profile (issue size text, type, face value, bid lot, lead managers, registrar) | NSE `/api/ipo-detail`, `issueInfo.dataList` |
+| FII / DII / mutual-fund split of the QIB book | NSE `/api/ipo-detail`, `bidDetails` rows `1(a)`-`1(d)` |
 | Listing date, final issue price | NSE `/api/public-past-issues` |
 | Listing price, current price | Yahoo Finance chart (first bar's open, latest close) |
 | GMP, expected listing price | IPO Ji, IPO Watch, IPO Premium, IPO Central, IPO360 (scraped, averaged) |
@@ -43,6 +46,39 @@ from `core.services`.
 
 ## Things worth knowing before changing this
 
+- **Subscription has two fallbacks, and neither is a peer of the exchange.** When
+  NSE is unreachable the subscription column has no source at all, which is what
+  the live deployment sees. `fetch_subscription_fallback` tries Chittorgarh's
+  report 21 first and IPO Central's `wp-json` page second, and both are consulted
+  only when NSE gave nothing. Any row that uses one carries `subscription.source`
+  and the UI prints "via <source> · <reading time>". Unlike NSE, both publish a
+  category split for SME issues.
+- **The fallback order was measured, not assumed.** On Lumino Industries: NSE
+  104.69x overall and 211.25x QIB, Chittorgarh 124.02x / 232.79x (a later
+  reading, consolidated across both exchanges), IPO Central 7.91x / 33.66x -
+  understated more than tenfold. Do not reorder these without re-measuring
+  against NSE on a live issue.
+- **Chittorgarh's URL shape is the whole trick.** The path segments are
+  `report/page/month/year/financialYear/sort/segment/subSegment`, and `segment`
+  must be the literal `mainboard` or `sme`. Passing `0` there returns
+  `{"msg": -1, "error": "No params data found."}`, which reads like a dead
+  endpoint. Mainboard and SME are separate calls. The company cell is a link
+  wrapped in status badges, so only the anchor text is the name - taking the
+  whole cell yields "Lumino Industries Ltd. CT", which matches nothing.
+- **Chittorgarh splits NII into small and big.** The combined `NII (x)` column is
+  the one used, because that is the figure NSE reports and the two must be
+  comparable when the source switches.
+- **One request per open issue serves two purposes.** `fetch_issue_detail` parses
+  the subscription split and the expandable profile out of the same
+  `/api/ipo-detail` response. Splitting them into two functions would double the
+  round trips against the slowest upstream in the tab.
+- **The QIB sub-categories have no times-subscribed figure.** NSE reports only
+  shares bid for FIIs, domestic institutions and mutual funds, so they are shown
+  as a share of the QIB book. Presenting them as a multiple would be inventing a
+  denominator.
+- **Sector is not available before listing.** It appears in neither the issue
+  feeds nor `issueInfo`; only the RHP has it. The detail panel says so rather
+  than omitting the field.
 - **GMP has no official source.** Five aggregators are scraped from raw HTML. If
   a scraper's table layout changes, `collect_gmp_quotes` drops that source and
   reports it in `notes` rather than failing the request.
