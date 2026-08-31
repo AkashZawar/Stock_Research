@@ -10,7 +10,7 @@ import time
 from datetime import date
 from unittest.mock import patch
 
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase
 
 from . import services
 
@@ -644,7 +644,7 @@ class DashboardAssemblyTests(SimpleTestCase):
         self.assertTrue(payload["ofs"]["note"])
 
 
-class IpoEndpointTests(TestCase):
+class IpoEndpointTests(SimpleTestCase):
     def test_endpoint_returns_the_dashboard_payload(self):
         payload = {
             "generatedAt": "2026-08-31T00:00:00Z",
@@ -678,3 +678,237 @@ class IpoEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["error"], "NSE is down")
+
+
+class GmpMetadataParsingTests(SimpleTestCase):
+    """Status, board, dates and names recovered from the aggregators.
+
+    These fields are what let the tab survive an NSE outage without presenting
+    already-listed issues as investable, so each is pinned separately.
+    """
+
+    def test_status_words_collapse_to_the_three_states_shown(self):
+        self.assertEqual(services.gmp_status("Open"), "Open")
+        self.assertEqual(services.gmp_status("Live Now"), "Open")
+        self.assertEqual(services.gmp_status("Upcoming"), "Upcoming")
+        self.assertEqual(services.gmp_status("Coming Soon"), "Upcoming")
+        self.assertEqual(services.gmp_status("Closed"), "Closed")
+        self.assertEqual(services.gmp_status("Listed"), "Closed")
+
+    def test_an_unrecognised_status_is_none_rather_than_a_guess(self):
+        # None keeps "not published" distinct from "closed"; guessing "closed"
+        # here would silently drop live issues from the fallback pipeline.
+        self.assertIsNone(services.gmp_status(""))
+        self.assertIsNone(services.gmp_status("-"))
+        self.assertIsNone(services.gmp_status("qwerty"))
+
+    def test_board_is_read_from_a_type_column_or_a_tag_on_the_name(self):
+        self.assertEqual(services.gmp_board("SME"), "SME")
+        self.assertEqual(services.gmp_board("", "Ashutosh Fibre Ltd. (NSE SME)"), "SME")
+        self.assertEqual(services.gmp_board("Mainboard"), "Mainboard")
+        self.assertEqual(services.gmp_board("", "Deepa Jewellers IPO MB"), "Mainboard")
+        self.assertIsNone(services.gmp_board("", "Some Company Ltd"))
+
+    def test_board_abbreviations_match_on_word_boundaries(self):
+        # "MB" as a substring appears inside ordinary words; only the standalone
+        # tag means mainboard.
+        self.assertIsNone(services.gmp_board("Combustion Ltd"))
+        self.assertIsNone(services.gmp_board("Smerch Industries"))
+
+    def test_a_spelled_out_date_range_splits_into_two_dates(self):
+        self.assertEqual(
+            services.parse_gmp_dates("Aug 27, 2026 \u2013 Aug 31, 2026"),
+            (date(2026, 8, 27), date(2026, 8, 31)),
+        )
+
+    def test_a_date_range_missing_its_year_is_declined_rather_than_guessed(self):
+        # "1-3 September" needs both a year and a month inferred backwards; a
+        # wrong window would filter a live issue out of the table.
+        self.assertEqual(services.parse_gmp_dates("1-3 September"), (None, None))
+
+    def test_company_names_lose_the_tags_aggregators_append(self):
+        self.assertEqual(services.gmp_company_name("Lumino Industries IPO Mainboard Open"), "Lumino Industries")
+        self.assertEqual(services.gmp_company_name("Kwick Forensic Solutions IPO BSE SME Open"), "Kwick Forensic Solutions")
+        self.assertEqual(services.gmp_company_name("Ashutosh Fibre Ltd. (NSE SME)"), "Ashutosh Fibre Ltd")
+        self.assertEqual(services.gmp_company_name("Phychem IPO SME \u20b951 - \u20b954 31 Aug-2 Sep"), "Phychem")
+
+    def test_a_name_that_is_all_tags_or_starts_with_a_digit_is_left_alone(self):
+        # Trimming these would leave nothing to match other sources against.
+        self.assertEqual(services.gmp_company_name("3M India Limited"), "3M India Limited")
+        self.assertEqual(services.gmp_company_name("IPO"), "IPO")
+
+    def test_trimming_lets_two_spellings_of_one_issue_match(self):
+        left = services.gmp_company_name("Phychem IPO SME \u20b951 - \u20b954 31 Aug-2 Sep")
+        right = services.gmp_company_name("Phychem Technologies Ltd. (BSE SME)")
+        self.assertTrue(services.names_match(left, right))
+
+
+class GmpOnlyPipelineTests(SimpleTestCase):
+    """The pipeline built when NSE is unreachable."""
+
+    def quotes(self, **overrides):
+        row = {
+            "company": "Lumino Industries",
+            "gmp": 50.0,
+            "bandHigh": 82.0,
+            "expectedListing": 132.0,
+            "status": "Open",
+            "board": "Mainboard",
+            "openDate": date(2026, 8, 27),
+            "closeDate": date(2026, 8, 31),
+        }
+        row.update(overrides)
+        return {"IPO Ji": [row]}
+
+    def test_a_row_carries_its_source_so_the_table_can_explain_blank_columns(self):
+        rows = services.build_pipeline_from_gmp(self.quotes(), date(2026, 8, 29))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "gmp")
+        self.assertIsNone(rows[0]["analysisSymbol"])
+        self.assertIsNone(rows[0]["subscription"])
+
+    def test_status_board_and_dates_survive_from_the_aggregator(self):
+        rows = services.build_pipeline_from_gmp(self.quotes(), date(2026, 8, 29))
+        self.assertEqual(rows[0]["status"], "Open")
+        self.assertEqual(rows[0]["board"], "Mainboard")
+        self.assertEqual(rows[0]["openDate"], "2026-08-27")
+        self.assertEqual(rows[0]["closeDate"], "2026-08-31")
+
+    def test_an_issue_marked_closed_is_dropped(self):
+        # Aggregators keep listing an issue after it lists, carrying the stale
+        # premium it had on listing day. Showing that as pipeline invites a bet
+        # on something that can no longer be applied for.
+        rows = services.build_pipeline_from_gmp(self.quotes(status="Closed"), date(2026, 8, 29))
+        self.assertEqual(rows, [])
+
+    def test_an_issue_whose_window_has_passed_is_dropped_without_a_status(self):
+        rows = services.build_pipeline_from_gmp(self.quotes(status=None), date(2026, 9, 15))
+        self.assertEqual(rows, [])
+
+    def test_status_is_inferred_from_the_window_when_no_source_states_it(self):
+        upcoming = services.build_pipeline_from_gmp(self.quotes(status=None), date(2026, 8, 20))
+        self.assertEqual(upcoming[0]["status"], "Upcoming")
+        live = services.build_pipeline_from_gmp(self.quotes(status=None), date(2026, 8, 29))
+        self.assertEqual(live[0]["status"], "Open")
+
+    def test_a_row_with_no_status_and_no_dates_is_kept(self):
+        # Most sources publish neither; dropping them would empty the table.
+        rows = services.build_pipeline_from_gmp(
+            self.quotes(status=None, openDate=None, closeDate=None), date(2026, 8, 29)
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["status"])
+
+    def test_one_issue_listed_by_two_sources_produces_one_row(self):
+        quotes = {
+            "IPO Ji": [dict(self.quotes()["IPO Ji"][0])],
+            "IPO Watch": [dict(self.quotes()["IPO Ji"][0], company="Lumino Industries Ltd", gmp=60.0)],
+        }
+        rows = services.build_pipeline_from_gmp(quotes, date(2026, 8, 29))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["gmp"]["sourceCount"], 2)
+
+    def test_disagreeing_sources_settle_on_the_majority_status(self):
+        base = self.quotes()["IPO Ji"][0]
+        quotes = {
+            "IPO Ji": [dict(base, status="Open")],
+            "IPO Watch": [dict(base, status="Open")],
+            "IPO Premium": [dict(base, status="Closed")],
+        }
+        rows = services.build_pipeline_from_gmp(quotes, date(2026, 8, 29))
+        self.assertEqual(rows[0]["status"], "Open")
+
+    def test_open_issues_sort_ahead_of_upcoming_ones(self):
+        base = self.quotes()["IPO Ji"][0]
+        quotes = {
+            "IPO Ji": [
+                dict(base, company="Later Co", status="Upcoming"),
+                dict(base, company="Live Co", status="Open"),
+            ]
+        }
+        rows = services.build_pipeline_from_gmp(quotes, date(2026, 8, 29))
+        self.assertEqual([row["company"] for row in rows], ["Live Co", "Later Co"])
+
+
+class NseOutageTests(SimpleTestCase):
+    """What the tab does when NSE answers nothing at all."""
+
+    def gmp_rows(self):
+        return (
+            {
+                "IPO Ji": [
+                    {
+                        "company": "Lumino Industries",
+                        "gmp": 50.0,
+                        "bandHigh": 82.0,
+                        "expectedListing": 132.0,
+                        "status": "Open",
+                        "board": "Mainboard",
+                        "openDate": date(2026, 8, 27),
+                        "closeDate": date(2026, 8, 31),
+                    }
+                ]
+            },
+            ["IPO Watch"],
+        )
+
+    def build_with_nse_down(self):
+        def blocked():
+            raise RuntimeError("NSE India returned 403.")
+
+        with patch.object(services, "fetch_upcoming_issues", blocked), \
+             patch.object(services, "fetch_current_issues", blocked), \
+             patch.object(services, "fetch_past_issues", blocked), \
+             patch.object(services, "collect_gmp_quotes", self.gmp_rows), \
+             patch.object(services, "fetch_ofs_active", blocked), \
+             patch.object(services, "fetch_ofs_forthcoming", blocked), \
+             patch.object(services, "fetch_ofs_past", blocked):
+            return services.build_ipo_dashboard()
+
+    def test_the_tab_still_returns_issues_from_the_grey_market_sources(self):
+        payload = self.build_with_nse_down()
+        self.assertFalse(payload["nseAvailable"])
+        self.assertEqual(len(payload["pipeline"]), 1)
+        self.assertEqual(payload["pipeline"][0]["company"], "Lumino Industries")
+
+    def test_the_sections_only_nse_can_fill_are_empty_rather_than_stale(self):
+        payload = self.build_with_nse_down()
+        self.assertEqual(payload["recentlyListed"], [])
+        self.assertFalse(payload["ofs"]["available"])
+        self.assertEqual(payload["counts"]["recentlyListed"], 0)
+
+    def test_what_nse_actually_said_reaches_the_payload(self):
+        # settle_named_loaders used to swallow the exception, leaving a generic
+        # message that made a production outage impossible to diagnose.
+        payload = self.build_with_nse_down()
+        self.assertTrue(any("403" in note for note in payload["notes"]))
+
+    def test_the_source_line_stops_crediting_nse_when_nse_gave_nothing(self):
+        payload = self.build_with_nse_down()
+        self.assertNotIn("NSE India", payload["source"])
+
+    def test_it_still_fails_loudly_when_no_source_of_any_kind_responds(self):
+        def blocked():
+            raise RuntimeError("NSE India returned 403.")
+
+        with patch.object(services, "fetch_upcoming_issues", blocked), \
+             patch.object(services, "fetch_current_issues", blocked), \
+             patch.object(services, "fetch_past_issues", blocked), \
+             patch.object(services, "collect_gmp_quotes", lambda: ({}, ["IPO Ji"])), \
+             patch.object(services, "fetch_ofs_active", blocked), \
+             patch.object(services, "fetch_ofs_forthcoming", blocked), \
+             patch.object(services, "fetch_ofs_past", blocked):
+            with self.assertRaises(RuntimeError) as caught:
+                services.build_ipo_dashboard()
+
+        self.assertIn("403", str(caught.exception))
+
+    def test_an_empty_feed_reads_differently_from_a_refused_one(self):
+        self.assertEqual(services.nse_failure_reason({}), "the feeds returned no issues")
+        self.assertIn("403", services.nse_failure_reason({"upcoming": "NSE India returned 403."}))
+
+    def test_identical_failures_across_feeds_are_reported_once(self):
+        reason = services.nse_failure_reason(
+            {"upcoming": "NSE India returned 403.", "current": "NSE India returned 403."}
+        )
+        self.assertEqual(reason, "NSE India returned 403.")

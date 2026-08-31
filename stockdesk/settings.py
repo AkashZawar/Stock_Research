@@ -5,7 +5,7 @@ Key points:
   tab (stock_analysis, agent_desk, recommendations, market_monitor,
   etf_analysis, mutual_funds, ipo).
 - Static files are served from ``public/`` (``STATICFILES_DIRS``) in dev.
-- SQLite database; timezone is Asia/Kolkata.
+- No database: the app is read-only over live upstreams. Timezone Asia/Kolkata.
 - Secret key, debug, and allowed hosts read from environment variables with
   dev-friendly defaults.
 """
@@ -52,12 +52,11 @@ TEMPLATES = [
 WSGI_APPLICATION = "stockdesk.wsgi.application"
 ASGI_APPLICATION = "stockdesk.asgi.application"
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
-    }
-}
+# No database. Every tab fetches live from its upstream on request and caches
+# in memory only, so nothing survives a request and there is nothing to store.
+# Declaring it empty rather than leaving an unused SQLite file configured keeps
+# a stray db file from being created, committed, and then served as stale data.
+DATABASES = {}
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Asia/Kolkata"

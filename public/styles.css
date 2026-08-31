@@ -7754,6 +7754,13 @@ body {
   text-decoration-color: currentColor;
 }
 
+/* Grey-market-only rows have no NSE symbol, so there is no analysis page to
+   link to. They keep the name's weight but drop the affordance. */
+.ipo-company-plain {
+  font-weight: 900;
+  line-height: 1.25;
+}
+
 .ipo-table td small {
   display: block;
   color: var(--muted);

@@ -3998,7 +3998,14 @@ def build_recommendation_from_inputs(stock, quote_data=None, summary=None, candl
     }
 
 
-def settle_named_loaders(loaders, concurrency=4):
+def settle_named_loaders(loaders, concurrency=4, errors=None):
+    """Run loaders concurrently; a loader that raises yields ``{}``.
+
+    Pass a dict as ``errors`` to also receive the reason each failed loader
+    gave. Without it a raised exception is indistinguishable from an upstream
+    that legitimately returned nothing, so a caller wanting to tell the user
+    which of the two happened has no way to find out.
+    """
     results = {}
     if not loaders:
         return results
@@ -4008,8 +4015,10 @@ def settle_named_loaders(loaders, concurrency=4):
             key = futures[future]
             try:
                 results[key] = future.result()
-            except Exception:
+            except Exception as error:
                 results[key] = {}
+                if errors is not None:
+                    errors[key] = str(error).strip() or type(error).__name__
     return results
 
 

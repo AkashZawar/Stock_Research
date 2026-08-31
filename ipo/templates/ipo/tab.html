@@ -47,6 +47,10 @@
 
           <section id="ipoError" class="error-state is-hidden"></section>
 
+          {# Shown when NSE is unreachable and the tables fall back to grey-market
+             sources alone. A warning rather than an error: there is still data. #}
+          <section id="ipoDegraded" class="notice is-hidden"></section>
+
           <section id="ipoContent" class="ipo-content is-hidden">
             <article class="analysis-panel panel-accent-cyan ipo-panel">
               <div class="section-head">

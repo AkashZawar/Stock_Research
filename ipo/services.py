@@ -20,6 +20,7 @@ provider-supplied URL is ever passed through to the client.
 import json
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -281,6 +282,85 @@ def cell_at(row, index):
     return row[index]
 
 
+def gmp_status(value):
+    """Normalise an aggregator's status word to the states this tab shows.
+
+    Returns ``None`` when the source says nothing recognisable, so that "no
+    status published" stays distinct from "closed" - the fallback pipeline drops
+    closed issues, and guessing here would drop live ones.
+    """
+    text = clean_text(value).lower()
+    if not text:
+        return None
+    if "upcoming" in text or "soon" in text:
+        return "Upcoming"
+    if "open" in text or "live" in text or "current" in text:
+        return "Open"
+    if "close" in text or "list" in text or "allot" in text:
+        return "Closed"
+    return None
+
+
+def gmp_board(*values):
+    """Board from a type column, or from an "(SME)"/"MB" tag the name carries.
+
+    Matched on word boundaries: the abbreviations are short enough that a
+    substring test would read the "MB" out of an unrelated word.
+    """
+    for value in values:
+        text = clean_text(value).upper()
+        if re.search(r"\bSME\b", text):
+            return "SME"
+        if re.search(r"\b(?:MAINBOARD|MAIN BOARD|MAINLINE|MB)\b", text):
+            return "Mainboard"
+    return None
+
+
+# Tags an aggregator appends after the company name - board, exchange, status.
+# None of them are part of the name.
+GMP_NAME_STOP_WORDS = {"ipo", "bse", "nse", "sme", "mainboard", "mainline", "mb"}
+
+
+def gmp_company_name(value):
+    """Company name with the aggregator's trailing tags stripped.
+
+    Sources append the board, exchange, status and sometimes the price band and
+    dates: "Phychem IPO SME Rs.51 - Rs.54 31 Aug-2 Sep". Everything from the
+    first such tag onward is dropped, which makes the name readable and, more
+    importantly, lets two sources' spellings of one issue match each other -
+    otherwise the same company lands in the table twice.
+
+    A name that is entirely tags or begins with a number is left alone, since
+    cutting it would leave nothing to match on.
+    """
+    text = re.sub(r"\([^)]*\)", " ", clean_text(value))
+    words = []
+    for word in text.split():
+        key = re.sub(r"[^a-z]", "", word.lower())
+        if key in GMP_NAME_STOP_WORDS or re.search(r"[\d\u20b9]", word):
+            break
+        words.append(word)
+    return " ".join(words).strip(" .,-") or clean_text(value)
+
+
+def parse_gmp_dates(value):
+    """Split a combined "open - close" cell into two dates.
+
+    Only fully spelled dates are taken. Some sources write the window as
+    "1-3 September", which needs a year guessed and a leading day inferred from
+    the trailing month; a wrong date here would be worse than a blank one, and
+    another source usually supplies the same row properly.
+    """
+    text = clean_text(value)
+    if not text:
+        return None, None
+    parts = [part for part in re.split(r"\s*(?:\u2013|\u2014|to|-)\s*", text) if part.strip()]
+    if len(parts) < 2:
+        single = parse_date(text)
+        return single, single
+    return parse_date(parts[0]), parse_date(parts[-1])
+
+
 # ---------------------------------------------------------------------------
 # GMP sources
 # ---------------------------------------------------------------------------
@@ -296,18 +376,26 @@ def scrape_gmp_ipoji():
             continue
         band_col = header_index(header, "price band")
         listing_col = header_index(header, "indicative listing")
+        type_col = header_index(header, "type")
+        status_col = header_index(header, "status")
+        window_col = header_index(header, "open")
         for row in table[1:]:
             name = cell_at(row, name_col)
             gmp = to_number(cell_at(row, gmp_col))
             if not name or gmp is None:
                 continue
             _, band_high = parse_price_band(cell_at(row, band_col))
+            open_date, close_date = parse_gmp_dates(cell_at(row, window_col))
             rows.append(
                 {
                     "company": name,
                     "gmp": gmp,
                     "bandHigh": band_high,
                     "expectedListing": to_number(cell_at(row, listing_col)),
+                    "status": gmp_status(cell_at(row, status_col)),
+                    "board": gmp_board(cell_at(row, type_col), name),
+                    "openDate": open_date,
+                    "closeDate": close_date,
                 }
             )
     return rows
@@ -330,6 +418,7 @@ def scrape_gmp_ipowatch():
             continue
         band_col = header_index(header, "price band")
         listing_col = header_index(header, "est. listing", "est listing")
+        status_col = header_index(header, "status")
         for row in table[1:]:
             name = cell_at(row, name_col)
             gmp = to_number(cell_at(row, gmp_col))
@@ -342,6 +431,12 @@ def scrape_gmp_ipowatch():
                     "gmp": gmp,
                     "bandHigh": band_high,
                     "expectedListing": to_number(cell_at(row, listing_col)),
+                    "status": gmp_status(cell_at(row, status_col)),
+                    "board": gmp_board(name),
+                    # The date column here is written "1-3 September", which
+                    # parse_gmp_dates deliberately declines to guess at.
+                    "openDate": None,
+                    "closeDate": None,
                 }
             )
     return rows
@@ -356,14 +451,29 @@ def scrape_gmp_ipopremium():
         gmp_col = header_index(header, "gmp")
         if name_col is None or gmp_col is None:
             continue
-        band_col = header_index(header, "price band")
+        band_col = header_index(header, "price band", "price")
+        type_col = header_index(header, "type")
+        open_col = header_index(header, "open")
+        close_col = header_index(header, "close")
         for row in table[1:]:
             name = cell_at(row, name_col)
             gmp = to_number(cell_at(row, gmp_col))
             if not name or gmp is None:
                 continue
             _, band_high = parse_price_band(cell_at(row, band_col))
-            rows.append({"company": name, "gmp": gmp, "bandHigh": band_high, "expectedListing": None})
+            rows.append(
+                {
+                    "company": name,
+                    "gmp": gmp,
+                    "bandHigh": band_high,
+                    "expectedListing": None,
+                    # No status column, but the window implies it.
+                    "status": None,
+                    "board": gmp_board(cell_at(row, type_col), name),
+                    "openDate": parse_date(cell_at(row, open_col)),
+                    "closeDate": parse_date(cell_at(row, close_col)),
+                }
+            )
     return rows
 
 
@@ -390,13 +500,27 @@ def scrape_gmp_ipocentral():
             continue
         # "Price*" is already the cap, not a range.
         band_col = header_index(header, "price")
+        # Mainboard and SME arrive as separate tables, so the header names the
+        # board for every row beneath it.
+        board = "SME" if header_index(header, "sme ipo") is not None else "Mainboard"
         for row in table[1:]:
             name = cell_at(row, name_col)
             gmp = to_number(cell_at(row, gmp_col))
             if not name or gmp is None:
                 continue
             _, band_high = parse_price_band(cell_at(row, band_col))
-            rows.append({"company": name, "gmp": gmp, "bandHigh": band_high, "expectedListing": None})
+            rows.append(
+                {
+                    "company": name,
+                    "gmp": gmp,
+                    "bandHigh": band_high,
+                    "expectedListing": None,
+                    "status": None,
+                    "board": board,
+                    "openDate": None,
+                    "closeDate": None,
+                }
+            )
     return rows
 
 
@@ -416,7 +540,19 @@ def scrape_gmp_ipo360():
             if not name or gmp is None:
                 continue
             _, band_high = parse_price_band(cell_at(row, band_col))
-            rows.append({"company": name, "gmp": gmp, "bandHigh": band_high, "expectedListing": None})
+            rows.append(
+                {
+                    "company": name,
+                    "gmp": gmp,
+                    "bandHigh": band_high,
+                    "expectedListing": None,
+                    "status": None,
+                    "board": gmp_board(name),
+                    # Dates here are written "1 Sep" with no year.
+                    "openDate": None,
+                    "closeDate": None,
+                }
+            )
     return rows
 
 
@@ -462,7 +598,7 @@ def scrape_gmp_source(name):
     if retry_at and retry_at > time.time():
         raise RuntimeError(f"{name} failed recently; retrying after cooldown")
     try:
-        rows = GMP_SCRAPERS[name]()
+        rows = [dict(row, company=gmp_company_name(row["company"])) for row in GMP_SCRAPERS[name]()]
     except Exception:
         failures = _gmp_failures.get(name, 0) + 1
         _gmp_failures[name] = failures
@@ -940,6 +1076,102 @@ def build_pipeline(upcoming_issues, current_issues, quotes, today):
     return rows
 
 
+def gmp_field_votes(company, quotes, key):
+    """Every value the aggregators publish for one company's ``key``.
+
+    At most one row per source votes, so a source that lists an issue twice
+    cannot outweigh the others.
+    """
+    votes = []
+    for rows in quotes.values():
+        for row in rows:
+            if names_match(company, row["company"]) and row.get(key) is not None:
+                votes.append(row[key])
+                break
+    return votes
+
+
+def gmp_field_consensus(company, quotes, key):
+    """Majority value for ``key``, or ``None`` if no source published one."""
+    votes = gmp_field_votes(company, quotes, key)
+    if not votes:
+        return None
+    return Counter(votes).most_common(1)[0][0]
+
+
+def build_pipeline_from_gmp(quotes, today):
+    """Pipeline rows assembled from the grey-market aggregators alone.
+
+    NSE is the only source for the symbol, the issue size and subscription, so
+    when it is unreachable those columns have no source rather than being
+    momentarily empty. The rows carry ``source: "gmp"`` so the table can say so
+    instead of showing a loading placeholder that would never resolve.
+
+    Status, board and dates are recovered from the aggregators themselves,
+    which publish all three. Status matters most: their pages keep listing an
+    issue after it closes, and without it a company that has already listed
+    would appear here as an investable pipeline row carrying the stale premium
+    it had on listing day.
+    """
+    companies = []
+    for rows in quotes.values():
+        for row in rows:
+            company = clean_text(row.get("company"))
+            # Sources spell the same issue differently, so a name is new only
+            # when it matches nothing already collected.
+            if company and not any(names_match(company, seen) for seen in companies):
+                companies.append(company)
+
+    pipeline = []
+    for company in companies:
+        status = gmp_field_consensus(company, quotes, "status")
+        open_date = gmp_field_consensus(company, quotes, "openDate")
+        close_date = gmp_field_consensus(company, quotes, "closeDate")
+
+        # An explicit "Closed" is trusted; otherwise a window that has already
+        # ended says the same thing. A row with neither is kept, because the
+        # sources that publish no status at all are the majority.
+        if status == "Closed" or (close_date and close_date < today):
+            continue
+        if not status and open_date:
+            status = "Open" if open_date <= today else "Upcoming"
+
+        band_high = gmp_band_high(company, quotes)
+        gmp = gmp_consensus(company, quotes, band_high)
+        if not gmp:
+            continue
+
+        pipeline.append(
+            {
+                "symbol": "",
+                "company": company,
+                "board": gmp_field_consensus(company, quotes, "board"),
+                "status": status,
+                "openDate": iso_date(open_date),
+                "closeDate": iso_date(close_date),
+                "priceBandLow": None,
+                "priceBandHigh": round2(band_high) if is_finite(band_high) else None,
+                "issueSize": None,
+                "subscription": None,
+                "gmp": gmp,
+                "recommendation": upcoming_flag(gmp, None, status == "Open"),
+                "analysisSymbol": None,
+                "source": "gmp",
+            }
+        )
+
+    # Open issues first, then by soonest open date, then by premium - the same
+    # priority build_pipeline uses, degraded to the keys that survive here.
+    pipeline.sort(
+        key=lambda row: (
+            0 if row["status"] == "Open" else 1,
+            row["openDate"] or "9999",
+            -(row["gmp"].get("percent") or row["gmp"].get("value") or 0),
+        )
+    )
+    return pipeline
+
+
 # ---------------------------------------------------------------------------
 # Offer For Sale (OFS)
 # ---------------------------------------------------------------------------
@@ -1233,12 +1465,38 @@ def build_ofs(today, active_feed, forthcoming_feed, past_feed):
 # Payload
 # ---------------------------------------------------------------------------
 
+NSE_FEED_KEYS = ("upcoming", "current", "past")
+
+
+def nse_failure_reason(feed_errors):
+    """What NSE actually said, collapsed to one line.
+
+    The three feeds nearly always fail the same way, so the distinct reasons are
+    reported rather than one per feed. An empty feed raises nothing, hence the
+    fallback: it is a real state and reads differently from a refused request.
+    """
+    reasons = []
+    for key in NSE_FEED_KEYS:
+        reason = clean_text(feed_errors.get(key), 160)
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return "; ".join(reasons) if reasons else "the feeds returned no issues"
+
+
+def nse_failure_message(feed_errors):
+    return (
+        f"NSE India IPO feeds are unavailable ({nse_failure_reason(feed_errors)}), "
+        "and no grey-market source responded either. Please retry in a moment."
+    )
+
+
 def build_ipo_dashboard():
     today = datetime.now(IST).date()
 
     # Every upstream this tab needs is independent, so they all go out at once.
     # Run in sequence, the slowest grey-market source would be added to the NSE
     # and OFS time rather than overlapped with it.
+    feed_errors = {}
     feeds = settle_named_loaders(
         {
             "upcoming": fetch_upcoming_issues,
@@ -1250,13 +1508,11 @@ def build_ipo_dashboard():
             "ofsPast": fetch_ofs_past,
         },
         concurrency=7,
+        errors=feed_errors,
     )
     upcoming_issues = feeds.get("upcoming") or []
     current_issues = feeds.get("current") or []
     past_issues = feeds.get("past") or []
-
-    if not upcoming_issues and not current_issues and not past_issues:
-        raise RuntimeError("NSE India IPO feeds are temporarily unavailable. Please retry in a moment.")
 
     # settle_named_loaders reports a crashed loader as {}, which unpacks to no
     # quotes and every source marked failed - the same state as all three being
@@ -1264,11 +1520,28 @@ def build_ipo_dashboard():
     gmp_result = feeds.get("gmp")
     quotes, failed_sources = gmp_result if isinstance(gmp_result, tuple) else ({}, [name for name, _ in GMP_SOURCES])
 
-    recently_listed = build_recently_listed(past_issues, today)
-    pipeline = build_pipeline(upcoming_issues, current_issues, quotes, today)
-    ofs = build_ofs(today, feeds.get("ofsActive"), feeds.get("ofsForthcoming"), feeds.get("ofsPast"))
+    nse_down = not upcoming_issues and not current_issues and not past_issues
+    if nse_down and not quotes:
+        raise RuntimeError(nse_failure_message(feed_errors))
 
     notes = []
+    if nse_down:
+        # NSE carries the symbols, dates, board and subscription; the grey market
+        # sources carry neither. Falling back to them loses those columns but
+        # keeps the tab answering its question, which an error page does not.
+        recently_listed = []
+        pipeline = build_pipeline_from_gmp(quotes, today)
+        ofs = {"available": False, "rows": [], "note": "NSE is not responding, and it is the only OFS source."}
+        notes.append(
+            "NSE India is not responding, so listing history, issue dates, "
+            "subscription and OFS are unavailable. The issues below come from the "
+            f"grey-market sources alone. ({nse_failure_reason(feed_errors)})"
+        )
+    else:
+        recently_listed = build_recently_listed(past_issues, today)
+        pipeline = build_pipeline(upcoming_issues, current_issues, quotes, today)
+        ofs = build_ofs(today, feeds.get("ofsActive"), feeds.get("ofsForthcoming"), feeds.get("ofsPast"))
+
     if failed_sources:
         notes.append(
             f"GMP source(s) not responding: {', '.join(failed_sources)}. "
@@ -1284,6 +1557,7 @@ def build_ipo_dashboard():
     return {
         "generatedAt": iso_now(),
         "asOfDate": today.isoformat(),
+        "nseAvailable": not nse_down,
         "recentlyListed": recently_listed,
         "pipeline": pipeline,
         "ofs": ofs,
@@ -1299,7 +1573,11 @@ def build_ipo_dashboard():
         },
         "notes": notes,
         "source": (
-            "NSE India (issues, subscription, OFS) - Yahoo Finance (listing/current price) - "
             f"{', '.join(name for name, _ in GMP_SOURCES)} (GMP consensus)"
+            if nse_down
+            else (
+                "NSE India (issues, subscription, OFS) - Yahoo Finance (listing/current price) - "
+                f"{', '.join(name for name, _ in GMP_SOURCES)} (GMP consensus)"
+            )
         ),
     }

@@ -9,7 +9,6 @@ Run with ``python manage.py test agent_desk``.
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
-from django.test import TestCase
 
 from . import agents
 
@@ -1012,7 +1011,7 @@ class DeskCoherenceTests(SimpleTestCase):
         self.assertEqual(len(factors), len(set(factors)))
 
 
-class AgentDeskApiTests(TestCase):
+class AgentDeskApiTests(SimpleTestCase):
     def test_analyze_returns_the_desk_payload(self):
         with patch("core.services.resolve_symbol_input", return_value="TESTCO.NS"), \
                 patch("core.services.analyze_symbol", return_value=build_report()):

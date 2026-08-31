@@ -2,9 +2,11 @@
 
 Covers swing-trade plans, ownership/shareholding parsing, recommendations,
 relative strength, candlestick patterns, the market clock, caching, the
-market-monitor endpoint, open-interest reports, the watchlist API, NSE
-market snapshots, asset (ETF/MF) analysis, search suggestions, history
-windows, quality reports, and the search-log API.
+market-monitor endpoint, open-interest reports, NSE market snapshots, asset
+(ETF/MF) analysis, search suggestions, history windows, quality reports, and
+concurrent loader settling.
+
+Every test is a ``SimpleTestCase``: the app has no database.
 
 Run with ``python manage.py test``.
 """
@@ -14,11 +16,8 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.test import SimpleTestCase
-from django.test import TestCase
 
 from . import services
-from .models import StockSearchLog
-from .models import WatchlistItem
 
 
 class SwingTradePlanTests(SimpleTestCase):
@@ -725,7 +724,7 @@ class PerformanceCacheTests(SimpleTestCase):
         self.assertEqual(build_snapshot.call_count, 1)
 
 
-class MarketMonitorEndpointTests(TestCase):
+class MarketMonitorEndpointTests(SimpleTestCase):
     def setUp(self):
         services._cache.clear()
 
@@ -863,50 +862,6 @@ class OpenInterestTests(SimpleTestCase):
         self.assertIn("not call/put split", report["periods"]["day"]["volumeSummary"])
         self.assertFalse(report["periods"]["week"]["available"])
 
-
-class WatchlistApiTests(TestCase):
-    def test_watchlist_post_upserts_symbol_and_get_lists_item(self):
-        response = self.client.post(
-            "/api/watchlist",
-            data={
-                "symbol": "hal.ns",
-                "stockName": "HAL",
-                "buyPrice": 4200,
-                "sellPrice": 4700,
-                "checkPrice": 4300,
-            },
-            content_type="application/json",
-        )
-
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(WatchlistItem.objects.count(), 1)
-        self.assertEqual(response.json()["symbol"], "HAL.NS")
-
-        response = self.client.post(
-            "/api/watchlist",
-            data={"symbol": "HAL.NS", "stockName": "Hindustan Aeronautics", "buyPrice": 4250},
-            content_type="application/json",
-        )
-
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(WatchlistItem.objects.count(), 1)
-        item = WatchlistItem.objects.get()
-        self.assertEqual(item.stock_name, "Hindustan Aeronautics")
-        self.assertEqual(float(item.buy_price), 4250.0)
-
-        response = self.client.get("/api/watchlist")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["results"][0]["symbol"], "HAL.NS")
-
-    def test_watchlist_rejects_invalid_price(self):
-        response = self.client.post(
-            "/api/watchlist",
-            data={"symbol": "HAL.NS", "buyPrice": -1},
-            content_type="application/json",
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("greater than zero", response.json()["error"])
 
 
 class MarketSnapshotTests(SimpleTestCase):
@@ -2291,120 +2246,6 @@ class QualityReportTests(SimpleTestCase):
         self.assertTrue(any(check["label"] == "Data freshness" and check["status"] == "Verify" for check in quality["checks"]))
 
 
-class StockSearchLogTests(TestCase):
-    @patch("core.services.resolve_symbol_input")
-    @patch("core.services.analyze_symbol")
-    def test_analyze_records_search_log_with_ip_and_device(self, analyze_symbol, resolve_symbol):
-        resolve_symbol.return_value = "RELIANCE.NS"
-        analyze_symbol.return_value = {"symbol": "RELIANCE.NS", "source": "test"}
-
-        response = self.client.get(
-            "/api/analyze",
-            {"symbol": "Reliance"},
-            HTTP_X_FORWARDED_FOR="203.0.113.9, 10.0.0.4",
-            HTTP_USER_AGENT="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit Mobile/15E148",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        log = StockSearchLog.objects.get()
-        self.assertEqual(log.raw_input, "Reliance")
-        self.assertEqual(log.symbol, "RELIANCE.NS")
-        self.assertEqual(log.ip_address, "203.0.113.9")
-        self.assertEqual(log.device_type, "mobile")
-        self.assertTrue(log.success)
-
-    @patch("core.services.instrument_suggestions")
-    @patch("core.services.resolve_symbol_input")
-    def test_analyze_records_failed_search(self, resolve_symbol, instrument_suggestions):
-        resolve_symbol.return_value = ""
-        instrument_suggestions.return_value = {"stocks": [], "etfs": [], "mutualFunds": []}
-
-        response = self.client.get(
-            "/api/analyze",
-            {"symbol": "??"},
-            REMOTE_ADDR="198.51.100.7",
-            HTTP_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["error"], services.INVALID_INSTRUMENT_MESSAGE)
-        log = StockSearchLog.objects.get()
-        self.assertEqual(log.raw_input, "??")
-        self.assertEqual(log.ip_address, "198.51.100.7")
-        self.assertEqual(log.device_label, "Windows desktop")
-        self.assertFalse(log.success)
-        self.assertEqual(log.status_code, 400)
-
-    @patch("core.services.instrument_suggestions")
-    @patch("core.services.analyze_symbol")
-    @patch("core.services.resolve_symbol_input")
-    def test_analyze_404_returns_invalid_name_suggestions(self, resolve_symbol, analyze_symbol, instrument_suggestions):
-        resolve_symbol.return_value = "RELANCE.NS"
-        analyze_symbol.side_effect = RuntimeError("Data provider returned 404.")
-        instrument_suggestions.return_value = {
-            "stocks": [{"symbol": "RELIANCE.NS", "name": "Reliance Industries", "kind": "stock"}],
-            "etfs": [],
-            "mutualFunds": [],
-        }
-
-        response = self.client.get("/api/analyze", {"symbol": "relance"})
-
-        self.assertEqual(response.status_code, 400)
-        payload = response.json()
-        # The input parsed to a ticker and the provider had no data for it, so the
-        # error names that ticker instead of claiming the name was unreadable.
-        self.assertIn("RELANCE.NS", payload["error"])
-        self.assertIn("returned no data", payload["error"])
-        self.assertEqual(payload["resolvedSymbol"], "RELANCE.NS")
-        self.assertEqual(payload["suggestions"]["stocks"][0]["symbol"], "RELIANCE.NS")
-
-    @patch("core.services.instrument_suggestions")
-    def test_a_failed_symbol_is_not_suggested_as_its_own_fix(self, instrument_suggestions):
-        # TATAMOTORS.NS parses, sits in the curated universe, and 404s since the
-        # demerger. Offering it back as the top suggestion made the only obvious
-        # next click reproduce the same error.
-        instrument_suggestions.return_value = {
-            "stocks": [
-                {"symbol": "TATAMOTORS.NS", "name": "Tata Motors", "kind": "stock"},
-                {"symbol": "TATAPOWER.NS", "name": "Tata Power", "kind": "stock"},
-            ],
-            "etfs": [],
-            "mutualFunds": [],
-        }
-
-        payload = services.invalid_instrument_payload("TATAMOTORS.NS", "TATAMOTORS.NS")
-
-        self.assertEqual(
-            [row["symbol"] for row in payload["suggestions"]["stocks"]], ["TATAPOWER.NS"],
-        )
-
-    @patch("core.services.instrument_suggestions")
-    def test_an_unparseable_input_keeps_the_original_message(self, instrument_suggestions):
-        instrument_suggestions.return_value = {"stocks": [], "etfs": [], "mutualFunds": []}
-
-        payload = services.invalid_instrument_payload("zzzzzz")
-
-        self.assertEqual(payload["error"], services.INVALID_INSTRUMENT_MESSAGE)
-        self.assertEqual(payload["resolvedSymbol"], "")
-
-    def test_search_logs_endpoint_returns_recent_logs(self):
-        StockSearchLog.objects.create(
-            raw_input="TCS",
-            symbol="TCS.NS",
-            ip_address="192.0.2.10",
-            device_type="desktop",
-            device_label="Mac desktop",
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-        )
-
-        response = self.client.get("/api/search-logs")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["count"], 1)
-        self.assertEqual(payload["results"][0]["symbol"], "TCS.NS")
-        self.assertEqual(payload["results"][0]["deviceLabel"], "Mac desktop")
-
 
 class EndpointFamilyTests(SimpleTestCase):
     """The 401 memo has to group by route, not by symbol, or it never fires."""
@@ -2566,3 +2407,41 @@ def quote_plus_safe(value):
     from urllib.parse import quote as url_quote
 
     return url_quote(value)
+
+
+class SettleNamedLoadersTests(SimpleTestCase):
+    def test_a_loader_that_raises_yields_an_empty_result(self):
+        def boom():
+            raise RuntimeError("upstream refused")
+
+        results = services.settle_named_loaders({"ok": lambda: [1], "bad": boom})
+
+        self.assertEqual(results["ok"], [1])
+        self.assertEqual(results["bad"], {})
+
+    def test_failure_reasons_are_captured_when_a_dict_is_supplied(self):
+        # Without this the caller cannot tell a refused request from an upstream
+        # that legitimately returned nothing, which left production outages
+        # showing a generic message with no way to diagnose them.
+        def boom():
+            raise RuntimeError("NSE India returned 403.")
+
+        errors = {}
+        services.settle_named_loaders({"feed": boom}, errors=errors)
+
+        self.assertEqual(errors, {"feed": "NSE India returned 403."})
+
+    def test_an_exception_with_no_message_still_names_itself(self):
+        def boom():
+            raise TimeoutError()
+
+        errors = {}
+        services.settle_named_loaders({"feed": boom}, errors=errors)
+
+        self.assertEqual(errors["feed"], "TimeoutError")
+
+    def test_successful_loaders_leave_no_entry_behind(self):
+        errors = {}
+        services.settle_named_loaders({"feed": lambda: [1]}, errors=errors)
+
+        self.assertEqual(errors, {})

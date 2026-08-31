@@ -1,9 +1,10 @@
 """URL routes owned by the core app.
 
-Maps the landing page (``/``), the workspace shell (``/app``), and the
-cross-cutting JSON APIs (``/api/search-logs``, ``/api/watchlist`` + detail,
-``/api/trade-references`` + detail). Included at the project root by
-``stockdesk/urls.py``.
+Maps the landing page (``/``) and the workspace shell (``/app``). Included at
+the project root by ``stockdesk/urls.py``.
+
+There are no CRUD routes here: the app stores nothing, so every other route
+belongs to a tab app and reads live from its upstream.
 """
 from django.urls import path
 
@@ -16,9 +17,4 @@ urlpatterns = [
     path("", views.home, name="home"),
     path("app", views.index, name="index"),
     path("app/", views.index, name="index-slash"),
-    path("api/search-logs", views.search_logs, name="api-search-logs"),
-    path("api/watchlist", views.watchlist_items, name="api-watchlist"),
-    path("api/watchlist/<int:item_id>", views.watchlist_item_detail, name="api-watchlist-detail"),
-    path("api/trade-references", views.trade_references, name="api-trade-references"),
-    path("api/trade-references/<int:reference_id>", views.trade_reference_detail, name="api-trade-reference-detail"),
 ]
