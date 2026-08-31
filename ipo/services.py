@@ -17,7 +17,9 @@ Everything scraped here is untrusted third-party HTML. Parsed values are coerced
 to floats or length-capped strings before they leave this module, and no
 provider-supplied URL is ever passed through to the client.
 """
+import json
 import re
+import time
 from datetime import datetime, timedelta
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -28,9 +30,11 @@ from core.services import (
     clear_cache_prefix,
     fetch_chart_range,
     fetch_nse_json_with_session,
+    get_cached,
     is_finite,
     iso_now,
     round2,
+    set_cached,
     settle_map,
     settle_named_loaders,
 )
@@ -49,7 +53,33 @@ GMP_SOURCES = (
     ("IPO Ji", "https://ipoji.com/ipo-gmp"),
     ("IPO Watch", "https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/"),
     ("IPO Premium", "https://www.ipopremium.in/"),
+    ("IPO Central", "https://ipocentral.in/ipo-discussion/"),
+    ("IPO360", "https://www.ipo360.in/gmp"),
 )
+
+# A grey-market tracker is a nice-to-have layered on top of the exchange data,
+# so it gets a short leash. These are third-party WordPress sites that go down
+# without warning - IPO Watch has sat behind a Cloudflare 522 for hours - and a
+# generous timeout there stalls the whole dashboard for every visitor.
+GMP_FETCH_TIMEOUT = 8
+
+# How long a scraped source is reused, and how long a failed one is left alone.
+# Without a cooldown, every cache rebuild pays the full timeout again to
+# rediscover that a site is still down.
+GMP_SOURCE_CACHE_SECONDS = 10 * 60
+
+# The cooldown doubles per consecutive failure, from one minute up to ten,
+# because these sources fail in two different ways. IPO Watch flaps - measured
+# over 22 requests it answered 8 of them - so a flat multi-minute ban would sit
+# out recoveries that were one retry away. A genuinely dead host, by contrast,
+# should be backed off hard rather than retried every minute. Growth separates
+# the two without needing to know which is which.
+GMP_SOURCE_COOLDOWN_SECONDS = 60
+GMP_SOURCE_COOLDOWN_MAX_SECONDS = 10 * 60
+
+# Per-category bids only break down a total the pipeline already has, so the
+# request that fetches them is capped well below the NSE default.
+BID_DETAIL_TIMEOUT = 8
 
 BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -231,7 +261,7 @@ def parse_html_tables(html):
     return tables
 
 
-def fetch_html(url, timeout=20):
+def fetch_html(url, timeout=GMP_FETCH_TIMEOUT):
     request = Request(url, headers=BROWSER_HEADERS)
     with urlopen(request, timeout=timeout, context=SSL_CONTEXT) as response:
         return response.read().decode("utf-8", errors="replace")
@@ -337,17 +367,117 @@ def scrape_gmp_ipopremium():
     return rows
 
 
+def scrape_gmp_ipocentral():
+    """IPO Central, read through its WordPress REST endpoint rather than the page.
+
+    Same content as ``/ipo-discussion/`` but 31 KB instead of 488 KB, because the
+    endpoint returns the post body without the site chrome. The body is ordinary
+    table markup, so it goes through the same parser as every other source.
+    Mainboard and SME arrive as two tables, distinguished only by their first
+    header cell.
+    """
+    payload = json.loads(fetch_html("https://ipocentral.in/wp-json/wp/v2/pages?slug=ipo-discussion"))
+    if not isinstance(payload, list) or not payload:
+        return []
+    body = ((payload[0] or {}).get("content") or {}).get("rendered") or ""
+
+    rows = []
+    for table in parse_html_tables(body):
+        header = table[0]
+        name_col = header_index(header, "mainboard ipo", "sme ipo")
+        gmp_col = header_index(header, "ipo gmp")
+        if name_col is None or gmp_col is None:
+            continue
+        # "Price*" is already the cap, not a range.
+        band_col = header_index(header, "price")
+        for row in table[1:]:
+            name = cell_at(row, name_col)
+            gmp = to_number(cell_at(row, gmp_col))
+            if not name or gmp is None:
+                continue
+            _, band_high = parse_price_band(cell_at(row, band_col))
+            rows.append({"company": name, "gmp": gmp, "bandHigh": band_high, "expectedListing": None})
+    return rows
+
+
+def scrape_gmp_ipo360():
+    """IPO360: one server-rendered table covering mainboard and SME together."""
+    rows = []
+    for table in parse_html_tables(fetch_html("https://www.ipo360.in/gmp")):
+        header = table[0]
+        name_col = header_index(header, "company")
+        gmp_col = header_index(header, "gmp")
+        if name_col is None or gmp_col is None:
+            continue
+        band_col = header_index(header, "issue price")
+        for row in table[1:]:
+            name = cell_at(row, name_col)
+            gmp = to_number(cell_at(row, gmp_col))
+            if not name or gmp is None:
+                continue
+            _, band_high = parse_price_band(cell_at(row, band_col))
+            rows.append({"company": name, "gmp": gmp, "bandHigh": band_high, "expectedListing": None})
+    return rows
+
+
 GMP_SCRAPERS = {
     "IPO Ji": scrape_gmp_ipoji,
     "IPO Watch": scrape_gmp_ipowatch,
     "IPO Premium": scrape_gmp_ipopremium,
+    "IPO Central": scrape_gmp_ipocentral,
+    "IPO360": scrape_gmp_ipo360,
 }
+
+
+# Sources that failed recently, mapped to the time they may be retried, and the
+# run of consecutive failures behind each. Held outside the shared cache because
+# they record the absence of a value rather than a value.
+_gmp_cooldowns = {}
+_gmp_failures = {}
+
+
+def gmp_source_cooldowns():
+    return dict(_gmp_cooldowns)
+
+
+def gmp_cooldown_for(failures):
+    """Backoff after ``failures`` consecutive failures, capped."""
+    return min(GMP_SOURCE_COOLDOWN_SECONDS * (2 ** max(0, failures - 1)), GMP_SOURCE_COOLDOWN_MAX_SECONDS)
+
+
+def scrape_gmp_source(name):
+    """One aggregator, reusing a recent scrape and backing off after a failure.
+
+    A source in cooldown raises without touching the network, so a site that is
+    down costs one timeout per cooldown window rather than one per request. The
+    cooldown deliberately survives ``?refresh=1``: a Cloudflare 522 does not
+    clear in the time it takes a user to click refresh again, and making them
+    wait out the timeout to rediscover that helps nobody.
+    """
+    cache_key = f"ipo:gmp:{name}"
+    rows = get_cached(cache_key)
+    if rows is not None:
+        return rows
+    retry_at = _gmp_cooldowns.get(name)
+    if retry_at and retry_at > time.time():
+        raise RuntimeError(f"{name} failed recently; retrying after cooldown")
+    try:
+        rows = GMP_SCRAPERS[name]()
+    except Exception:
+        failures = _gmp_failures.get(name, 0) + 1
+        _gmp_failures[name] = failures
+        _gmp_cooldowns[name] = time.time() + gmp_cooldown_for(failures)
+        raise
+    _gmp_failures.pop(name, None)
+    _gmp_cooldowns.pop(name, None)
+    set_cached(cache_key, rows, GMP_SOURCE_CACHE_SECONDS)
+    return rows
 
 
 def collect_gmp_quotes():
     """Fetch every aggregator concurrently; a source that fails is just absent."""
     results = settle_named_loaders(
-        {name: scraper for name, scraper in GMP_SCRAPERS.items()},
+        {name: (lambda source=name: scrape_gmp_source(source)) for name in GMP_SCRAPERS},
         concurrency=len(GMP_SCRAPERS),
     )
     quotes = {}
@@ -459,11 +589,20 @@ def fetch_past_issues():
 
 
 def fetch_bid_details(symbol, series):
-    """Per-category subscription (QIB / NII / Retail) for one live issue."""
+    """Per-category subscription (QIB / NII / Retail) for one live issue.
+
+    This only splits a number the current-issue feed already supplies, so it is
+    fetched on a tight budget: one extra request per open issue, and a stalling
+    NSE would otherwise multiply across them and hold up the whole dashboard.
+    """
     if not re.fullmatch(r"[A-Z0-9&_-]{1,20}", str(symbol or "")):
         return {}
     series_value = "SME" if str(series or "").upper() == "SME" else "EQ"
-    payload = fetch_nse_json_with_session(f"/api/ipo-detail?symbol={symbol}&series={series_value}")
+    payload = fetch_nse_json_with_session(
+        f"/api/ipo-detail?symbol={symbol}&series={series_value}",
+        timeout=BID_DETAIL_TIMEOUT,
+        attempts=2,
+    )
     if not isinstance(payload, dict):
         return {}
     details = {}
@@ -764,7 +903,7 @@ def build_pipeline(upcoming_issues, current_issues, quotes, today):
     # asked for - one extra NSE round trip each, and forthcoming issues would
     # return nothing anyway.
     open_rows = [item for item in candidates if item["_isOpen"]]
-    bid_results = settle_map(open_rows, lambda item: fetch_bid_details(item["symbol"], item["series"]), 3)
+    bid_results = settle_map(open_rows, lambda item: fetch_bid_details(item["symbol"], item["series"]), 6)
     bids_by_symbol = {}
     for item, (ok, value) in zip(open_rows, bid_results):
         bids_by_symbol[item["symbol"]] = value if ok and isinstance(value, dict) else {}
@@ -1060,26 +1199,18 @@ def build_recent_ofs(past_rows, today, exclude_symbols):
     return rows
 
 
-def build_ofs(today):
+def build_ofs(today, active_feed, forthcoming_feed, past_feed):
     """Live, scheduled, and just-completed OFS issues from NSE.
 
     Three feeds back this: the active board, the forthcoming list (category
     "forthcoming"), and the archive going back to 2012, which is trimmed to the
-    same 7-day window the listings table uses.
+    same 7-day window the listings table uses. They are fetched by the caller so
+    they can share one thread pool with everything else the dashboard needs.
     """
-    feeds = settle_named_loaders(
-        {
-            "active": fetch_ofs_active,
-            "forthcoming": fetch_ofs_forthcoming,
-            "past": fetch_ofs_past,
-        },
-        concurrency=3,
-    )
-
-    active = build_active_ofs(feeds.get("active") or [])
-    upcoming = build_forthcoming_ofs(feeds.get("forthcoming") or [], today)
+    active = build_active_ofs(active_feed or [])
+    upcoming = build_forthcoming_ofs(forthcoming_feed or [], today)
     live_symbols = {row["symbol"] for row in active + upcoming if row["symbol"]}
-    recent = build_recent_ofs(feeds.get("past") or [], today, live_symbols)
+    recent = build_recent_ofs(past_feed or [], today, live_symbols)
 
     rows = active + upcoming + recent
     if not rows:
@@ -1105,13 +1236,20 @@ def build_ofs(today):
 def build_ipo_dashboard():
     today = datetime.now(IST).date()
 
+    # Every upstream this tab needs is independent, so they all go out at once.
+    # Run in sequence, the slowest grey-market source would be added to the NSE
+    # and OFS time rather than overlapped with it.
     feeds = settle_named_loaders(
         {
             "upcoming": fetch_upcoming_issues,
             "current": fetch_current_issues,
             "past": fetch_past_issues,
+            "gmp": collect_gmp_quotes,
+            "ofsActive": fetch_ofs_active,
+            "ofsForthcoming": fetch_ofs_forthcoming,
+            "ofsPast": fetch_ofs_past,
         },
-        concurrency=3,
+        concurrency=7,
     )
     upcoming_issues = feeds.get("upcoming") or []
     current_issues = feeds.get("current") or []
@@ -1120,17 +1258,28 @@ def build_ipo_dashboard():
     if not upcoming_issues and not current_issues and not past_issues:
         raise RuntimeError("NSE India IPO feeds are temporarily unavailable. Please retry in a moment.")
 
-    quotes, failed_sources = collect_gmp_quotes()
+    # settle_named_loaders reports a crashed loader as {}, which unpacks to no
+    # quotes and every source marked failed - the same state as all three being
+    # down, which is what it means.
+    gmp_result = feeds.get("gmp")
+    quotes, failed_sources = gmp_result if isinstance(gmp_result, tuple) else ({}, [name for name, _ in GMP_SOURCES])
 
     recently_listed = build_recently_listed(past_issues, today)
     pipeline = build_pipeline(upcoming_issues, current_issues, quotes, today)
-    ofs = build_ofs(today)
+    ofs = build_ofs(today, feeds.get("ofsActive"), feeds.get("ofsForthcoming"), feeds.get("ofsPast"))
 
     notes = []
     if failed_sources:
-        notes.append(f"GMP source(s) unavailable: {', '.join(failed_sources)}.")
+        notes.append(
+            f"GMP source(s) not responding: {', '.join(failed_sources)}. "
+            f"The average uses the {len(quotes)} that did."
+            if quotes
+            else f"GMP source(s) not responding: {', '.join(failed_sources)}."
+        )
     if not quotes:
         notes.append("No GMP source responded, so grey-market columns are empty.")
+    elif len(quotes) == 1:
+        notes.append("Only one GMP source responded, so there is no cross-check on that premium.")
 
     return {
         "generatedAt": iso_now(),
@@ -1149,5 +1298,8 @@ def build_ipo_dashboard():
             "ofs": len(ofs["rows"]),
         },
         "notes": notes,
-        "source": "NSE India (issues, subscription, OFS) - Yahoo Finance (listing/current price) - IPO Ji, IPO Watch, IPO Premium (GMP consensus)",
+        "source": (
+            "NSE India (issues, subscription, OFS) - Yahoo Finance (listing/current price) - "
+            f"{', '.join(name for name, _ in GMP_SOURCES)} (GMP consensus)"
+        ),
     }

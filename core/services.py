@@ -10253,15 +10253,24 @@ def nse_session(force_new=False):
         return opener
 
 
-def fetch_nse_json_with_session(path):
+def fetch_nse_json_with_session(path, timeout=20, attempts=3):
+    """NSE JSON over the shared cookie jar.
+
+    ``timeout`` and ``attempts`` are exposed because NSE's latency is erratic -
+    the same endpoint answers in 0.2s or stalls for 20 - and the defaults give a
+    worst case near a minute per call. A caller fetching data that merely
+    enriches a response, rather than data the response cannot be built without,
+    should shorten the budget so one slow endpoint cannot hold up the page.
+    """
     endpoint = path if str(path).startswith("http") else f"{NSE_BASE_URL}{path}"
+    attempts = max(1, attempts)
     last_error = None
-    for attempt in range(3):
+    for attempt in range(attempts):
         try:
             # A rejected cookie is the one failure a retry cannot fix on its own,
             # so the second attempt onwards starts from a new jar.
             opener = nse_session(force_new=attempt > 0)
-            with opener.open(Request(endpoint, headers=NSE_HEADERS), timeout=20) as response:
+            with opener.open(Request(endpoint, headers=NSE_HEADERS), timeout=timeout) as response:
                 text = response.read().decode("utf-8", errors="replace")
             return json.loads(text)
         except json.JSONDecodeError as error:
@@ -10272,9 +10281,9 @@ def fetch_nse_json_with_session(path):
             last_error = error
         except (TimeoutError, URLError, OSError) as error:
             last_error = error
-        if attempt < 2:
+        if attempt < attempts - 1:
             time.sleep(0.4 * (attempt + 1))
-    raise RuntimeError("NSE India option-chain endpoint is temporarily unavailable.") from last_error
+    raise RuntimeError(f"NSE India endpoint is temporarily unavailable: {path}") from last_error
 
 
 def endpoint_family(endpoint):

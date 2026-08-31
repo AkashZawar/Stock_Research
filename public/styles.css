@@ -7800,6 +7800,7 @@ body {
 }
 
 .ipo-gmp,
+.ipo-expected,
 .ipo-subscription {
   display: grid;
   gap: 1px;

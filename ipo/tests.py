@@ -6,6 +6,7 @@ the recommendation flag, section assembly, and the ``/api/ipo`` endpoint.
 
 Run with ``python manage.py test ipo``.
 """
+import time
 from datetime import date
 from unittest.mock import patch
 
@@ -470,6 +471,177 @@ class OfsTests(SimpleTestCase):
         flag = services.ofs_flag(11.0, {})
         self.assertEqual(flag["flag"], "green")
         self.assertEqual(flag["score"], 100)
+
+
+class GmpSourceResilienceTests(SimpleTestCase):
+    """A dead grey-market tracker must not slow down or break the dashboard."""
+
+    def setUp(self):
+        services.clear_ipo_cache()
+        services._gmp_cooldowns.clear()
+        services._gmp_failures.clear()
+        self.addCleanup(services.clear_ipo_cache)
+        self.addCleanup(services._gmp_cooldowns.clear)
+        self.addCleanup(services._gmp_failures.clear)
+
+    def test_cooldown_grows_with_consecutive_failures_then_caps(self):
+        # A flapping source must be retried soon; a dead one must not be retried
+        # every minute forever.
+        self.assertEqual(services.gmp_cooldown_for(1), 60)
+        self.assertEqual(services.gmp_cooldown_for(2), 120)
+        self.assertEqual(services.gmp_cooldown_for(3), 240)
+        self.assertEqual(services.gmp_cooldown_for(99), services.GMP_SOURCE_COOLDOWN_MAX_SECONDS)
+
+    def test_first_failure_only_costs_a_short_cooldown(self):
+        def boom():
+            raise RuntimeError("522")
+
+        with patch.dict(services.GMP_SCRAPERS, {"IPO Watch": boom}):
+            with self.assertRaises(RuntimeError):
+                services.scrape_gmp_source("IPO Watch")
+        remaining = services.gmp_source_cooldowns()["IPO Watch"] - time.time()
+        self.assertLessEqual(remaining, services.GMP_SOURCE_COOLDOWN_SECONDS + 1)
+
+    def test_a_recovery_resets_the_backoff(self):
+        def boom():
+            raise RuntimeError("522")
+
+        with patch.dict(services.GMP_SCRAPERS, {"IPO Watch": boom}):
+            with self.assertRaises(RuntimeError):
+                services.scrape_gmp_source("IPO Watch")
+        self.assertEqual(services._gmp_failures.get("IPO Watch"), 1)
+
+        services._gmp_cooldowns.clear()
+        with patch.dict(services.GMP_SCRAPERS, {"IPO Watch": lambda: [{"company": "A", "gmp": 1.0}]}):
+            services.scrape_gmp_source("IPO Watch")
+        self.assertNotIn("IPO Watch", services._gmp_failures)
+
+    def test_a_failing_source_is_not_retried_until_its_cooldown_expires(self):
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise RuntimeError("HTTP Error 522")
+
+        with patch.dict(services.GMP_SCRAPERS, {"IPO Ji": boom}):
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    services.scrape_gmp_source("IPO Ji")
+
+        # Three requests, one actual network attempt. Without this the tab pays
+        # the full timeout on every rebuild while the site stays down.
+        self.assertEqual(len(calls), 1)
+        self.assertIn("IPO Ji", services.gmp_source_cooldowns())
+
+    def test_cooldown_lapses_so_a_recovered_source_comes_back(self):
+        services._gmp_cooldowns["IPO Ji"] = time.time() - 1
+        with patch.dict(services.GMP_SCRAPERS, {"IPO Ji": lambda: [{"company": "A", "gmp": 1.0}]}):
+            self.assertEqual(services.scrape_gmp_source("IPO Ji"), [{"company": "A", "gmp": 1.0}])
+        self.assertNotIn("IPO Ji", services.gmp_source_cooldowns())
+
+    def test_a_successful_scrape_is_reused_without_refetching(self):
+        calls = []
+
+        def once():
+            calls.append(1)
+            return [{"company": "A", "gmp": 1.0}]
+
+        with patch.dict(services.GMP_SCRAPERS, {"IPO Ji": once}):
+            services.scrape_gmp_source("IPO Ji")
+            services.scrape_gmp_source("IPO Ji")
+        self.assertEqual(len(calls), 1)
+
+    def test_one_dead_source_still_yields_a_consensus_from_the_others(self):
+        def boom():
+            raise RuntimeError("down")
+
+        with patch.dict(
+            services.GMP_SCRAPERS,
+            {
+                "IPO Ji": lambda: [{"company": "Acme Limited", "gmp": 10.0, "bandHigh": 100.0}],
+                "IPO Watch": boom,
+                "IPO Premium": lambda: [{"company": "Acme Limited", "gmp": 20.0, "bandHigh": 100.0}],
+            },
+        ):
+            quotes, failed = services.collect_gmp_quotes()
+
+        self.assertEqual(failed, ["IPO Watch"])
+        consensus = services.gmp_consensus("Acme Limited", quotes, 100.0)
+        self.assertEqual(consensus["value"], 15.0)
+        self.assertEqual(consensus["sourceCount"], 2)
+
+    def test_dashboard_survives_every_gmp_source_being_down(self):
+        def boom():
+            raise RuntimeError("down")
+
+        with patch.dict(
+            services.GMP_SCRAPERS,
+            {name: boom for name in services.GMP_SCRAPERS},
+        ):
+            quotes, failed = services.collect_gmp_quotes()
+        self.assertEqual(quotes, {})
+        self.assertEqual(sorted(failed), sorted(services.GMP_SCRAPERS))
+        # No GMP means no premium to score on, not a crash.
+        self.assertEqual(services.gmp_consensus("Acme", quotes, 100.0), None)
+
+
+class DashboardAssemblyTests(SimpleTestCase):
+    def test_dashboard_reports_every_gmp_source_down_without_failing(self):
+        with patch.object(services, "fetch_upcoming_issues", lambda: []), \
+             patch.object(services, "fetch_current_issues", lambda: []), \
+             patch.object(services, "fetch_past_issues", lambda: [{"securityType": "EQ"}]), \
+             patch.object(services, "collect_gmp_quotes", lambda: ({}, ["IPO Ji", "IPO Watch", "IPO Premium"])), \
+             patch.object(services, "fetch_ofs_active", lambda: []), \
+             patch.object(services, "fetch_ofs_forthcoming", lambda: []), \
+             patch.object(services, "fetch_ofs_past", lambda: []):
+            payload = services.build_ipo_dashboard()
+
+        self.assertEqual(payload["pipeline"], [])
+        self.assertTrue(any("not responding" in note for note in payload["notes"]))
+        self.assertTrue(all(source["ok"] is False for source in payload["gmpSources"]))
+
+    def test_dashboard_fails_loudly_when_every_nse_feed_is_empty(self):
+        # An empty NSE response is indistinguishable from a broken one here, and
+        # rendering an empty dashboard would read as "no IPOs" rather than "no data".
+        with patch.object(services, "fetch_upcoming_issues", lambda: []), \
+             patch.object(services, "fetch_current_issues", lambda: []), \
+             patch.object(services, "fetch_past_issues", lambda: []), \
+             patch.object(services, "collect_gmp_quotes", lambda: ({}, [])), \
+             patch.object(services, "fetch_ofs_active", lambda: []), \
+             patch.object(services, "fetch_ofs_forthcoming", lambda: []), \
+             patch.object(services, "fetch_ofs_past", lambda: []):
+            with self.assertRaises(RuntimeError):
+                services.build_ipo_dashboard()
+
+    def test_a_crashed_gmp_loader_does_not_take_down_the_dashboard(self):
+        # settle_named_loaders reports a crashed loader as {}, which must not be
+        # unpacked as if it were the (quotes, failed) tuple.
+        def boom():
+            raise RuntimeError("thread died")
+
+        with patch.object(services, "fetch_upcoming_issues", lambda: []), \
+             patch.object(services, "fetch_current_issues", lambda: []), \
+             patch.object(services, "fetch_past_issues", lambda: [{"securityType": "EQ"}]), \
+             patch.object(services, "collect_gmp_quotes", boom), \
+             patch.object(services, "fetch_ofs_active", lambda: []), \
+             patch.object(services, "fetch_ofs_forthcoming", lambda: []), \
+             patch.object(services, "fetch_ofs_past", lambda: []):
+            payload = services.build_ipo_dashboard()
+
+        self.assertTrue(all(source["ok"] is False for source in payload["gmpSources"]))
+
+    def test_ofs_feeds_that_fail_leave_the_section_empty_not_broken(self):
+        with patch.object(services, "fetch_upcoming_issues", lambda: []), \
+             patch.object(services, "fetch_current_issues", lambda: []), \
+             patch.object(services, "fetch_past_issues", lambda: [{"securityType": "EQ"}]), \
+             patch.object(services, "collect_gmp_quotes", lambda: ({}, [])), \
+             patch.object(services, "fetch_ofs_active", lambda: (_ for _ in ()).throw(RuntimeError("down"))), \
+             patch.object(services, "fetch_ofs_forthcoming", lambda: []), \
+             patch.object(services, "fetch_ofs_past", lambda: []):
+            payload = services.build_ipo_dashboard()
+
+        self.assertEqual(payload["ofs"]["rows"], [])
+        self.assertTrue(payload["ofs"]["note"])
 
 
 class IpoEndpointTests(TestCase):

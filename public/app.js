@@ -1224,13 +1224,17 @@ function ipoGmpMarkup(gmp) {
     <div class="ipo-gmp" title="${escapeHtml(detail)}">
       <strong class="${changeClass(gmp.value)}">${escapeHtml(formatMoney(gmp.value, "INR"))}</strong>
       ${percent ? `<span class="${changeClass(gmp.percent)}">${escapeHtml(percent)}</span>` : ""}
-      <small>${escapeHtml(`${gmp.sourceCount} source${gmp.sourceCount === 1 ? "" : "s"} · ${gmp.agreement} agreement`)}</small>
+      <small>${escapeHtml(
+        gmp.sourceCount === 1
+          ? "1 source · no cross-check"
+          : `${gmp.sourceCount} sources · ${gmp.agreement} agreement`
+      )}</small>
       ${range ? `<small>range ${escapeHtml(range)}</small>` : ""}
     </div>
   `;
 }
 
-function ipoSubscriptionMarkup(subscription, status) {
+function ipoSubscriptionMarkup(subscription, status, board) {
   if (!subscription || !Number.isFinite(subscription.total)) {
     return status === "Upcoming"
       ? `<span class="muted">Bidding not open</span>`
@@ -1242,14 +1246,18 @@ function ipoSubscriptionMarkup(subscription, status) {
     ["Retail", subscription.retail]
   ].filter(([, value]) => Number.isFinite(value));
 
+  // NSE publishes no category split for SME issues, so the bare total is all
+  // there is. Saying so stops it reading as data that failed to load.
+  const detail = legs.length
+    ? legs.map(([name, value]) => `${name} ${value.toFixed(2)}x`).join(" · ")
+    : board === "SME"
+      ? "No category split for SME"
+      : "";
+
   return `
     <div class="ipo-subscription">
       <strong>${escapeHtml(`${subscription.total.toFixed(2)}x`)}</strong>
-      ${
-        legs.length
-          ? `<small>${escapeHtml(legs.map(([name, value]) => `${name} ${value.toFixed(2)}x`).join(" · "))}</small>`
-          : ""
-      }
+      ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
     </div>
   `;
 }
@@ -1271,10 +1279,13 @@ function renderIpoPipelineRows(items) {
     row.className = `ipo-row is-${(item.recommendation?.flag || "grey")}`;
     const dates = [formatIpoDate(item.openDate), formatIpoDate(item.closeDate)].filter(Boolean).join(" - ");
     const expected = item.gmp?.expectedListingPrice;
-    const expectedUpside =
-      Number.isFinite(expected) && Number.isFinite(item.priceBandHigh) && item.priceBandHigh
-        ? ((expected - item.priceBandHigh) / item.priceBandHigh) * 100
-        : null;
+    // Expected listing is just the cap price plus the averaged premium, so its
+    // upside is identical to the GMP percentage already shown one column left.
+    // Showing the arithmetic instead of repeating the number earns the space.
+    const expectedBasis =
+      Number.isFinite(expected) && Number.isFinite(item.priceBandHigh) && Number.isFinite(item.gmp?.value)
+        ? `${formatMoney(item.priceBandHigh, "INR")} cap + ${formatMoney(item.gmp.value, "INR")} GMP`
+        : "";
 
     row.innerHTML = `
       <td>
@@ -1289,15 +1300,13 @@ function renderIpoPipelineRows(items) {
       <td>
         ${
           Number.isFinite(expected)
-            ? `<strong>${escapeHtml(formatMoney(expected, "INR"))}</strong>${
-                Number.isFinite(expectedUpside)
-                  ? `<small class="${changeClass(expectedUpside)}">${escapeHtml(`${expectedUpside >= 0 ? "+" : ""}${expectedUpside.toFixed(1)}%`)}</small>`
-                  : ""
-              }`
+            ? `<div class="ipo-expected"><strong>${escapeHtml(formatMoney(expected, "INR"))}</strong>${
+                expectedBasis ? `<small>${escapeHtml(expectedBasis)}</small>` : ""
+              }</div>`
             : `<span class="muted">Needs GMP</span>`
         }
       </td>
-      <td>${ipoSubscriptionMarkup(item.subscription, item.status)}</td>
+      <td>${ipoSubscriptionMarkup(item.subscription, item.status, item.board)}</td>
       <td>${ipoFlagMarkup(item.recommendation)}</td>
     `;
     fragment.appendChild(row);

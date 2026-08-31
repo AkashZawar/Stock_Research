@@ -36,18 +36,51 @@ from `core.services`.
 | Subscription by QIB / NII / Retail | NSE `/api/ipo-detail?symbol=&series=` |
 | Listing date, final issue price | NSE `/api/public-past-issues` |
 | Listing price, current price | Yahoo Finance chart (first bar's open, latest close) |
-| GMP, expected listing price | IPO Ji, IPO Watch, IPO Premium (scraped, averaged) |
+| GMP, expected listing price | IPO Ji, IPO Watch, IPO Premium, IPO Central, IPO360 (scraped, averaged) |
 | Live OFS floor price, LTP, subscription by category | NSE `/api/live-ofs-active-issues` |
 | Scheduled OFS | NSE `/api/all-upcoming-issues?category=forthcoming` |
 | Completed OFS, allotment price | NSE `/api/live-ofs-past-issues` |
 
 ## Things worth knowing before changing this
 
-- **GMP has no official source.** The three aggregators are scraped from raw
-  HTML. Chittorgarh and InvestorGain were evaluated and rejected because they
-  render their tables client-side, so nothing usable arrives in the response
-  body. If a scraper's table layout changes, `collect_gmp_quotes` drops that
-  source and reports it in `notes` rather than failing the request.
+- **GMP has no official source.** Five aggregators are scraped from raw HTML. If
+  a scraper's table layout changes, `collect_gmp_quotes` drops that source and
+  reports it in `notes` rather than failing the request.
+- **Five sources, because they disagree and they go down.** Two sources that
+  disagree give you no way to tell which is the outlier. Rejected after testing:
+  Chittorgarh, InvestorGain, Finology and IPO Hub render their tables
+  client-side, so nothing usable arrives in the response body; IPO Track serves a
+  table but leaves GMP empty for live issues; IPO Market emits duplicate
+  mobile/desktop tables; Chanakya NiPothi mis-encodes company names and quotes
+  floor rather than cap prices.
+- **IPO Central is read through `wp-json`, not the page.** The REST endpoint
+  returns the same post body in 31 KB instead of 488 KB, since it omits the site
+  chrome. The body is ordinary table markup, so it reuses `parse_html_tables`.
+- **A grey-market tracker going down must not slow the tab.** These are
+  third-party WordPress sites that fail without warning; IPO Watch has sat behind
+  a Cloudflare 522 for hours. Three things bound the damage: `GMP_FETCH_TIMEOUT`
+  is 8s rather than the 20s the exchange feeds get, `scrape_gmp_source` caches a
+  success for 10 minutes, and a failure puts that source in a cooldown so a
+  rebuild does not pay the timeout again to rediscover it is still down. The
+  cooldown deliberately survives `?refresh=1` - a 522 does not clear in the time
+  it takes to click refresh, and making the user wait out the timeout to find
+  that out helps nobody.
+- **The cooldown doubles per consecutive failure, 1 minute to 10.** These sources
+  fail two different ways. IPO Watch flaps - measured over 22 requests it
+  answered 8, and a healthy response arrives in under a second - so a flat
+  multi-minute ban would sit out recoveries that were one retry away. A dead host
+  should be backed off hard instead. Growth separates the two without needing to
+  know which is which, and a success resets the count.
+- **NSE latency is erratic, not slow.** The same endpoint answers in 0.2s or
+  stalls for 20, and it is not a concurrency effect - measured back to back, the
+  same call pattern ran 1.7s once and 20s the next time. So the defence is a
+  bounded budget, not a tuned pool size. `fetch_bid_details` takes
+  `timeout=BID_DETAIL_TIMEOUT, attempts=2` because it only splits a total the
+  pipeline already has; the primary feeds keep the full retry budget.
+- **All upstreams are fetched in one pool.** `build_ipo_dashboard` issues the
+  three NSE issue feeds, the three OFS feeds, and the GMP scrape together. Run in
+  sequence these summed to ~28s in practice; overlapped they cost roughly the
+  slowest one.
 - **Sources disagree, sometimes a lot.** The consensus reports `low`, `high`,
   `spreadPercent`, and an `agreement` grade alongside the mean, so a single
   outlier is visible rather than averaged away silently.
