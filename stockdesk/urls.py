@@ -15,4 +15,5 @@ urlpatterns = [
     path("", include("market_monitor.urls")),
     path("", include("etf_analysis.urls")),
     path("", include("mutual_funds.urls")),
+    path("", include("ipo.urls")),
 ]

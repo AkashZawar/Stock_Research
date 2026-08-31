@@ -7719,3 +7719,175 @@ body {
     columns: 1;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * IPO Radar tab
+ *
+ * Colours come from the theme variables rather than literals, because the
+ * stylesheet ships several themes that each redefine :root.
+ * ------------------------------------------------------------------------- */
+
+.ipo-content {
+  display: grid;
+  gap: 18px;
+}
+
+.ipo-company-link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  font-weight: 900;
+  line-height: 1.25;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: rgba(15, 118, 110, 0.35);
+  text-underline-offset: 3px;
+}
+
+.ipo-company-link:hover,
+.ipo-company-link:focus {
+  color: var(--teal);
+  outline: none;
+  text-decoration-color: currentColor;
+}
+
+.ipo-table td small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.ipo-board,
+.ipo-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ipo-board.is-mainboard {
+  color: var(--teal-dark);
+  background: var(--soft);
+}
+
+.ipo-board.is-sme {
+  color: var(--amber);
+  background: var(--soft);
+}
+
+.ipo-status.is-open {
+  color: var(--green);
+  background: var(--soft);
+}
+
+.ipo-status.is-upcoming {
+  color: var(--blue);
+  background: var(--soft);
+}
+
+.ipo-status.is-closed {
+  color: var(--muted);
+  background: var(--soft);
+}
+
+.ipo-gmp,
+.ipo-subscription {
+  display: grid;
+  gap: 1px;
+}
+
+.ipo-gmp strong,
+.ipo-subscription strong {
+  font-size: 0.94rem;
+  font-weight: 900;
+}
+
+.ipo-gmp span {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+/* The flag is the column a reader acts on, so it carries a shape and a word in
+   addition to colour - colour alone would not survive a colour-vision
+   deficiency or a greyscale print. */
+.ipo-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  /* The label and score have to stay on one line. The flag sits in the last
+     column of a nine-column table, which squeezes it enough to break
+     "Positive 85/100" across three lines otherwise. */
+  white-space: nowrap;
+}
+
+.ipo-flag-dot {
+  flex: 0 0 auto;
+}
+
+.ipo-flag-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.ipo-flag-label {
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.ipo-flag small {
+  display: inline;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.ipo-flag.is-green .ipo-flag-dot {
+  background: var(--green);
+}
+
+.ipo-flag.is-green .ipo-flag-label {
+  color: var(--green);
+}
+
+.ipo-flag.is-amber .ipo-flag-dot {
+  background: var(--gold);
+}
+
+.ipo-flag.is-amber .ipo-flag-label {
+  color: var(--amber);
+}
+
+.ipo-flag.is-red .ipo-flag-dot {
+  background: var(--red);
+}
+
+.ipo-flag.is-red .ipo-flag-label {
+  color: var(--red);
+}
+
+.ipo-row.is-green td {
+  background: color-mix(in srgb, var(--green) 6%, transparent);
+}
+
+.ipo-row.is-red td {
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+}
+
+.ipo-note {
+  margin: 10px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}

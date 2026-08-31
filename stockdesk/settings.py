@@ -3,7 +3,7 @@
 Key points:
 - ``INSTALLED_APPS`` lists the shared ``core`` app plus one app per workspace
   tab (stock_analysis, agent_desk, recommendations, market_monitor,
-  etf_analysis, mutual_funds).
+  etf_analysis, mutual_funds, ipo).
 - Static files are served from ``public/`` (``STATICFILES_DIRS``) in dev.
 - SQLite database; timezone is Asia/Kolkata.
 - Secret key, debug, and allowed hosts read from environment variables with
@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "market_monitor",
     "etf_analysis",
     "mutual_funds",
+    "ipo",
 ]
 
 MIDDLEWARE = [

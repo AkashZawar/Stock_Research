@@ -1,0 +1,130 @@
+        {% comment %}
+          IPO Radar tab partial (included by core/base.html).
+          Three tables: issues listed in the last 7 days (issue / listing /
+          current price), the open and next-7-day pipeline (GMP consensus,
+          expected listing price, live subscription, flag), and OFS issues that
+          are live, scheduled, or completed in the last 7 days.
+          Driven by public/app.js via /api/ipo.
+        {% endcomment %}
+        <section id="ipoView" class="tab-view is-hidden">
+          <details class="tab-about panel-accent-cyan">
+            <summary>What is this tab for?</summary>
+            <div class="tab-about-body">
+              <p><strong>Use this to judge an IPO before you apply, and to see how recent ones actually did.</strong>
+                It pairs the exchange's own issue and bidding data with a grey-market premium averaged across three
+                independent trackers, so you can see both what the market is paying and how confident that number is.
+                Grey market data is unofficial and unregulated - treat it as sentiment, not as a price.</p>
+              <h4>What it shows you</h4>
+              <ul>
+                <li><b>Listed in the last 7 days</b> - issue price, actual listing price, current price, and whether the listing gain has held</li>
+                <li><b>Open and upcoming issues</b> - price band, dates, and expected listing price for anything open now or opening within 7 days</li>
+                <li><b>GMP consensus</b> - the average premium across trackers, plus how far apart they are</li>
+                <li><b>Live subscription</b> - overall times subscribed, split by QIB, NII, and retail</li>
+                <li><b>Flag</b> - a green, amber, or red read combining premium and demand</li>
+                <li><b>Mainboard and SME</b> - both boards, tagged</li>
+              </ul>
+              <h4>How to read the flag</h4>
+              <p>The flag scores the grey-market premium (55%), overall subscription (30%), and QIB participation (15%),
+                using only the parts that have data yet. A forthcoming issue is scored on premium alone, so it says
+                nothing about demand. QIB money typically arrives on the final day, so a low QIB figure early in a
+                bidding window is normal rather than a warning.</p>
+            </div>
+          </details>
+
+          <section class="monitor-header">
+            <div>
+              <p class="eyebrow">IPO Radar</p>
+              <h2>New listings, live issues, and grey market premium</h2>
+              <p class="muted" id="ipoGenerated"><span class="data-loading"><span class="data-loading-dot"></span><span>Loading IPO data...</span><small>ETA on refresh</small></span></p>
+            </div>
+            <button type="button" id="refreshIpo">Refresh IPOs</button>
+          </section>
+
+          <section id="ipoLoading" class="loading-state is-hidden">
+            <div class="spinner"></div>
+            <p>Loading IPO radar... <span class="eta-blur">ETA 5-20s</span></p>
+          </section>
+
+          <section id="ipoError" class="error-state is-hidden"></section>
+
+          <section id="ipoContent" class="ipo-content is-hidden">
+            <article class="analysis-panel panel-accent-cyan ipo-panel">
+              <div class="section-head">
+                <h3>Open &amp; Upcoming Issues</h3>
+                <span id="ipoPipelineCount" class="pill">Issues</span>
+              </div>
+              <p id="ipoPipelineSummary" class="section-summary"></p>
+              <div class="table-wrap">
+                <table class="monitor-table ipo-table">
+                  <thead>
+                    <tr>
+                      <th>Company</th>
+                      <th>Board</th>
+                      <th>Status</th>
+                      <th>Dates</th>
+                      <th>IPO Price</th>
+                      <th>GMP</th>
+                      <th>Expected Listing</th>
+                      <th>Subscription</th>
+                      <th>Flag</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ipoPipelineRows"></tbody>
+                </table>
+              </div>
+              <p class="muted ipo-note" id="ipoGmpSources">Grey market premium averaged across public trackers.</p>
+            </article>
+
+            <article class="analysis-panel panel-accent-emerald ipo-panel">
+              <div class="section-head">
+                <h3>Listed in the Last 7 Days</h3>
+                <span id="ipoListedCount" class="pill">Listings</span>
+              </div>
+              <p id="ipoListedSummary" class="section-summary"></p>
+              <div class="table-wrap">
+                <table class="monitor-table ipo-table">
+                  <thead>
+                    <tr>
+                      <th>Company</th>
+                      <th>Board</th>
+                      <th>Listed</th>
+                      <th>IPO Price</th>
+                      <th>Listing Price</th>
+                      <th>Current Price</th>
+                      <th>Listing Gain</th>
+                      <th>Vs Issue</th>
+                      <th>Flag</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ipoListedRows"></tbody>
+                </table>
+              </div>
+              <p class="muted ipo-note">Listing price is the first trade-day opening price. Current price is the latest available quote.</p>
+            </article>
+
+            <article class="analysis-panel panel-accent-slate ipo-panel">
+              <div class="section-head">
+                <h3>Offer For Sale (OFS)</h3>
+                <span id="ipoOfsCount" class="pill">OFS</span>
+              </div>
+              <p id="ipoOfsSummary" class="section-summary"></p>
+              <div class="table-wrap is-hidden" id="ipoOfsTableWrap">
+                <table class="monitor-table ipo-table">
+                  <thead>
+                    <tr>
+                      <th>Company</th>
+                      <th>Status</th>
+                      <th>Dates</th>
+                      <th>Floor Price</th>
+                      <th>Market / Cut-off</th>
+                      <th>Discount</th>
+                      <th>Subscription</th>
+                      <th>Flag</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ipoOfsRows"></tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+        </section>

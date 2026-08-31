@@ -37,6 +37,7 @@ const watchlistTab = document.querySelector("#watchlistTab");
 const monitorTab = document.querySelector("#monitorTab");
 const tradeTab = document.querySelector("#tradeTab");
 const searchLogTab = document.querySelector("#searchLogTab");
+const ipoTab = document.querySelector("#ipoTab");
 const analysisView = document.querySelector("#analysisView");
 const agentView = document.querySelector("#agentView");
 const agentForm = document.querySelector("#agentForm");
@@ -50,6 +51,23 @@ const watchlistView = document.querySelector("#watchlistView");
 const monitorView = document.querySelector("#monitorView");
 const tradeView = document.querySelector("#tradeView");
 const searchLogView = document.querySelector("#searchLogView");
+const ipoView = document.querySelector("#ipoView");
+const refreshIpo = document.querySelector("#refreshIpo");
+const ipoLoading = document.querySelector("#ipoLoading");
+const ipoError = document.querySelector("#ipoError");
+const ipoContent = document.querySelector("#ipoContent");
+const ipoGenerated = document.querySelector("#ipoGenerated");
+const ipoPipelineRows = document.querySelector("#ipoPipelineRows");
+const ipoPipelineCount = document.querySelector("#ipoPipelineCount");
+const ipoPipelineSummary = document.querySelector("#ipoPipelineSummary");
+const ipoGmpSources = document.querySelector("#ipoGmpSources");
+const ipoListedRows = document.querySelector("#ipoListedRows");
+const ipoListedCount = document.querySelector("#ipoListedCount");
+const ipoListedSummary = document.querySelector("#ipoListedSummary");
+const ipoOfsRows = document.querySelector("#ipoOfsRows");
+const ipoOfsCount = document.querySelector("#ipoOfsCount");
+const ipoOfsSummary = document.querySelector("#ipoOfsSummary");
+const ipoOfsTableWrap = document.querySelector("#ipoOfsTableWrap");
 const refreshMonitor = document.querySelector("#refreshMonitor");
 const monitorLoading = document.querySelector("#monitorLoading");
 const monitorError = document.querySelector("#monitorError");
@@ -123,6 +141,7 @@ let latestRecommendations = null;
 let latestTradeReferences = null;
 let latestWatchlistItems = null;
 let latestSearchLogs = null;
+let latestIpo = null;
 let latestAssetReports = { etf: null, fund: null };
 let searchTimer = null;
 let assetSearchTimers = { etf: null, fund: null };
@@ -187,6 +206,13 @@ recommendationsTab?.addEventListener("click", () => {
     loadRecommendations(false);
   }
 });
+ipoTab?.addEventListener("click", () => {
+  setActiveTab("ipo");
+  if (!latestIpo) {
+    loadIpo(false);
+  }
+});
+refreshIpo?.addEventListener("click", () => loadIpo(true));
 etfTab.addEventListener("click", () => setActiveTab("etf"));
 fundTab.addEventListener("click", () => setActiveTab("fund"));
 watchlistTab?.addEventListener("click", () => {
@@ -270,6 +296,19 @@ intradayRecommendationRows?.addEventListener("click", async (event) => {
   }
   await analyzeStockFromRecommendation(button.dataset.recommendationSymbol);
 });
+
+// A freshly listed issue has a tradable symbol, so its name doubles as a
+// shortcut into the Stock Analysis tab. Issues that have not listed yet carry
+// no analysisSymbol and are rendered without a target.
+for (const container of [ipoPipelineRows, ipoListedRows, ipoOfsRows]) {
+  container?.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-ipo-symbol]");
+    if (!button || !button.dataset.ipoSymbol) {
+      return;
+    }
+    await analyzeStockFromHeatmap(button.dataset.ipoSymbol);
+  });
+}
 
 watchlistForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -409,7 +448,8 @@ function setActiveTab(tab) {
   const isAgent = tab === "agent" && Boolean(agentView);
   const isTrade = tab === "trade" && Boolean(tradeView);
   const isLogs = tab === "logs" && Boolean(searchLogView);
-  const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isRecommendations && !isAgent && !isTrade && !isLogs;
+  const isIpo = tab === "ipo" && Boolean(ipoView);
+  const isAnalysis = !isEtf && !isFund && !isWatchlist && !isMonitor && !isRecommendations && !isAgent && !isTrade && !isLogs && !isIpo;
   analysisTab.classList.toggle("is-active", isAnalysis);
   agentTab?.classList.toggle("is-active", isAgent);
   recommendationsTab?.classList.toggle("is-active", isRecommendations);
@@ -419,6 +459,7 @@ function setActiveTab(tab) {
   monitorTab.classList.toggle("is-active", isMonitor);
   tradeTab?.classList.toggle("is-active", isTrade);
   searchLogTab?.classList.toggle("is-active", isLogs);
+  ipoTab?.classList.toggle("is-active", isIpo);
   analysisView.classList.toggle("is-hidden", !isAnalysis);
   agentView?.classList.toggle("is-hidden", !isAgent);
   recommendationsView?.classList.toggle("is-hidden", !isRecommendations);
@@ -428,6 +469,7 @@ function setActiveTab(tab) {
   monitorView.classList.toggle("is-hidden", !isMonitor);
   tradeView?.classList.toggle("is-hidden", !isTrade);
   searchLogView?.classList.toggle("is-hidden", !isLogs);
+  ipoView?.classList.toggle("is-hidden", !isIpo);
   // Record the active tab on <body> so CSS shows the hero / "Analyze a stock"
   // header only on the Stock Analysis and Recommendations tabs.
   document.body.dataset.activeTab = isAnalysis ? "analysis" : tab;
@@ -1030,6 +1072,363 @@ function recommendationTone(score) {
 
 async function analyzeStockFromRecommendation(symbol) {
   await analyzeStockFromHeatmap(symbol);
+}
+
+/* ---------------------------------------------------------------------------
+ * IPO Radar tab (/api/ipo)
+ *
+ * Three tables: issues listed in the trailing 7 days with their actual
+ * outcome, the open / next-7-day pipeline with grey-market premium and live
+ * subscription, and OFS.
+ *
+ * Every string below originates from NSE or from a scraped grey-market
+ * aggregator, so all of it is untrusted and must pass through escapeHtml or
+ * displayHtml before it reaches innerHTML.
+ * ------------------------------------------------------------------------- */
+
+async function loadIpo(forceRefresh) {
+  if (!ipoLoading || !ipoError || !ipoContent) {
+    return;
+  }
+
+  ipoLoading.classList.remove("is-hidden");
+  ipoError.classList.add("is-hidden");
+  if (!latestIpo) {
+    ipoContent.classList.add("is-hidden");
+  }
+
+  try {
+    const suffix = forceRefresh ? "?refresh=1" : "";
+    const response = await fetch(`/api/ipo${suffix}`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Could not load IPO data.");
+    }
+    latestIpo = payload;
+    renderIpo(payload);
+    ipoContent.classList.remove("is-hidden");
+  } catch (error) {
+    ipoError.textContent = error.message;
+    ipoError.classList.remove("is-hidden");
+  } finally {
+    ipoLoading.classList.add("is-hidden");
+  }
+}
+
+function renderIpo(payload) {
+  const pipeline = payload.pipeline || [];
+  const listed = payload.recentlyListed || [];
+  const counts = payload.counts || {};
+
+  if (ipoGenerated) {
+    ipoGenerated.textContent = `Updated ${formatDateTime(payload.generatedAt)} · ${payload.source || "public data"}`;
+  }
+
+  setText("#ipoPipelineCount", pipeline.length ? `${counts.open || 0} open · ${counts.upcoming || 0} upcoming` : "No issues");
+  setText(
+    "#ipoPipelineSummary",
+    pipeline.length
+      ? "Issues accepting bids now or opening within the next 7 days. Expected listing price is the cap price plus the averaged grey market premium."
+      : "No IPO is open or scheduled to open in the next 7 days."
+  );
+
+  setText("#ipoListedCount", listed.length ? `${listed.length} listings` : "No listings");
+  setText(
+    "#ipoListedSummary",
+    listed.length
+      ? "Issues that listed in the last 7 days, with the listing-day open and where they trade now."
+      : "No IPO listed in the last 7 days."
+  );
+
+  renderIpoGmpSources(payload);
+  renderIpoPipelineRows(pipeline);
+  renderIpoListedRows(listed);
+  renderIpoOfs(payload.ofs || {});
+  annotateTableCells("#ipoContent .monitor-table");
+  validateRenderedData(ipoContent);
+}
+
+function renderIpoGmpSources(payload) {
+  if (!ipoGmpSources) {
+    return;
+  }
+  const sources = payload.gmpSources || [];
+  const live = sources.filter((source) => source.ok).map((source) => source.name);
+  const parts = [];
+  parts.push(
+    live.length
+      ? `GMP averaged across ${live.length} tracker${live.length === 1 ? "" : "s"}: ${live.join(", ")}.`
+      : "No grey market tracker responded."
+  );
+  parts.push("Grey market data is unofficial and unregulated - treat it as sentiment, not a quote.");
+  for (const note of payload.notes || []) {
+    parts.push(note);
+  }
+  ipoGmpSources.textContent = parts.join(" ");
+}
+
+// The flag is the single thing a reader acts on, so it renders as a coloured
+// dot plus a word rather than colour alone, which would be invisible to anyone
+// who cannot distinguish red from green.
+function ipoFlagMarkup(recommendation) {
+  const flag = recommendation?.flag || "grey";
+  const label = recommendation?.label || "No signal";
+  const reason = recommendation?.reason || "";
+  const score = Number.isFinite(recommendation?.score) ? `${Math.round(recommendation.score)}/100` : "";
+  return `
+    <span class="ipo-flag is-${escapeHtml(flag)}" title="${escapeHtml(reason)}">
+      <span class="ipo-flag-dot" aria-hidden="true"></span>
+      <span class="ipo-flag-label">${escapeHtml(label)}</span>
+      ${score ? `<small>${escapeHtml(score)}</small>` : ""}
+    </span>
+  `;
+}
+
+function ipoBoardMarkup(board) {
+  const value = board === "SME" ? "SME" : "Mainboard";
+  return `<span class="ipo-board is-${value.toLowerCase()}">${escapeHtml(value)}</span>`;
+}
+
+function formatIpoDate(value) {
+  if (!value) {
+    return "";
+  }
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(parsed);
+}
+
+function formatIpoBand(low, high) {
+  if (Number.isFinite(low) && Number.isFinite(high) && low !== high) {
+    return `${formatMoney(low, "INR")} - ${formatMoney(high, "INR")}`;
+  }
+  const single = Number.isFinite(high) ? high : low;
+  return Number.isFinite(single) ? formatMoney(single, "INR") : loadingText("price band");
+}
+
+function ipoGmpMarkup(gmp) {
+  if (!gmp || !Number.isFinite(gmp.value)) {
+    return `<span class="muted">Not quoted</span>`;
+  }
+  const percent = Number.isFinite(gmp.percent) ? `${gmp.percent >= 0 ? "+" : ""}${gmp.percent.toFixed(1)}%` : "";
+  const range =
+    Number.isFinite(gmp.low) && Number.isFinite(gmp.high) && gmp.low !== gmp.high
+      ? `${formatMoney(gmp.low, "INR")}-${formatMoney(gmp.high, "INR")}`
+      : "";
+  const detail = gmp.sources
+    .map((source) => `${source.source}: ${Number.isFinite(source.gmp) ? source.gmp : "-"}`)
+    .join(" | ");
+  return `
+    <div class="ipo-gmp" title="${escapeHtml(detail)}">
+      <strong class="${changeClass(gmp.value)}">${escapeHtml(formatMoney(gmp.value, "INR"))}</strong>
+      ${percent ? `<span class="${changeClass(gmp.percent)}">${escapeHtml(percent)}</span>` : ""}
+      <small>${escapeHtml(`${gmp.sourceCount} source${gmp.sourceCount === 1 ? "" : "s"} · ${gmp.agreement} agreement`)}</small>
+      ${range ? `<small>range ${escapeHtml(range)}</small>` : ""}
+    </div>
+  `;
+}
+
+function ipoSubscriptionMarkup(subscription, status) {
+  if (!subscription || !Number.isFinite(subscription.total)) {
+    return status === "Upcoming"
+      ? `<span class="muted">Bidding not open</span>`
+      : `<span class="muted">Not published</span>`;
+  }
+  const legs = [
+    ["QIB", subscription.qib],
+    ["NII", subscription.nii],
+    ["Retail", subscription.retail]
+  ].filter(([, value]) => Number.isFinite(value));
+
+  return `
+    <div class="ipo-subscription">
+      <strong>${escapeHtml(`${subscription.total.toFixed(2)}x`)}</strong>
+      ${
+        legs.length
+          ? `<small>${escapeHtml(legs.map(([name, value]) => `${name} ${value.toFixed(2)}x`).join(" · "))}</small>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderIpoPipelineRows(items) {
+  if (!ipoPipelineRows) {
+    return;
+  }
+  ipoPipelineRows.innerHTML = "";
+  if (!items.length) {
+    ipoPipelineRows.innerHTML =
+      "<tr><td colspan=\"9\">No IPO is open or opening in the next 7 days.</td></tr>";
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.className = `ipo-row is-${(item.recommendation?.flag || "grey")}`;
+    const dates = [formatIpoDate(item.openDate), formatIpoDate(item.closeDate)].filter(Boolean).join(" - ");
+    const expected = item.gmp?.expectedListingPrice;
+    const expectedUpside =
+      Number.isFinite(expected) && Number.isFinite(item.priceBandHigh) && item.priceBandHigh
+        ? ((expected - item.priceBandHigh) / item.priceBandHigh) * 100
+        : null;
+
+    row.innerHTML = `
+      <td>
+        <button class="ipo-company-link" type="button" data-ipo-symbol="${escapeHtml(item.analysisSymbol || "")}">${displayHtml(item.company, "company")}</button>
+        <small>${escapeHtml(item.symbol || "")}</small>
+      </td>
+      <td>${ipoBoardMarkup(item.board)}</td>
+      <td><span class="ipo-status is-${escapeHtml((item.status || "").toLowerCase())}">${displayHtml(item.status, "status")}</span></td>
+      <td>${dates ? escapeHtml(dates) : loadingMarkup("dates")}</td>
+      <td>${escapeHtml(formatIpoBand(item.priceBandLow, item.priceBandHigh))}</td>
+      <td>${ipoGmpMarkup(item.gmp)}</td>
+      <td>
+        ${
+          Number.isFinite(expected)
+            ? `<strong>${escapeHtml(formatMoney(expected, "INR"))}</strong>${
+                Number.isFinite(expectedUpside)
+                  ? `<small class="${changeClass(expectedUpside)}">${escapeHtml(`${expectedUpside >= 0 ? "+" : ""}${expectedUpside.toFixed(1)}%`)}</small>`
+                  : ""
+              }`
+            : `<span class="muted">Needs GMP</span>`
+        }
+      </td>
+      <td>${ipoSubscriptionMarkup(item.subscription, item.status)}</td>
+      <td>${ipoFlagMarkup(item.recommendation)}</td>
+    `;
+    fragment.appendChild(row);
+  }
+  ipoPipelineRows.appendChild(fragment);
+}
+
+// Yahoo carries no quote for many SME listings. That is a settled absence
+// rather than a pending fetch, so it must not render as the usual loading
+// placeholder - that placeholder would spin forever.
+function ipoPriceCell(value) {
+  return Number.isFinite(value)
+    ? escapeHtml(formatMoney(value, "INR"))
+    : `<span class="muted">No quote feed</span>`;
+}
+
+function ipoPercentCell(value) {
+  return Number.isFinite(value)
+    ? `<span class="${changeClass(value)}">${escapeHtml(formatPercentValue(value))}</span>`
+    : `<span class="muted">No quote feed</span>`;
+}
+
+function renderIpoListedRows(items) {
+  if (!ipoListedRows) {
+    return;
+  }
+  ipoListedRows.innerHTML = "";
+  if (!items.length) {
+    ipoListedRows.innerHTML = "<tr><td colspan=\"9\">No IPO listed in the last 7 days.</td></tr>";
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    const row = document.createElement("tr");
+    row.className = `ipo-row is-${(item.recommendation?.flag || "grey")}`;
+    row.innerHTML = `
+      <td>
+        <button class="ipo-company-link" type="button" data-ipo-symbol="${escapeHtml(item.analysisSymbol || "")}">${displayHtml(item.company, "company")}</button>
+        <small>${escapeHtml(item.symbol || "")}</small>
+      </td>
+      <td>${ipoBoardMarkup(item.board)}</td>
+      <td>${item.listingDate ? escapeHtml(formatIpoDate(item.listingDate)) : loadingMarkup("listing date")}</td>
+      <td>${escapeHtml(formatMoney(item.issuePrice, "INR"))}</td>
+      <td>${ipoPriceCell(item.listingPrice)}</td>
+      <td>${ipoPriceCell(item.currentPrice)}</td>
+      <td>${ipoPercentCell(item.listingGainPercent)}</td>
+      <td>${ipoPercentCell(item.vsIssuePercent)}</td>
+      <td>${ipoFlagMarkup(item.recommendation)}</td>
+    `;
+    fragment.appendChild(row);
+  }
+  ipoListedRows.appendChild(fragment);
+}
+
+function ipoOfsStatusClass(status) {
+  if (status === "Active") return "is-open";
+  if (status === "Upcoming" || status === "Scheduled") return "is-upcoming";
+  return "is-closed";
+}
+
+// An OFS splits its book by investor category rather than reporting one
+// overall multiple, so the legs are the headline here. The archive feed is the
+// exception: it only ever carries a single total.
+function ipoOfsSubscriptionMarkup(subscription) {
+  const legs = [
+    ["Non-retail", subscription?.nonRetail],
+    ["Retail", subscription?.retail],
+    ["Employee", subscription?.employee]
+  ].filter(([, value]) => Number.isFinite(value));
+
+  if (legs.length) {
+    const text = legs.map(([name, value]) => `${name} ${value.toFixed(2)}x`).join(" · ");
+    return `<div class="ipo-subscription"><small>${escapeHtml(text)}</small></div>`;
+  }
+  if (Number.isFinite(subscription?.total)) {
+    return `<div class="ipo-subscription"><strong>${escapeHtml(`${subscription.total.toFixed(2)}x`)}</strong></div>`;
+  }
+  return `<span class="muted">No bids yet</span>`;
+}
+
+function renderIpoOfs(ofs) {
+  const rows = ofs.rows || [];
+  const available = Boolean(ofs.available) && rows.length > 0;
+
+  // Deliberately not the word "unavailable": validateRenderedData rewrites any
+  // short element containing it into a loading placeholder, which would leave
+  // this pill spinning forever.
+  setText("#ipoOfsCount", available ? `${rows.length} offers` : "None active");
+  setText("#ipoOfsSummary", ofs.note || "");
+
+  ipoOfsTableWrap?.classList.toggle("is-hidden", !available);
+  if (!ipoOfsRows) {
+    return;
+  }
+  // Cleared before the early return so a refresh that loses the feed does not
+  // leave the previous run's rows behind a hidden wrapper.
+  ipoOfsRows.innerHTML = "";
+  if (!available) {
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    row.className = `ipo-row is-${(item.recommendation?.flag || "grey")}`;
+    const dates = [...new Set([formatIpoDate(item.openDate), formatIpoDate(item.closeDate)].filter(Boolean))].join(" - ");
+    // A live offer is judged against the market price; a closed one against the
+    // price it actually allotted at. Both sit in the same column.
+    const reference = Number.isFinite(item.currentPrice) ? item.currentPrice : item.cutOffPrice;
+    const referenceLabel = Number.isFinite(item.currentPrice) ? "market" : "allotted";
+    row.innerHTML = `
+      <td>
+        <button class="ipo-company-link" type="button" data-ipo-symbol="${escapeHtml(item.analysisSymbol || "")}">${displayHtml(item.company, "company")}</button>
+        <small>${escapeHtml(item.symbol || "")}</small>
+      </td>
+      <td><span class="ipo-status ${ipoOfsStatusClass(item.status)}">${escapeHtml(item.status || "")}</span></td>
+      <td>${dates ? escapeHtml(dates) : `<span class="muted">Not announced</span>`}</td>
+      <td>${escapeHtml(formatMoney(item.floorPrice, "INR"))}</td>
+      <td>${
+        Number.isFinite(reference)
+          ? `${escapeHtml(formatMoney(reference, "INR"))}<small>${escapeHtml(referenceLabel)}</small>`
+          : `<span class="muted">Not open</span>`
+      }</td>
+      <td>${ipoPercentCell(item.discountPercent)}</td>
+      <td>${ipoOfsSubscriptionMarkup(item.subscription)}</td>
+      <td>${ipoFlagMarkup(item.recommendation)}</td>
+    `;
+    fragment.appendChild(row);
+  }
+  ipoOfsRows.appendChild(fragment);
 }
 
 async function loadTradeReferences() {

@@ -30,6 +30,7 @@ owns its own `views.py`, `urls.py`, and `templates/<app>/tab.html`.
 - `market_monitor/` owns the market monitor (`/api/market-monitor`).
 - `etf_analysis/` owns ETF research (`/api/etf/search`, `/api/etf/analyze`).
 - `mutual_funds/` owns mutual fund research (`/api/mutual-funds/search`, `/api/mutual-funds/analyze`).
+- `ipo/` owns the IPO radar (`/api/ipo`), including its own `services.py` data layer.
 - `public/` contains the shared static CSS and JavaScript served by Django in development.
 
 `core/templates/core/base.html` is the page shell; it includes each tab app's
@@ -49,6 +50,7 @@ short:
 | Market Monitor | Find what is moving today and pick candidates to research | Whole market |
 | ETF Analysis | Judge an ETF's risk-adjusted return and how closely it tracks | A single fund |
 | Mutual Funds | Assess a scheme before an SIP or lump sum, using rolling returns | A single scheme |
+| IPO Radar | Judge an IPO before applying, and see how recent listings actually did | Current issues |
 
 The usual path is Market Monitor or Recommendations to find a name, then Stock
 Analysis to verify it, then Agent Desk to stress-test the reasoning.
@@ -66,6 +68,7 @@ here:
 - [`market_monitor/`](market_monitor/README.md) - Market Monitor tab
 - [`etf_analysis/`](etf_analysis/README.md) - ETF Analysis tab
 - [`mutual_funds/`](mutual_funds/README.md) - Mutual Funds tab
+- [`ipo/`](ipo/README.md) - IPO Radar tab (GMP consensus, subscription, listings)
 - [`stockdesk/`](stockdesk/README.md) - Django project config (settings, URLs, WSGI/ASGI)
 - [`public/`](public/README.md) - shared static assets (`app.js`, `styles.css`, `cursor.js`)
 
@@ -86,6 +89,7 @@ here:
 - `/api/recommendations?refresh=1`
 - `/api/search-logs?limit=100`
 - `/api/market-monitor?refresh=1`
+- `/api/ipo?refresh=1`
 
 The app uses public Yahoo Finance, SEC, and Screener.in endpoints where available. For production use, replace these providers with a licensed market data API.
 

@@ -1,0 +1,97 @@
+# ipo - IPO Radar tab
+
+Owns the IPO tab: issues that listed in the last 7 days with their actual
+outcome, issues open now or opening within 7 days with grey-market premium and
+live subscription, and OFS issues that are live, scheduled, or completed in the
+last 7 days.
+
+Unlike the other tabs, the data layer lives here in `services.py` rather than in
+`core.services`, following the `agent_desk/agents.py` precedent - the scraping
+and consensus logic is specific to this tab. Shared helpers (`cached`,
+`fetch_nse_json_with_session`, `fetch_chart_range`, `settle_map`) are imported
+from `core.services`.
+
+## Files
+
+| File | What it is for |
+|------|----------------|
+| `services.py` | All data collection: NSE issue/subscription feeds, the three-source GMP consensus, listing/current price enrichment, and flag scoring. |
+| `views.py` | `ipo` endpoint. Supports `?refresh=1`. |
+| `urls.py` | Route `/api/ipo`. |
+| `apps.py` | Django app config. |
+| `tests.py` | Parsing, name matching, GMP consensus, flag scoring, section assembly, endpoint. |
+| `templates/ipo/tab.html` | The three tables. Included by `core/base.html`. |
+
+## Endpoints
+
+- `GET /api/ipo` - cached dashboard (10 minute TTL, keyed by IST date)
+- `GET /api/ipo?refresh=1` - clear the cache and rebuild
+
+## Data sources
+
+| Field | Source |
+|-------|--------|
+| Issue price, price band, dates, issue size | NSE `/api/all-upcoming-issues?category=ipo` |
+| Live subscription (overall) | NSE `/api/ipo-current-issue` |
+| Subscription by QIB / NII / Retail | NSE `/api/ipo-detail?symbol=&series=` |
+| Listing date, final issue price | NSE `/api/public-past-issues` |
+| Listing price, current price | Yahoo Finance chart (first bar's open, latest close) |
+| GMP, expected listing price | IPO Ji, IPO Watch, IPO Premium (scraped, averaged) |
+| Live OFS floor price, LTP, subscription by category | NSE `/api/live-ofs-active-issues` |
+| Scheduled OFS | NSE `/api/all-upcoming-issues?category=forthcoming` |
+| Completed OFS, allotment price | NSE `/api/live-ofs-past-issues` |
+
+## Things worth knowing before changing this
+
+- **GMP has no official source.** The three aggregators are scraped from raw
+  HTML. Chittorgarh and InvestorGain were evaluated and rejected because they
+  render their tables client-side, so nothing usable arrives in the response
+  body. If a scraper's table layout changes, `collect_gmp_quotes` drops that
+  source and reports it in `notes` rather than failing the request.
+- **Sources disagree, sometimes a lot.** The consensus reports `low`, `high`,
+  `spreadPercent`, and an `agreement` grade alongside the mean, so a single
+  outlier is visible rather than averaged away silently.
+- **Company names differ across all four feeds.** `normalize_name` strips
+  suffixes, board tags and punctuation; `names_match` requires the first two
+  significant tokens to agree so that "Priority Jewels" does not match
+  "Priority Technologies".
+- **NSE omits the price band for SME issues** in its live feeds, so it is
+  borrowed from whichever aggregator reports one (`gmp_band_high`). Without a
+  cap price there is no GMP percentage and no expected listing price.
+- **NSE's past-issues feed mixes bonds and NCDs in with equity.** Only
+  `securityType` in `EQUITY_SECURITY_TYPES` is kept.
+- **Scraped HTML is untrusted.** `clean_text` strips markup and caps length on
+  every string, numbers are coerced through `to_number`, and no provider URL is
+  passed to the client. The frontend escapes everything again before it reaches
+  `innerHTML`.
+- **The OFS category is `forthcoming`, not `ofs`.** `all-upcoming-issues?category=ofs`
+  is a dead parameter that answers with an empty *object*; a live category answers
+  with a list, which is how the two are told apart. The OFS board is assembled
+  from three feeds: `/api/live-ofs-active-issues`, `/api/all-upcoming-issues?category=forthcoming`,
+  and `/api/live-ofs-past-issues` (an archive back to 2012, trimmed to 7 days).
+- **One OFS spans two sessions.** Non-retail bids on day one and retail on day
+  two, and NSE reports each as its own series row. `build_active_ofs` and
+  `build_recent_ofs` merge them into a single window per company; the active feed
+  keys its row list under `data` on one group and `rows` on another, so both are
+  read.
+- **Archive symbols are not tradable.** The OFS archive tags rows with the offer
+  series (`HINDCOPPERCUMU`), so `ofs_base_symbol` strips the suffix before the
+  symbol reaches the analysis button.
+
+## The flag
+
+`upcoming_flag` scores GMP percentage (55), overall subscription (30), and QIB
+participation (15), then renormalises over whichever components have data. A
+forthcoming issue has no bids yet, so it is scored on premium alone rather than
+being penalised for absent subscription. Green is 60+, amber 35-59, red below
+35, and grey means nothing has been published yet.
+
+`listed_flag` scores an already-listed issue on how it has actually traded:
+green if it holds 10%+ above its issue price, red if it is at or below issue,
+amber in between.
+
+`ofs_flag` scores discount (65) and demand (35). The discount is the point of an
+OFS - shares are offered below market - so how far the market trades above the
+floor is the headline, and subscription is the confirming signal, because an
+offer that clears many times over usually prices well above the floor and erodes
+that discount. Completed and not-yet-open offers are grey rather than scored.
