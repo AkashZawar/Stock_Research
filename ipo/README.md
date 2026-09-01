@@ -39,7 +39,7 @@ from `core.services`.
 | FII / DII / mutual-fund split of the QIB book | NSE `/api/ipo-detail`, `bidDetails` rows `1(a)`-`1(d)` |
 | Listing date, final issue price | NSE `/api/public-past-issues` |
 | Listing price, current price | Yahoo Finance chart (first bar's open, latest close) |
-| GMP, expected listing price | IPO Ji, IPO Watch, IPO Premium, IPO Central, IPO360 (scraped, averaged) |
+| GMP, expected listing price | IPO Ji, IPO Watch, IPO Premium, IPO Central, IPO360 (scraped; median across them) |
 | Live OFS floor price, LTP, subscription by category | NSE `/api/live-ofs-active-issues` |
 | Scheduled OFS | NSE `/api/all-upcoming-issues?category=forthcoming` |
 | Completed OFS, allotment price | NSE `/api/live-ofs-past-issues` |
@@ -117,9 +117,17 @@ from `core.services`.
   three NSE issue feeds, the three OFS feeds, and the GMP scrape together. Run in
   sequence these summed to ~28s in practice; overlapped they cost roughly the
   slowest one.
-- **Sources disagree, sometimes a lot.** The consensus reports `low`, `high`,
-  `spreadPercent`, and an `agreement` grade alongside the mean, so a single
-  outlier is visible rather than averaged away silently.
+- **Sources disagree, sometimes a lot, so the consensus is a median.** Not a
+  mean: measured across one session, IPO Ji sat below the other four on every
+  single issue, and on Rays of Belief quoted 14 where the rest said 48, 48 and
+  50 - a mean published 40, a premium no source quoted. `low`, `high`,
+  `spreadPercent` and an `agreement` grade ride alongside, so the outlier stays
+  visible rather than being smoothed away.
+- **`agreement` is judged against the median's magnitude, never a mean.**
+  Dividing by a mean broke on two real shapes: quotes straddling zero averaged to
+  zero and reported as `high` (the most contradictory case possible), and an
+  all-negative set gave a negative denominator that inverted the scale. Sources
+  that disagree on the sign are graded `low` before any arithmetic runs.
 - **Company names differ across all four feeds.** `normalize_name` strips
   suffixes, board tags and punctuation; `names_match` requires the first two
   significant tokens to agree so that "Priority Jewels" does not match
@@ -127,8 +135,14 @@ from `core.services`.
 - **NSE omits the price band for SME issues** in its live feeds, so it is
   borrowed from whichever aggregator reports one (`gmp_band_high`). Without a
   cap price there is no GMP percentage and no expected listing price.
-- **NSE's past-issues feed mixes bonds and NCDs in with equity.** Only
-  `securityType` in `EQUITY_SECURITY_TYPES` is kept.
+- **NSE's past-issues feed mixes bonds and NCDs in with equity, and
+  `securityType` alone does not catch them.** NSE files Vision Infra's 11.50%
+  2030 NCD as `SME`, so it reached the listings table as an issue priced at
+  1,00,000 rupees next to a price band of 155-163. `is_equity_row` also rejects
+  debt-series symbols - coupon, issuer, maturity year, as in `1150VIES30` - and
+  face-value issue prices far above the stated band. Equity tickers that open
+  with a digit (`5PAISA`, `63MOONS`, `20MICRONS`) do not also close with one,
+  which is what keeps them.
 - **Scraped HTML is untrusted.** `clean_text` strips markup and caps length on
   every string, numbers are coerced through `to_number`, and no provider URL is
   passed to the client. The frontend escapes everything again before it reaches
@@ -150,10 +164,36 @@ from `core.services`.
 ## The flag
 
 `upcoming_flag` scores GMP percentage (55), overall subscription (30), and QIB
-participation (15), then renormalises over whichever components have data. A
-forthcoming issue has no bids yet, so it is scored on premium alone rather than
-being penalised for absent subscription. Green is 60+, amber 35-59, red below
-35, and grey means nothing has been published yet.
+participation (15) over whichever components have data, then pulls the result
+toward 50 by however much evidence is missing. Green is 60+, amber 35-59, red
+below 35, and grey means nothing has been published yet.
+
+The shrink matters, because renormalising alone conflated two different things:
+how good the signals look, and how much signal there is. A single unverified
+grey-market quote scored a perfect 100 - identical to an issue whose premium was
+confirmed by 25x subscription and 6x QIB demand. Certainty about a fifth of the
+evidence was published as certainty about all of it.
+
+Three inputs set that confidence, and it is deliberately **not** derived from the
+scoring weights above, which measure prediction rather than reliability:
+
+- **How many trackers quote the premium.** One is a rumour, four agreeing is
+  closer to a measurement (`GMP_CORROBORATION`).
+- **How far through its bidding window the issue is** (`bidding_progress`).
+  Indian books fill on the last day, so an early figure is incomplete, not weak.
+  Rays of Belief was flagged red at 0.02x within an hour of opening, on the same
+  footing as an issue that had failed to fill over three days.
+- **Whether the figures come from the exchange at all.** Subscription is real
+  money bid; GMP is an unregulated market with no published trades. Deriving
+  confidence from the scoring weights made 25x subscribed with 6x QIB count for
+  less than four websites agreeing on a number.
+
+Below `MIN_CONFIDENCE_FOR_VERDICT` the flag reads **Indicative** and states no
+verdict in either direction - one source quoting a steep discount is no more
+conclusive than one quoting a steep premium. A full grey-market consensus and a
+full set of exchange bidding figures each clear that bar alone, so a forthcoming
+issue can still be called; it just needs corroboration rather than one site's
+say-so.
 
 `listed_flag` scores an already-listed issue on how it has actually traded:
 green if it holds 10%+ above its issue price, red if it is at or below issue,

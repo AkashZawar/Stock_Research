@@ -8,7 +8,7 @@ Run with ``python manage.py test ipo``.
 """
 import json
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
@@ -128,6 +128,51 @@ class GmpConsensusTests(SimpleTestCase):
         quotes = {"src": [{"company": "Ashutosh Fibre", "gmp": 37.0, "bandHigh": 92.0, "expectedListing": None}]}
         self.assertEqual(services.gmp_band_high("Ashutosh Fibre Limited", quotes), 92.0)
 
+    def test_one_dissenting_source_does_not_move_the_headline_premium(self):
+        # Measured live on Rays of Belief: three sources said 48, 48 and 50 while
+        # a fourth said 14. The mean published 40 - a premium no source quoted.
+        consensus = services.gmp_consensus(
+            "ESDS Software Solution Limited", self.build_quotes([48.0, 14.0, 48.0, 50.0]), 429.0
+        )
+        self.assertEqual(consensus["value"], 48.0)
+        # The outlier is not hidden, only kept out of the headline.
+        self.assertEqual(consensus["low"], 14.0)
+        self.assertEqual(consensus["sourceCount"], 4)
+
+    def test_expected_listing_price_follows_the_same_consensus(self):
+        consensus = services.gmp_consensus(
+            "ESDS Software Solution Limited", self.build_quotes([48.0, 14.0, 48.0, 50.0]), 429.0
+        )
+        self.assertEqual(consensus["expectedListingPrice"], 477.0)
+        self.assertEqual(consensus["percent"], round(48.0 / 429.0 * 100, 2))
+
+
+class GmpAgreementTests(SimpleTestCase):
+    def test_sources_that_disagree_on_the_sign_never_read_as_agreeing(self):
+        # These divided the spread by a mean of zero, which reported the two most
+        # contradictory quotes possible as perfect agreement.
+        for values in ([10.0, -10.0], [5.0, -5.0], [20.0, -20.0]):
+            agreement, _ = services.gmp_agreement(values)
+            self.assertEqual(agreement, "low")
+
+    def test_a_negative_centre_does_not_invert_the_scale(self):
+        # Dividing by a negative mean made wider spreads score as closer ones.
+        agreement, spread = services.gmp_agreement([-5.0, -50.0])
+        self.assertEqual(agreement, "low")
+        self.assertGreater(spread, 0)
+
+    def test_quotes_that_all_say_zero_do_agree(self):
+        self.assertEqual(services.gmp_agreement([0.0, 0.0])[0], "high")
+
+    def test_a_single_quote_is_labelled_as_uncorroborated(self):
+        self.assertEqual(services.gmp_agreement([42.0])[0], "single source")
+
+    def test_dispersion_is_judged_against_the_size_of_the_premium(self):
+        # A 6-rupee gap is noise on a 300-rupee premium and a rout on a 20-rupee one.
+        self.assertEqual(services.gmp_agreement([297.0, 303.0])[0], "high")
+        self.assertEqual(services.gmp_agreement([17.0, 23.0])[0], "moderate")
+        self.assertEqual(services.gmp_agreement([15.0, 25.0])[0], "low")
+
 
 class RecommendationFlagTests(SimpleTestCase):
     def test_strong_premium_and_heavy_subscription_flag_green(self):
@@ -150,7 +195,8 @@ class RecommendationFlagTests(SimpleTestCase):
         # Subscription is unknowable before bidding opens. Scoring it as zero
         # would flag every forthcoming issue red regardless of its premium.
         result = services.upcoming_flag({"percent": 40.0, "sourceCount": 3, "agreement": "high"}, None, False)
-        self.assertEqual(result["flag"], "green")
+        self.assertNotEqual(result["flag"], "red")
+        self.assertGreater(result["score"], 50.0)
         self.assertIn("bidding not open yet", result["reason"])
 
     def test_no_data_at_all_yields_grey_rather_than_a_verdict(self):
@@ -162,7 +208,7 @@ class RecommendationFlagTests(SimpleTestCase):
         agreed = services.upcoming_flag({"percent": 30.0, "sourceCount": 3, "agreement": "high"}, None, False)
         scattered = services.upcoming_flag({"percent": 30.0, "sourceCount": 3, "agreement": "low"}, None, False)
         self.assertLess(scattered["score"], agreed["score"])
-        self.assertIn("sources disagree widely", scattered["reason"])
+        self.assertIn("disagree widely", scattered["reason"])
 
     def test_a_listed_issue_trading_below_its_issue_price_flags_red(self):
         self.assertEqual(services.listed_flag(15.6, -18.6, -5.9)["flag"], "red")
@@ -172,6 +218,88 @@ class RecommendationFlagTests(SimpleTestCase):
 
     def test_a_listed_issue_with_no_price_data_yields_grey(self):
         self.assertEqual(services.listed_flag(None, None, None)["flag"], "grey")
+
+    def test_one_unverified_quote_does_not_score_like_a_confirmed_issue(self):
+        # The defect this guards: renormalising over the weights present made a
+        # lone grey-market quote score a perfect 100, the same as an issue whose
+        # premium was confirmed by heavy subscription and QIB demand.
+        lone = services.upcoming_flag({"percent": 30.0, "sourceCount": 1, "agreement": "single source"}, None, False)
+        confirmed = services.upcoming_flag(
+            {"percent": 30.0, "sourceCount": 4, "agreement": "high"},
+            {"total": 25.0, "qib": 6.0},
+            True,
+        )
+        self.assertLess(lone["score"], confirmed["score"])
+        self.assertLess(lone["confidence"], confirmed["confidence"])
+        self.assertEqual(confirmed["flag"], "green")
+
+    def test_a_thin_signal_is_not_given_a_verdict_in_either_direction(self):
+        for percent in (30.0, -30.0):
+            result = services.upcoming_flag(
+                {"percent": percent, "sourceCount": 1, "agreement": "single source"}, None, False
+            )
+            self.assertEqual(result["flag"], "amber")
+
+    def test_exchange_bidding_alone_is_confident_enough_to_call(self):
+        # Confidence follows how good the evidence is, not how much it predicts.
+        # Deriving it from the scoring weights made real money bid on the exchange
+        # count for less than four websites agreeing on a number.
+        result = services.upcoming_flag(None, {"total": 25.0, "qib": 6.0}, True)
+        self.assertEqual(result["flag"], "green")
+        self.assertGreaterEqual(result["confidence"], 50.0)
+
+    def test_an_empty_book_on_day_one_is_not_judged_like_an_empty_book_at_close(self):
+        # Rays of Belief opened at 0.02x and was flagged red within the hour, on
+        # the same footing as an issue that had failed to fill over three days.
+        gmp = {"percent": 20.0, "sourceCount": 4, "agreement": "low"}
+        thin_book = {"total": 0.02, "qib": 0.0}
+        early = services.upcoming_flag(gmp, thin_book, True, 1 / 3)
+        at_close = services.upcoming_flag(gmp, thin_book, True, 1.0)
+        self.assertGreater(early["score"], at_close["score"])
+        self.assertNotEqual(early["flag"], "red")
+        self.assertEqual(at_close["flag"], "red")
+
+    def test_an_incomplete_book_says_so(self):
+        result = services.upcoming_flag(None, {"total": 0.02}, True, 1 / 3)
+        self.assertIn("book still open", result["reason"])
+
+    def test_a_full_book_is_taken_at_face_value(self):
+        result = services.upcoming_flag(None, {"total": 24.0}, True, 1.0)
+        self.assertIn("24.00x overall", result["reason"])
+
+    def test_a_premium_carries_more_weight_the_more_sources_confirm_it(self):
+        scores = [
+            services.upcoming_flag({"percent": 30.0, "sourceCount": count, "agreement": "high"}, None, False)["score"]
+            for count in (1, 2, 3, 4)
+        ]
+        self.assertEqual(scores, sorted(scores))
+
+
+class BiddingProgressTests(SimpleTestCase):
+    OPEN = date(2026, 9, 1)
+    CLOSE = date(2026, 9, 3)
+
+    def test_progress_runs_from_the_first_day_to_the_last(self):
+        self.assertAlmostEqual(services.bidding_progress(self.OPEN, self.CLOSE, date(2026, 9, 1)), 1 / 3)
+        self.assertAlmostEqual(services.bidding_progress(self.OPEN, self.CLOSE, date(2026, 9, 2)), 2 / 3)
+        self.assertEqual(services.bidding_progress(self.OPEN, self.CLOSE, date(2026, 9, 3)), 1.0)
+
+    def test_an_issue_that_has_not_opened_has_made_no_progress(self):
+        self.assertEqual(services.bidding_progress(self.OPEN, self.CLOSE, date(2026, 8, 31)), 0.0)
+
+    def test_a_closed_book_stays_complete(self):
+        self.assertEqual(services.bidding_progress(self.OPEN, self.CLOSE, date(2026, 9, 9)), 1.0)
+
+    def test_a_single_day_window_is_complete_on_its_only_day(self):
+        self.assertEqual(services.bidding_progress(self.OPEN, self.OPEN, self.OPEN), 1.0)
+
+    def test_an_undated_window_is_taken_at_face_value(self):
+        # Whatever figure is published is all there is to go on.
+        self.assertEqual(services.bidding_progress(None, self.CLOSE, self.OPEN), 1.0)
+        self.assertEqual(services.bidding_progress(self.OPEN, None, self.OPEN), 1.0)
+
+    def test_a_window_that_closes_before_it_opens_is_not_trusted_to_scale_anything(self):
+        self.assertEqual(services.bidding_progress(self.CLOSE, self.OPEN, self.OPEN), 1.0)
 
 
 class RecentlyListedTests(SimpleTestCase):
@@ -221,6 +349,33 @@ class RecentlyListedTests(SimpleTestCase):
         with patch.object(services, "listing_and_current_price", return_value={}):
             rows = services.build_recently_listed([debt], date(2026, 8, 31))
         self.assertEqual(rows, [])
+
+    def test_a_bond_filed_under_an_equity_type_is_still_excluded(self):
+        # NSE tags Vision Infra's 11.50% 2030 NCD as securityType "SME", so the
+        # type alone let it through: it reached the table as an issue priced at
+        # 1,00,000 rupees beside a price band of 155 to 163. The symbol follows
+        # the debt convention of coupon, issuer, maturity year, and the price is
+        # the face value of a bond.
+        bond = self.past_issue(
+            company="Vision Infra Equipment Solutions Limited",
+            symbol="1150VIES30",
+            securityType="SME",
+            issuePrice="100000",
+            priceRange="Rs.155 to Rs.163",
+        )
+        with patch.object(services, "listing_and_current_price", return_value={}):
+            rows = services.build_recently_listed([bond], date(2026, 8, 31))
+        self.assertEqual(rows, [])
+
+    def test_equity_tickers_that_begin_with_a_digit_are_not_mistaken_for_bonds(self):
+        # "5PAISA", "63MOONS" and "20MICRONS" are real tickers. A debt series
+        # closes with its maturity year as well as opening with a coupon, which
+        # is what separates the two.
+        for symbol in ("5PAISA", "63MOONS", "20MICRONS", "3IINFOLTD"):
+            row = self.past_issue(symbol=symbol)
+            with patch.object(services, "listing_and_current_price", return_value={}):
+                rows = services.build_recently_listed([row], date(2026, 8, 31))
+            self.assertEqual(len(rows), 1, f"{symbol} was wrongly excluded")
 
     def test_sme_issues_are_kept_and_tagged(self):
         sme = self.past_issue(symbol="FASCINATE", securityType="SME")
@@ -882,6 +1037,11 @@ class NseOutageTests(SimpleTestCase):
 
 
     def gmp_rows(self):
+        # build_ipo_dashboard reads the real clock, so these dates are relative
+        # to it rather than fixed. Written as fixed dates they described an open
+        # issue only on the day they were written, and silently became a closed
+        # one the next morning, failing every assertion that needs a live row.
+        today = datetime.now(services.IST).date()
         return (
             {
                 "IPO Ji": [
@@ -892,8 +1052,8 @@ class NseOutageTests(SimpleTestCase):
                         "expectedListing": 132.0,
                         "status": "Open",
                         "board": "Mainboard",
-                        "openDate": date(2026, 8, 27),
-                        "closeDate": date(2026, 8, 31),
+                        "openDate": today - timedelta(days=4),
+                        "closeDate": today + timedelta(days=1),
                     }
                 ]
             },

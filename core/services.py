@@ -258,37 +258,28 @@ MONEYCONTROL_NSE_SECTOR_MAP = {
     "Telecom": "NIFTY MIDSMALL IT & TELECOM",
 }
 
-INDIA_TRADING_HOLIDAYS_2026 = {
-    date(2026, 1, 26): "Republic Day",
-    date(2026, 3, 3): "Holi",
-    date(2026, 3, 26): "Shri Ram Navami",
-    date(2026, 3, 31): "Shri Mahavir Jayanti",
-    date(2026, 4, 3): "Good Friday",
-    date(2026, 4, 14): "Dr. Baba Saheb Ambedkar Jayanti",
-    date(2026, 5, 1): "Maharashtra Day",
-    date(2026, 5, 28): "Bakri Id",
-    date(2026, 6, 26): "Muharram",
-    date(2026, 9, 14): "Ganesh Chaturthi",
-    date(2026, 10, 2): "Mahatma Gandhi Jayanti",
-    date(2026, 10, 20): "Dussehra",
-    date(2026, 11, 8): "Diwali Laxmi Pujan",
-    date(2026, 11, 10): "Diwali-Balipratipada",
-    date(2026, 11, 24): "Prakash Gurpurb Sri Guru Nanak Dev",
-    date(2026, 12, 25): "Christmas",
+# Holiday calendars are fetched, never written down here. A hardcoded table is
+# wrong twice over: it knows nothing about the next year, and it cannot learn
+# about holidays declared mid-year. The table this replaced was already missing
+# 15-Jan-2026, an election holiday NSE announced after the fact, so the clock
+# called a closed Thursday a trading day.
+NSE_HOLIDAY_PATH = "/api/holiday-master?type=trading"
+
+# Cash-market segment. NSE keys its holiday master by segment and "CM" is the
+# equities one; FO and CD keep their own, occasionally differing, calendars.
+NSE_HOLIDAY_SEGMENT = "CM"
+
+# Index history is used to infer holidays when no calendar is reachable, and it
+# needs corroboration: Yahoo's index series have occasional single-day holes
+# that look exactly like a holiday. 28-Aug-2026 is missing from both ^NSEI and
+# ^BSESN yet RELIANCE.NS traded that day, so an index pair alone is not enough -
+# a liquid stock is the tie-breaker.
+HOLIDAY_PROBE_SYMBOLS = {
+    "india": ("^NSEI", "^BSESN", "RELIANCE.NS"),
+    "us": ("^GSPC", "^DJI", "AAPL"),
 }
 
-US_TRADING_HOLIDAYS_2026 = {
-    date(2026, 1, 1): "New Year's Day",
-    date(2026, 1, 19): "Martin Luther King Jr. Day",
-    date(2026, 2, 16): "Washington's Birthday",
-    date(2026, 4, 3): "Good Friday",
-    date(2026, 5, 25): "Memorial Day",
-    date(2026, 6, 19): "Juneteenth National Independence Day",
-    date(2026, 7, 3): "Independence Day observed",
-    date(2026, 9, 7): "Labor Day",
-    date(2026, 11, 26): "Thanksgiving Day",
-    date(2026, 12, 25): "Christmas Day",
-}
+HOLIDAY_CACHE_SECONDS = 12 * 60 * 60
 
 MARKET_CLOCK_CONFIGS = {
     "india": {
@@ -299,8 +290,7 @@ MARKET_CLOCK_CONFIGS = {
         "regularOpen": datetime_time(9, 15),
         "regularClose": datetime_time(15, 30),
         "weekdays": {0, 1, 2, 3, 4},
-        "holidays": INDIA_TRADING_HOLIDAYS_2026,
-        "earlyCloses": {},
+        "holidayMarket": "india",
         "source": "NSE India cash-market calendar and live market status",
     },
     "us": {
@@ -311,11 +301,11 @@ MARKET_CLOCK_CONFIGS = {
         "regularOpen": datetime_time(9, 30),
         "regularClose": datetime_time(16, 0),
         "weekdays": {0, 1, 2, 3, 4},
-        "holidays": US_TRADING_HOLIDAYS_2026,
-        "earlyCloses": {
-            date(2026, 11, 27): datetime_time(13, 0),
-            date(2026, 12, 24): datetime_time(13, 0),
-        },
+        "holidayMarket": "us",
+        # Half-day closes are deliberately absent. The only way to state them
+        # was a hardcoded pair of dates that expires with the year, and showing
+        # the regular close on a half-day is a smaller error than asserting a
+        # half-day on a date that has moved.
         "source": "NYSE/Nasdaq regular-session calendar",
     },
     "generic": {
@@ -326,8 +316,9 @@ MARKET_CLOCK_CONFIGS = {
         "regularOpen": datetime_time(9, 30),
         "regularClose": datetime_time(16, 0),
         "weekdays": {0, 1, 2, 3, 4},
-        "holidays": {},
-        "earlyCloses": {},
+        # An unrecognised exchange has no calendar we could name, so weekends
+        # are the only closures claimed.
+        "holidayMarket": None,
         "source": "Quote-provider exchange timezone with regular-session fallback",
     },
 }
@@ -338,7 +329,11 @@ BREAKOUT_WATCHLIST = [
     ("OIL.NS", "Oil India", ["Oil"]),
     ("IOC.NS", "Indian Oil", ["Oil"]),
     ("BPCL.NS", "BPCL", ["Oil"]),
-    ("HPCL.NS", "HPCL", ["Oil"]),
+    # Hindustan Petroleum trades as HINDPETRO on the NSE. HPCL.NS resolves to an
+    # unrelated mutual-fund stub last priced in 2019, which answers 200 with the
+    # symbol echoed back and every price field null - so it read as a working
+    # ticker that simply had nothing to report.
+    ("HINDPETRO.NS", "HPCL", ["Oil"]),
     ("INDIGO.NS", "InterGlobe Aviation", ["Oil", "Aviation"]),
     ("ASIANPAINT.NS", "Asian Paints", ["Oil", "Chemicals"]),
     ("BERGEPAINT.NS", "Berger Paints", ["Oil", "Chemicals"]),
@@ -362,7 +357,11 @@ BREAKOUT_WATCHLIST = [
     ("SUNPHARMA.NS", "Sun Pharma", ["Index"]),
     ("CIPLA.NS", "Cipla", ["Index"]),
     ("ABBOTINDIA.NS", "Abbott India", ["Pharma"]),
-    ("TATAMOTORS.NS", "Tata Motors", ["Metals", "Auto"]),
+    # Tata Motors demerged into a commercial-vehicle and a passenger-vehicle
+    # company, and TATAMOTORS.NS now 404s. Both successors buy the same steel and
+    # aluminium, so both belong under Metals where the single parent used to sit.
+    ("TMCV.NS", "Tata Motors (CV)", ["Metals", "Auto"]),
+    ("TMPV.NS", "Tata Motors Passenger Vehicles", ["Metals", "Auto"]),
     ("MARUTI.NS", "Maruti Suzuki", ["Metals", "Auto"]),
     ("ULTRACEMCO.NS", "UltraTech Cement", ["Energy", "Cement"]),
 ]
@@ -626,14 +625,14 @@ COMMODITY_IMPACT_GROUPS = [
         "whenUp": "May benefit upstream producers, but can pressure fuel users, paints, chemicals, and airlines.",
         "whenDown": "May ease input-cost pressure for airlines, paints, chemicals, and OMC margins.",
         "beneficiariesWhenUp": ["ONGC.NS", "OIL.NS", "VEDL.NS"],
-        "pressuredWhenUp": ["INDIGO.NS", "ASIANPAINT.NS", "BERGEPAINT.NS", "IOC.NS", "BPCL.NS", "HPCL.NS"],
+        "pressuredWhenUp": ["INDIGO.NS", "ASIANPAINT.NS", "BERGEPAINT.NS", "IOC.NS", "BPCL.NS", "HINDPETRO.NS"],
     },
     {
         "commodity": "Industrial Metals",
         "whenUp": "May support metal producers and indicate stronger industrial demand.",
         "whenDown": "May pressure metal producers and help metal-consuming manufacturers.",
         "beneficiariesWhenUp": ["HINDALCO.NS", "TATASTEEL.NS", "JSWSTEEL.NS", "VEDL.NS", "HINDCOPPER.NS"],
-        "pressuredWhenUp": ["LT.NS", "TATAMOTORS.NS", "MARUTI.NS"],
+        "pressuredWhenUp": ["LT.NS", "TMCV.NS", "TMPV.NS", "MARUTI.NS"],
     },
     {
         "commodity": "Precious Metals",
@@ -1357,9 +1356,102 @@ def market_clock_config(symbol, quote_data, meta):
     return config
 
 
+def fetch_india_trading_holidays():
+    """The exchange's own cash-market calendar, keyed by date.
+
+    This is the only forward-looking source: it lists holidays that have not
+    happened yet, including ones declared partway through the year, which is
+    precisely what an inferred calendar can never know about.
+    """
+    payload = fetch_nse_json_with_session(NSE_HOLIDAY_PATH, timeout=12, attempts=2)
+    holidays = {}
+    for row in (payload or {}).get(NSE_HOLIDAY_SEGMENT) or []:
+        if not isinstance(row, dict):
+            continue
+        parsed = parse_nse_holiday_date(row.get("tradingDate"))
+        if parsed:
+            holidays[parsed] = nse_text(row.get("description")) or "Trading holiday"
+    return holidays
+
+
+def parse_nse_holiday_date(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for pattern in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def derive_trading_holidays(symbols):
+    """Weekdays with no trade, inferred from price history.
+
+    A weekday absent from a symbol's daily series is either a holiday or a hole
+    in the provider's data, and the two are indistinguishable from one series
+    alone. Requiring every symbol to agree resolves it: a real closure stops all
+    of them, while a data hole affects one. This can only describe days that
+    have already passed, so it is a fallback and never the primary.
+    """
+    seen = []
+    for symbol in symbols:
+        try:
+            candles = (get_chart_range(symbol, "1y", "1d") or {}).get("candles") or []
+        except Exception:
+            continue
+        days = {
+            date.fromisoformat(candle["date"])
+            for candle in candles
+            if isinstance(candle, dict) and candle.get("date")
+        }
+        if days:
+            seen.append(days)
+    if not seen:
+        return {}
+
+    # Only the window every symbol covers can be reasoned about; outside it, an
+    # absence means "not reported" rather than "closed".
+    start = max(min(days) for days in seen)
+    end = min(max(days) for days in seen)
+    holidays = {}
+    current = start
+    while current <= end:
+        if current.weekday() < 5 and all(current not in days for days in seen):
+            holidays[current] = "Trading holiday"
+        current += timedelta(days=1)
+    return holidays
+
+
+def market_holidays(market):
+    """Holiday calendar for a market, exchange-first and inferred second."""
+    if not market:
+        return {}
+    return cached(
+        f"market:holidays:{market}",
+        lambda: resolve_market_holidays(market),
+        HOLIDAY_CACHE_SECONDS,
+    )
+
+
+def resolve_market_holidays(market):
+    if market == "india":
+        try:
+            holidays = fetch_india_trading_holidays()
+            if holidays:
+                return holidays
+        except Exception:
+            pass
+    try:
+        return derive_trading_holidays(HOLIDAY_PROBE_SYMBOLS.get(market) or ())
+    except Exception:
+        return {}
+
+
 def market_day_status(config, local_date):
     is_weekend = local_date.weekday() not in config["weekdays"]
-    holiday_name = config["holidays"].get(local_date, "")
+    holiday_name = market_holidays(config.get("holidayMarket")).get(local_date, "")
     return {
         "tradingDay": not is_weekend and not holiday_name,
         "isWeekend": is_weekend,
@@ -1372,7 +1464,7 @@ def market_session_window(config, local_date):
     day_status = market_day_status(config, local_date)
     if not day_status["tradingDay"]:
         return None, None
-    close_time = config["earlyCloses"].get(local_date, config["regularClose"])
+    close_time = config["regularClose"]
     session_open_at = datetime.combine(local_date, config["regularOpen"], tzinfo=ZoneInfo(config["timezone"]))
     session_close_at = datetime.combine(local_date, close_time, tzinfo=ZoneInfo(config["timezone"]))
     return session_open_at, session_close_at
@@ -5809,20 +5901,100 @@ def fetch_chart_range(symbol, range_value="1y", interval="1d"):
     return {"meta": result.get("meta") or {}, "candles": candles}
 
 
+EXCHANGE_CODE_TO_NAME = {
+    "NSI": "NSE",
+    "BSE": "BSE",
+    "NMS": "NasdaqGS",
+    "NGM": "NasdaqGM",
+    "NCM": "NasdaqCM",
+    "NYQ": "NYSE",
+    "PCX": "NYSEArca",
+    "ASE": "NYSEAmerican",
+    "LSE": "LSE",
+}
+
+
+def quote_from_chart_meta(symbol):
+    """A quote assembled from the chart endpoint's ``meta`` block.
+
+    Yahoo's ``/v7/finance/quote`` now answers 401 to anonymous callers and its
+    crumb handshake is itself rate limited, so the batch quote is not something
+    to depend on. ``/v8/finance/chart`` still answers unauthenticated and its
+    meta carries the same last price, day move, day range, 52-week range, volume
+    and names, keyed slightly differently. Every field below is a rename of one
+    already present, so nothing here is estimated.
+    """
+    payload = fetch_json(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}?range=5d&interval=1d"
+    )
+    meta = (((payload.get("chart") or {}).get("result") or [{}])[0] or {}).get("meta") or {}
+    # A retired symbol is not always a 404. Yahoo answers HPCL.NS with 200, the
+    # symbol echoed back, and every price field null - a shape that passes a
+    # symbol check and then supplies nothing. Requiring a price is what actually
+    # separates a quote from an acknowledgement.
+    if not meta.get("symbol") or not is_finite(meta.get("regularMarketPrice")):
+        return {}
+    exchange_code = meta.get("exchangeName") or ""
+    return {
+        "symbol": meta.get("symbol"),
+        "shortName": meta.get("shortName"),
+        "longName": meta.get("longName") or meta.get("shortName"),
+        "currency": meta.get("currency"),
+        "exchange": exchange_code,
+        "fullExchangeName": meta.get("fullExchangeName")
+        or EXCHANGE_CODE_TO_NAME.get(exchange_code, exchange_code),
+        "exchangeTimezoneName": meta.get("exchangeTimezoneName"),
+        "quoteType": meta.get("instrumentType"),
+        "regularMarketPrice": clean_number(meta.get("regularMarketPrice")),
+        "regularMarketChangePercent": clean_number(meta.get("regularMarketChangePercent")),
+        "regularMarketVolume": clean_number(meta.get("regularMarketVolume")),
+        "regularMarketTime": meta.get("regularMarketTime"),
+        "regularMarketDayHigh": clean_number(meta.get("regularMarketDayHigh")),
+        "regularMarketDayLow": clean_number(meta.get("regularMarketDayLow")),
+        "previousClose": clean_number(meta.get("chartPreviousClose")),
+        "fiftyTwoWeekHigh": clean_number(meta.get("fiftyTwoWeekHigh")),
+        "fiftyTwoWeekLow": clean_number(meta.get("fiftyTwoWeekLow")),
+    }
+
+
 def get_quote(symbol):
     endpoint = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={quote(symbol)}"
-    payload = fetch_json(endpoint)
-    return ((payload.get("quoteResponse") or {}).get("result") or [{}])[0] or {}
+    try:
+        payload = fetch_json(endpoint)
+        quote_item = ((payload.get("quoteResponse") or {}).get("result") or [{}])[0] or {}
+        if quote_item.get("symbol"):
+            return quote_item
+    except Exception:
+        pass
+    return quote_from_chart_meta(symbol)
 
 
 def get_quotes(symbols):
     unique_symbols = list(dict.fromkeys([symbol for symbol in symbols if symbol]))
     if not unique_symbols:
         return {}
+
+    quotes = {}
     endpoint = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={quote(','.join(unique_symbols))}"
-    payload = fetch_json(endpoint)
-    quotes = (payload.get("quoteResponse") or {}).get("result") or []
-    return {quote_item.get("symbol"): quote_item for quote_item in quotes if quote_item.get("symbol")}
+    try:
+        payload = fetch_json(endpoint)
+        for quote_item in (payload.get("quoteResponse") or {}).get("result") or []:
+            if quote_item.get("symbol"):
+                quotes[quote_item["symbol"]] = quote_item
+    except Exception:
+        pass
+
+    # The batch call covers every symbol in one request when it works, so fall
+    # back only for what is still missing. Whole-batch failure is the common case
+    # while the 401 stands, and a partial answer is also possible: a delisted or
+    # renamed ticker is simply absent from the result array.
+    missing = [symbol for symbol in unique_symbols if symbol not in quotes]
+    if not missing:
+        return quotes
+    for symbol, (ok, value) in zip(missing, settle_map(missing, quote_from_chart_meta, concurrency=6)):
+        if ok and value.get("symbol"):
+            quotes[symbol] = value
+    return quotes
 
 
 def get_summary(symbol):

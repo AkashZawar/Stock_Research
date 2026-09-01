@@ -8,10 +8,11 @@ Three questions this answers, and where each answer comes from:
 - **What is open now or opening in the next 7 days?** NSE's upcoming-issues feed
   supplies the price band and dates, NSE's current-issue and detail feeds supply
   live subscription (overall plus QIB/NII/Retail).
-- **What is the grey market saying?** GMP has no official source, so three
-  independent aggregators are scraped and averaged. The spread between them is
-  reported as an agreement level, because a single source quoting an outlier is
-  the normal failure mode here and silently averaging it away would hide that.
+- **What is the grey market saying?** GMP has no official source, so five
+  independent aggregators are scraped and their median taken. The spread between
+  them is reported as an agreement level, because a single source quoting an
+  outlier is the normal case here rather than the exception, and a mean would let
+  it move the headline premium without ever showing up.
 
 Everything scraped here is untrusted third-party HTML. Parsed values are coerced
 to floats or length-capped strings before they leave this module, and no
@@ -19,6 +20,7 @@ provider-supplied URL is ever passed through to the client.
 """
 import json
 import re
+import statistics
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -47,9 +49,9 @@ IST = ZoneInfo("Asia/Kolkata")
 RECENT_LISTING_WINDOW_DAYS = 7
 UPCOMING_WINDOW_DAYS = 7
 
-# Aggregators are ranked here only for display order; the consensus itself is an
-# unweighted mean, since there is no basis for trusting one grey-market quote
-# over another.
+# Aggregators are ranked here only for display order. No source is trusted above
+# another, so the consensus is their median: it needs no ranking to be robust,
+# and one site quoting an outlier cannot move it.
 GMP_SOURCES = (
     ("IPO Ji", "https://ipoji.com/ipo-gmp"),
     ("IPO Watch", "https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/"),
@@ -805,12 +807,49 @@ def gmp_band_high(company, quotes):
     return None
 
 
-def gmp_consensus(company, quotes, band_high):
-    """Average the per-source GMP quotes that match this company.
+def gmp_agreement(values):
+    """How far apart the sources are: a label and the spread behind it.
 
-    The spread across sources is reported alongside the mean. Grey-market quotes
-    routinely disagree by 20%+, and a mean with no dispersion attached would
-    present a guess as a measurement.
+    Dispersion is measured against the median's magnitude, so a 5-rupee gap on a
+    50-rupee premium counts as noisy while the same gap on a 350-rupee one does
+    not.
+
+    Two cases have to be caught before the arithmetic, because both used to
+    divide by a mean of zero and report the result as perfect agreement. Sources
+    that disagree about the sign do not agree at all - quotes of +10 and -10 were
+    read as "high" - and a centre of zero has no magnitude to take a ratio
+    against. A negative centre inverted the scale outright, so wider spreads
+    scored as closer ones.
+    """
+    if len(values) < 2:
+        return "single source", 0.0
+    low, high = min(values), max(values)
+    spread = high - low
+    if low < 0 < high:
+        return "low", round2(spread)
+    centre = abs(statistics.median(values))
+    if not centre:
+        return ("high", 0.0) if not spread else ("low", round2(spread))
+    spread_percent = spread / centre * 100
+    if spread_percent <= 15:
+        agreement = "high"
+    elif spread_percent <= 40:
+        agreement = "moderate"
+    else:
+        agreement = "low"
+    return agreement, round2(spread_percent)
+
+
+def gmp_consensus(company, quotes, band_high):
+    """Combine the per-source GMP quotes that match this company.
+
+    The headline is the median, not the mean. These sources disagree by more than
+    noise: measured across one session's seven issues, IPO Ji sat below the others
+    on every single row, by an average of 11 points of the price band, and on Rays
+    of Belief it quoted 14 where the other three said 48, 48 and 50. A mean lets
+    that one dissenter drag the published premium down by a fifth. The median
+    reports what the sources actually agree on, and the outlier stays visible in
+    the spread and in the per-source list the row expands to show.
     """
     matches = []
     for source_name, rows in quotes.items():
@@ -837,26 +876,15 @@ def gmp_consensus(company, quotes, band_high):
         return None
 
     values = [item["gmp"] for item in matches]
-    average = sum(values) / len(values)
+    consensus = statistics.median(values)
     low = min(values)
     high = max(values)
-    percent = (average / band_high * 100) if is_finite(band_high) and band_high else None
-    expected_price = (band_high + average) if is_finite(band_high) else None
-
-    # Dispersion relative to the mean, so a 5-rupee gap on a 50-rupee GMP counts
-    # as noisy while the same gap on a 350-rupee GMP does not.
-    spread_percent = ((high - low) / average * 100) if average else 0.0
-    if len(matches) < 2:
-        agreement = "single source"
-    elif spread_percent <= 15:
-        agreement = "high"
-    elif spread_percent <= 40:
-        agreement = "moderate"
-    else:
-        agreement = "low"
+    percent = (consensus / band_high * 100) if is_finite(band_high) and band_high else None
+    expected_price = (band_high + consensus) if is_finite(band_high) else None
+    agreement, spread_percent = gmp_agreement(values)
 
     return {
-        "value": round2(average),
+        "value": round2(consensus),
         "percent": round2(percent) if is_finite(percent) else None,
         "expectedListingPrice": round2(expected_price) if is_finite(expected_price) else None,
         "low": round2(low),
@@ -1014,9 +1042,38 @@ def board_of(series_or_type):
 # chart, so they would show up as rows with a price and no outcome.
 EQUITY_SECURITY_TYPES = {"EQ", "SME", "BE"}
 
+# Some bond series are filed under an equity securityType, so the type alone
+# does not catch them: NSE tags Vision Infra's 11.50% 2030 NCD as "SME", and it
+# reached the listings table as a real issue priced at 1,00,000 rupees.
+#
+# Their symbol still follows the debt convention of coupon, issuer, maturity
+# year - "1150VIES30", "920ISF28", "10MWL29" - which no equity ticker does. The
+# tickers that open with a digit ("5PAISA", "63MOONS", "20MICRONS", "3IINFOLTD")
+# never also close with one, so requiring digits at both ends separates them.
+DEBT_SERIES_SYMBOL = re.compile(r"^\d+[A-Z]+\d+[A-Z]?$")
+
+# A debt series is sold at face value, which leaves its issue price orders of
+# magnitude above the price band NSE files on the same row. Tested alongside the
+# symbol because either signal on its own is circumstantial; across the full
+# feed the two agree on exactly the same rows and neither rejects an equity.
+DEBT_FACE_VALUES = {10000.0, 100000.0}
+
 
 def is_equity_issue(security_type):
     return str(security_type or "").strip().upper() in EQUITY_SECURITY_TYPES
+
+
+def is_equity_row(row):
+    """Whether a past-issues row is a tradable equity issue rather than a bond."""
+    if not is_equity_issue(row.get("securityType")):
+        return False
+    if DEBT_SERIES_SYMBOL.match(clean_text(row.get("symbol"), 20).upper()):
+        return False
+    issue_price = to_number(row.get("issuePrice"))
+    _, band_high = parse_price_band(row.get("priceRange"))
+    if issue_price in DEBT_FACE_VALUES and is_finite(band_high) and band_high and issue_price > band_high * 5:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1063,39 +1120,136 @@ def percent_change(new_value, base_value):
 # Recommendation flag
 # ---------------------------------------------------------------------------
 
-def upcoming_flag(gmp, subscription, is_open):
+# What each signal is worth to the score: how strongly it points at a good
+# outcome. GMP leads because a premium the grey market will actually pay is the
+# best available predictor of a listing pop.
+GMP_WEIGHT = 55.0
+SUBSCRIPTION_WEIGHT = 30.0
+QIB_WEIGHT = 15.0
+
+# What each signal is worth to confidence: how far it can be relied on. These are
+# deliberately not the scoring weights, because the two answer different
+# questions. GMP predicts well, but it is an unregulated market of rumour with no
+# published trades; subscription is real money bid on the exchange. Deriving
+# confidence from the scoring weights made an issue with 25x subscription and 6x
+# QIB demand - about as hard as evidence gets here - come out less certain than
+# four websites agreeing on a number, which is backwards.
+#
+# They are set so that a full grey-market consensus and a full set of exchange
+# bidding figures each clear the bar on their own, and a thin version of either
+# does not.
+GMP_CONFIDENCE = 0.5
+SUBSCRIPTION_CONFIDENCE = 0.35
+QIB_CONFIDENCE = 0.15
+
+# A premium quoted by one site is a rumour; the same premium on four sites that
+# agree is closer to a measurement. GMP therefore carries less weight the fewer
+# sources stand behind it, rather than one quote counting as a full reading.
+GMP_CORROBORATION = {1: 0.55, 2: 0.75, 3: 0.9}
+
+# Sources that disagree widely are still evidence, just weaker evidence, so the
+# penalty scales the GMP component rather than subtracting a flat number of
+# points from a total whose size now varies.
+GMP_DISAGREEMENT_FACTOR = 0.85
+
+# A score of 50 means "no view". Scores are pulled toward it in proportion to
+# how much of the evidence is missing.
+NEUTRAL_SCORE = 50.0
+
+# Below this much of the evidence, no verdict is stated either way. Shrinking the
+# score alone still let a lone quote out at 65, over the green line, and
+# "Positive" is a stronger word than one unconfirmed grey-market number has
+# earned. An issue that has not opened yet can still be called - it just needs
+# several sources to agree first, rather than one site's say-so.
+MIN_CONFIDENCE_FOR_VERDICT = 0.5
+
+
+def gmp_corroboration(source_count):
+    return GMP_CORROBORATION.get(source_count, 1.0) if source_count else 1.0
+
+
+def bidding_progress(open_date, close_date, today):
+    """How far through its bidding window an issue is, from 0 to 1.
+
+    Indian IPO books fill back-loaded: retail trickles in from day one while QIB
+    and NII bid in the closing hours, so a book routinely goes from under 1x to
+    tens of times over on its final day. An early reading is therefore not a weak
+    result, it is an incomplete one, and the two were being scored the same.
+
+    Measured live: Rays of Belief opened this morning at 0.02x and was flagged
+    red, on the same footing as Purple Style Labs at 0.10x two thirds of the way
+    through its window - and against a +20% premium four sources agreed on.
+
+    A window that cannot be dated returns 1, which keeps the previous behaviour
+    of taking whatever figure is published at face value.
+    """
+    if not open_date or not close_date or close_date < open_date:
+        return 1.0
+    if today < open_date:
+        return 0.0
+    total_days = (close_date - open_date).days + 1
+    elapsed_days = (today - open_date).days + 1
+    return max(0.0, min(1.0, elapsed_days / total_days))
+
+
+def upcoming_flag(gmp, subscription, is_open, progress=1.0):
     """Score an open/upcoming issue green, amber, or red.
 
-    Only components that actually have data contribute, and the total is
-    renormalised over the weights present. An issue that has not opened yet has
-    no subscription figures, and treating those as zero would flag every
-    forthcoming issue red.
+    Two things are being measured and they must not be confused: how good the
+    signals look, and how much signal there is. Renormalising over the weights
+    present answers only the first, which let a single unverified grey-market
+    quote score a perfect 100 - the identical score to an issue whose premium was
+    confirmed by 25x subscription and 6x QIB demand. Certainty about a fifth of
+    the evidence was being reported as certainty about all of it.
+
+    So the strength of what is present is scored first, then pulled toward
+    neutral in proportion to what is missing. Direction is preserved - a thin
+    signal stays on the side it points to - but neither extreme is reachable
+    without the evidence to support it, in either direction: one source quoting a
+    steep discount is no more conclusive than one quoting a steep premium.
     """
     earned = 0.0
     available = 0.0
+    confidence = 0.0
     reasons = []
 
     gmp_percent = (gmp or {}).get("percent")
     if is_finite(gmp_percent):
-        available += 55
+        source_count = (gmp or {}).get("sourceCount") or 0
+        corroboration = gmp_corroboration(source_count)
+        available += GMP_WEIGHT
+        confidence += GMP_CONFIDENCE * corroboration
         # 30%+ premium is where listing gains have historically been reliable;
         # a negative premium is a discount and earns nothing.
-        earned += 55 * max(0.0, min(1.0, gmp_percent / 30))
-        reasons.append(f"GMP {gmp_percent:+.0f}% across {gmp.get('sourceCount')} source(s)")
-        if gmp.get("agreement") == "low":
-            earned -= 6
-            reasons.append("sources disagree widely")
+        share = max(0.0, min(1.0, gmp_percent / 30))
+        if (gmp or {}).get("agreement") == "low":
+            share *= GMP_DISAGREEMENT_FACTOR
+            reasons.append(f"GMP {gmp_percent:+.0f}% across {source_count} source(s), which disagree widely")
+        else:
+            reasons.append(f"GMP {gmp_percent:+.0f}% across {source_count} source(s)")
+        earned += GMP_WEIGHT * share
+
+    # A part-filled book is discounted rather than read as a final result, so an
+    # issue in its first hours is not marked down for demand that has not been
+    # placed yet. Both the weight and the confidence scale, which keeps an early
+    # reading from dominating the premium it is meant to corroborate.
+    settled = max(0.0, min(1.0, progress))
 
     total = (subscription or {}).get("total")
     if is_finite(total):
-        available += 30
-        earned += 30 * max(0.0, min(1.0, total / 10))
-        reasons.append(f"subscribed {total:.2f}x overall")
+        available += SUBSCRIPTION_WEIGHT * settled
+        confidence += SUBSCRIPTION_CONFIDENCE * settled
+        earned += SUBSCRIPTION_WEIGHT * settled * max(0.0, min(1.0, total / 10))
+        if settled < 1.0:
+            reasons.append(f"subscribed {total:.2f}x so far, book still open")
+        else:
+            reasons.append(f"subscribed {total:.2f}x overall")
 
     qib = (subscription or {}).get("qib")
     if is_finite(qib):
-        available += 15
-        earned += 15 * max(0.0, min(1.0, qib / 5))
+        available += QIB_WEIGHT * settled
+        confidence += QIB_CONFIDENCE * settled
+        earned += QIB_WEIGHT * settled * max(0.0, min(1.0, qib / 5))
         reasons.append(f"QIB {qib:.2f}x")
 
     if available <= 0:
@@ -1106,7 +1260,9 @@ def upcoming_flag(gmp, subscription, is_open):
             "reason": "No GMP or subscription data published yet.",
         }
 
-    score = max(0.0, min(100.0, earned / available * 100))
+    strength = max(0.0, min(100.0, earned / available * 100))
+    confidence = max(0.0, min(1.0, confidence))
+    score = NEUTRAL_SCORE + (strength - NEUTRAL_SCORE) * confidence
 
     if score >= 60:
         flag, label = "green", "Positive"
@@ -1115,12 +1271,18 @@ def upcoming_flag(gmp, subscription, is_open):
     else:
         flag, label = "red", "Weak"
 
+    if confidence < MIN_CONFIDENCE_FOR_VERDICT and flag != "amber":
+        direction = "leaning positive" if score >= NEUTRAL_SCORE else "leaning weak"
+        flag, label = "amber", "Indicative"
+        reasons.append(f"too little corroboration to call, {direction}")
+
     if not is_open and not is_finite(total):
         reasons.append("bidding not open yet")
 
     return {
         "flag": flag,
         "score": round2(score),
+        "confidence": round2(confidence * 100),
         "label": label,
         "reason": "; ".join(reasons) if reasons else "Limited data.",
     }
@@ -1158,7 +1320,7 @@ def build_recently_listed(past_issues, today):
     for row in past_issues:
         if not isinstance(row, dict):
             continue
-        if not is_equity_issue(row.get("securityType")):
+        if not is_equity_row(row):
             continue
         listing_date = parse_date(row.get("listingDate"))
         if not listing_date or not (window_start <= listing_date <= today):
@@ -1295,6 +1457,7 @@ def build_pipeline(upcoming_issues, current_issues, quotes, today):
     for item in candidates:
         is_open = item.pop("_isOpen")
         open_date = item.pop("_openDate")
+        close_date = parse_date(item.get("closeDate"))
 
         subscription = dict(bids_by_symbol.get(item["symbol"]) or {})
         if not is_finite(subscription.get("total")) and is_finite(item.get("overallSubscription")):
@@ -1318,7 +1481,9 @@ def build_pipeline(upcoming_issues, current_issues, quotes, today):
                 "subscription": subscription,
                 "gmp": gmp,
                 "profile": profiles_by_symbol.get(item["symbol"]) or None,
-                "recommendation": upcoming_flag(gmp, subscription, is_open),
+                "recommendation": upcoming_flag(
+                    gmp, subscription, is_open, bidding_progress(open_date, close_date, today)
+                ),
                 "analysisSymbol": f"{item['symbol']}.NS",
                 "_sortKey": (0 if is_open else 1, open_date or today),
             }
@@ -1413,7 +1578,9 @@ def build_pipeline_from_gmp(quotes, today):
                 "issueSize": None,
                 "subscription": subscription,
                 "gmp": gmp,
-                "recommendation": upcoming_flag(gmp, subscription, status == "Open"),
+                "recommendation": upcoming_flag(
+                    gmp, subscription, status == "Open", bidding_progress(open_date, close_date, today)
+                ),
                 "analysisSymbol": None,
                 "source": "gmp",
             }

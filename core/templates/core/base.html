@@ -12,12 +12,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Big Picture Investment</title>
+    {% comment %}
+      Declared inline so browsers stop probing /favicon.ico, which this project
+      does not serve and which logged a 404 on every page load.
+    {% endcomment %}
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230d6efd'/><path d='M7 21l6-7 5 4 7-9' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
-    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260831-ipo-6">
+    <link rel="stylesheet" href="{% static 'styles.css' %}?v=20260901-ipo-11">
     <script src="{% static 'loading.js' %}?v=20260614-pick-1"></script>
   </head>
   <body data-active-tab="analysis">
@@ -107,7 +112,7 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
-    <script src="{% static 'app.js' %}?v=20260831-ipo-6" defer></script>
+    <script src="{% static 'app.js' %}?v=20260901-ipo-11" defer></script>
     <script src="{% static 'cursor.js' %}?v=20260614-pick-1" defer></script>
   </body>
 </html>

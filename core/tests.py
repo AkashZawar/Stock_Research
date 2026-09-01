@@ -667,6 +667,20 @@ class CandlestickPatternTests(SimpleTestCase):
 
 
 class MarketClockTests(SimpleTestCase):
+    def setUp(self):
+        # The clock resolves its calendar from the exchange, so without this the
+        # test would reach the network and change behaviour whenever NSE amends
+        # the holiday list.
+        services.clear_cache_prefix("market:holidays")
+        self.addCleanup(services.clear_cache_prefix, "market:holidays")
+        patcher = patch.object(
+            services,
+            "resolve_market_holidays",
+            lambda market: {date(2026, 5, 28): "Bakri Id"} if market == "india" else {},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_market_clock_marks_indian_regular_session_open(self):
         now = datetime(2026, 5, 12, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
 
@@ -700,6 +714,91 @@ class MarketClockTests(SimpleTestCase):
         self.assertEqual(clock["status"], "holiday")
         self.assertIn("Bakri Id", clock["holidayName"])
         self.assertTrue(clock["nextOpenAt"].startswith("2026-05-29T03:45:00"))
+
+
+class TradingHolidayResolutionTests(SimpleTestCase):
+    """Where the holiday calendar comes from, and what happens when it doesn't."""
+
+    HOLIDAY_PAYLOAD = {
+        "CM": [
+            {"tradingDate": "15-Jan-2026", "description": "Municipal Corporation Election - Maharashtra"},
+            {"tradingDate": "26-Jan-2026", "description": "Republic Day"},
+            {"tradingDate": "14-Sep-2026", "description": "Ganesh Chaturthi"},
+        ],
+        # A different segment, which must not leak into the equities calendar.
+        "FO": [{"tradingDate": "01-Jul-2026", "description": "Derivatives-only closure"}],
+    }
+
+    def setUp(self):
+        services.clear_cache_prefix("market:holidays")
+        self.addCleanup(services.clear_cache_prefix, "market:holidays")
+
+    def test_the_exchange_calendar_is_used_and_names_the_holiday(self):
+        with patch.object(services, "fetch_nse_json_with_session", return_value=self.HOLIDAY_PAYLOAD):
+            holidays = services.market_holidays("india")
+        self.assertEqual(holidays[date(2026, 1, 26)], "Republic Day")
+
+    def test_a_holiday_declared_mid_year_is_picked_up(self):
+        # The hardcoded table this replaced had no way to learn about an
+        # election holiday announced after it was written, so the clock called a
+        # closed Thursday a trading day.
+        with patch.object(services, "fetch_nse_json_with_session", return_value=self.HOLIDAY_PAYLOAD):
+            holidays = services.market_holidays("india")
+        self.assertIn(date(2026, 1, 15), holidays)
+
+    def test_only_the_cash_market_segment_is_read(self):
+        with patch.object(services, "fetch_nse_json_with_session", return_value=self.HOLIDAY_PAYLOAD):
+            holidays = services.market_holidays("india")
+        self.assertNotIn(date(2026, 7, 1), holidays)
+
+    def test_future_holidays_are_included_so_the_next_open_is_right(self):
+        with patch.object(services, "fetch_nse_json_with_session", return_value=self.HOLIDAY_PAYLOAD):
+            holidays = services.market_holidays("india")
+        self.assertIn(date(2026, 9, 14), holidays)
+
+    def test_the_calendar_falls_back_to_inference_when_the_exchange_is_down(self):
+        candles = {
+            "^NSEI": ["2026-01-22", "2026-01-23", "2026-01-27"],
+            "^BSESN": ["2026-01-22", "2026-01-23", "2026-01-27"],
+            "RELIANCE.NS": ["2026-01-22", "2026-01-23", "2026-01-27"],
+        }
+        with patch.object(services, "fetch_nse_json_with_session", side_effect=RuntimeError("blocked")), \
+             patch.object(services, "get_chart_range",
+                          lambda symbol, *a, **k: {"candles": [{"date": d} for d in candles[symbol]]}):
+            holidays = services.market_holidays("india")
+        # Monday the 26th is absent from every series, so it was a closure.
+        self.assertIn(date(2026, 1, 26), holidays)
+
+    def test_a_gap_in_one_series_alone_is_not_called_a_holiday(self):
+        # Yahoo's index history has occasional single-day holes. 28-Aug-2026 is
+        # missing from both indices yet RELIANCE traded, so requiring unanimity
+        # is what stops a data gap being reported as a closure.
+        candles = {
+            "^NSEI": ["2026-08-27", "2026-08-31"],
+            "^BSESN": ["2026-08-27", "2026-08-31"],
+            "RELIANCE.NS": ["2026-08-27", "2026-08-28", "2026-08-31"],
+        }
+        with patch.object(services, "fetch_nse_json_with_session", side_effect=RuntimeError("blocked")), \
+             patch.object(services, "get_chart_range",
+                          lambda symbol, *a, **k: {"candles": [{"date": d} for d in candles[symbol]]}):
+            holidays = services.market_holidays("india")
+        self.assertNotIn(date(2026, 8, 28), holidays)
+
+    def test_no_calendar_and_no_history_claims_no_holidays(self):
+        # Weekends still close the market; inventing holidays would be worse
+        # than admitting we have none.
+        with patch.object(services, "fetch_nse_json_with_session", side_effect=RuntimeError("blocked")), \
+             patch.object(services, "get_chart_range", side_effect=RuntimeError("no data")):
+            self.assertEqual(services.market_holidays("india"), {})
+
+    def test_an_unknown_market_has_no_calendar_rather_than_a_borrowed_one(self):
+        self.assertEqual(services.market_holidays(None), {})
+
+    def test_the_exchange_date_format_is_parsed(self):
+        self.assertEqual(services.parse_nse_holiday_date("26-Jan-2026"), date(2026, 1, 26))
+        self.assertEqual(services.parse_nse_holiday_date("2026-01-26"), date(2026, 1, 26))
+        self.assertIsNone(services.parse_nse_holiday_date(""))
+        self.assertIsNone(services.parse_nse_holiday_date("not a date"))
 
 
 class PerformanceCacheTests(SimpleTestCase):
@@ -2316,6 +2415,150 @@ class UnauthorizedEndpointMemoTests(SimpleTestCase):
                 services.fetch_text(endpoint, json_request=True)
 
         urlopen.assert_not_called()
+
+
+def chart_payload(symbol, **overrides):
+    meta = {
+        "symbol": symbol,
+        "shortName": f"{symbol} SHORT",
+        "longName": f"{symbol} Limited",
+        "currency": "INR",
+        "exchangeName": "NSI",
+        "fullExchangeName": "NSE",
+        "exchangeTimezoneName": "Asia/Kolkata",
+        "instrumentType": "EQUITY",
+        "regularMarketPrice": 1024.9,
+        "regularMarketChangePercent": 0.93,
+        "regularMarketVolume": 587177,
+        "regularMarketTime": 1788238621,
+        "regularMarketDayHigh": 1033.9,
+        "regularMarketDayLow": 1020.6,
+        "chartPreviousClose": 1053.0,
+        "fiftyTwoWeekHigh": 1176.0,
+        "fiftyTwoWeekLow": 702.4,
+    }
+    meta.update(overrides)
+    return {"chart": {"result": [{"meta": meta}]}}
+
+
+class QuoteFallbackTests(SimpleTestCase):
+    """Yahoo's batch quote answers 401 to anonymous callers; the chart does not."""
+
+    def test_the_chart_meta_supplies_the_fields_a_quote_would_have(self):
+        with patch.object(services, "fetch_json", return_value=chart_payload("HINDALCO.NS")):
+            result = services.quote_from_chart_meta("HINDALCO.NS")
+
+        self.assertEqual(result["symbol"], "HINDALCO.NS")
+        self.assertEqual(result["regularMarketPrice"], 1024.9)
+        self.assertEqual(result["regularMarketChangePercent"], 0.93)
+        self.assertEqual(result["previousClose"], 1053.0)
+        self.assertEqual(result["fullExchangeName"], "NSE")
+        self.assertEqual(result["quoteType"], "EQUITY")
+
+    def test_an_exchange_code_without_a_name_is_still_given_one(self):
+        payload = chart_payload("AAPL", exchangeName="NMS", fullExchangeName=None)
+        with patch.object(services, "fetch_json", return_value=payload):
+            result = services.quote_from_chart_meta("AAPL")
+
+        self.assertEqual(result["fullExchangeName"], "NasdaqGS")
+
+    def test_a_batch_that_is_refused_falls_back_per_symbol(self):
+        def fetch(endpoint, sec=False):
+            if "/v7/finance/quote" in endpoint:
+                raise RuntimeError("Data provider returned 401.")
+            symbol = endpoint.split("/chart/")[1].split("?")[0]
+            return chart_payload(symbol)
+
+        with patch.object(services, "fetch_json", side_effect=fetch):
+            quotes = services.get_quotes(["HINDALCO.NS", "TATASTEEL.NS"])
+
+        self.assertEqual(sorted(quotes), ["HINDALCO.NS", "TATASTEEL.NS"])
+        self.assertEqual(quotes["TATASTEEL.NS"]["regularMarketPrice"], 1024.9)
+
+    def test_a_batch_that_answers_is_not_second_guessed(self):
+        batch = {"quoteResponse": {"result": [{"symbol": "HINDALCO.NS", "regularMarketPrice": 11.0}]}}
+        with patch.object(services, "fetch_json", return_value=batch) as fetch:
+            quotes = services.get_quotes(["HINDALCO.NS"])
+
+        self.assertEqual(quotes["HINDALCO.NS"]["regularMarketPrice"], 11.0)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_only_the_symbols_the_batch_omitted_are_refetched(self):
+        # A batch can answer for some symbols and silently drop others, which is
+        # what a renamed or delisted ticker looks like from the outside.
+        calls = []
+
+        def fetch(endpoint, sec=False):
+            calls.append(endpoint)
+            if "/v7/finance/quote" in endpoint:
+                return {"quoteResponse": {"result": [{"symbol": "HINDALCO.NS", "regularMarketPrice": 11.0}]}}
+            return chart_payload(endpoint.split("/chart/")[1].split("?")[0])
+
+        with patch.object(services, "fetch_json", side_effect=fetch):
+            quotes = services.get_quotes(["HINDALCO.NS", "TATASTEEL.NS"])
+
+        self.assertEqual(sorted(quotes), ["HINDALCO.NS", "TATASTEEL.NS"])
+        self.assertEqual(len([call for call in calls if "/chart/" in call]), 1)
+        self.assertIn("TATASTEEL.NS", calls[-1])
+
+    def test_a_symbol_the_provider_has_retired_is_dropped_not_faked(self):
+        def fetch(endpoint, sec=False):
+            if "/v7/finance/quote" in endpoint:
+                raise RuntimeError("Data provider returned 401.")
+            if "TATAMOTORS.NS" in endpoint:
+                raise RuntimeError("Data provider returned 404.")
+            return chart_payload("HINDALCO.NS")
+
+        with patch.object(services, "fetch_json", side_effect=fetch):
+            quotes = services.get_quotes(["HINDALCO.NS", "TATAMOTORS.NS"])
+
+        self.assertEqual(list(quotes), ["HINDALCO.NS"])
+
+    def test_a_priceless_acknowledgement_is_not_treated_as_a_quote(self):
+        # HPCL.NS answers 200 with the symbol echoed back and no prices at all.
+        payload = chart_payload(
+            "HPCL.NS",
+            regularMarketPrice=None,
+            currency=None,
+            instrumentType="MUTUALFUND",
+            exchangeName="YHD",
+        )
+        with patch.object(services, "fetch_json", return_value=payload):
+            self.assertEqual(services.quote_from_chart_meta("HPCL.NS"), {})
+
+    def test_a_single_quote_falls_back_the_same_way(self):
+        def fetch(endpoint, sec=False):
+            if "/v7/finance/quote" in endpoint:
+                raise RuntimeError("Data provider returned 401.")
+            return chart_payload("RELIANCE.NS")
+
+        with patch.object(services, "fetch_json", side_effect=fetch):
+            result = services.get_quote("RELIANCE.NS")
+
+        self.assertEqual(result["regularMarketPrice"], 1024.9)
+
+
+class WatchlistSymbolTests(SimpleTestCase):
+    def test_no_watchlist_entry_still_points_at_the_pre_demerger_tata_motors(self):
+        # TATAMOTORS.NS 404s since the demerger, so every report that reached for
+        # it got a blank rather than a price.
+        symbols = {stock["symbol"] for stock in services.BREAKOUT_WATCHLIST}
+        symbols.update(services.unique_impact_symbols())
+
+        self.assertNotIn("TATAMOTORS.NS", symbols)
+        self.assertIn("TMCV.NS", symbols)
+        self.assertIn("TMPV.NS", symbols)
+
+    def test_hindustan_petroleum_is_referenced_by_its_traded_ticker(self):
+        symbols = {stock["symbol"] for stock in services.BREAKOUT_WATCHLIST}
+        symbols.update(services.unique_impact_symbols())
+
+        self.assertNotIn("HPCL.NS", symbols)
+        self.assertIn("HINDPETRO.NS", symbols)
+
+    def test_every_impact_symbol_has_a_display_name(self):
+        for symbol in services.unique_impact_symbols():
+            self.assertNotEqual(services.watchlist_name(symbol), symbol, symbol)
 
 
 class CacheEvictionTests(SimpleTestCase):

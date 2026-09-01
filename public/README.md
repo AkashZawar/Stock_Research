@@ -20,3 +20,16 @@ templates with `{% static '...' %}`.
   `styles.css`. It does use `cursor.js`.
 - Asset versions are cache-busted via a `?v=...` query string in the template
   `<link>`/`<script>` tags; bump it when you change `app.js`/`styles.css`.
+- **Absent is not the same as pending.** `validateRenderedData` sweeps rendered
+  markup and restyles anything reading `n/a`, `null`, `--` or `... unavailable`
+  as a loading placeholder. That is right while a payload is in flight and wrong
+  once it has landed empty, and the second case was the common one: the market
+  monitor carried about 110 spinners that could never resolve, several of them
+  over fields whose own payload said the data was unavailable. A renderer that
+  knows a value will not arrive marks it with `SETTLED_VALUE_CLASS`
+  (`settledText`, `settledNumber`, `reportedText`, `reportedNumber`, or
+  `emptyTable(..., settled=true)`), and the sweep leaves those alone.
+- `settleStalePlaceholders` is armed once per root, not restarted per render.
+  Clearing it first meant the monitor's one-second live repaint reset the timer
+  before it could fire, so the one tab where placeholders piled up was the one
+  tab they could never settle on.

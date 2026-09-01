@@ -11,23 +11,25 @@
             <summary>What is this tab for?</summary>
             <div class="tab-about-body">
               <p><strong>Use this to judge an IPO before you apply, and to see how recent ones actually did.</strong>
-                It pairs the exchange's own issue and bidding data with a grey-market premium averaged across three
+                It pairs the exchange's own issue and bidding data with the median grey-market premium across five
                 independent trackers, so you can see both what the market is paying and how confident that number is.
                 Grey market data is unofficial and unregulated - treat it as sentiment, not as a price.</p>
               <h4>What it shows you</h4>
               <ul>
                 <li><b>Listed in the last 7 days</b> - issue price, actual listing price, current price, and whether the listing gain has held</li>
                 <li><b>Open and upcoming issues</b> - price band, dates, and expected listing price for anything open now or opening within 7 days</li>
-                <li><b>GMP consensus</b> - the average premium across trackers, plus how far apart they are</li>
+                <li><b>GMP consensus</b> - the median premium across trackers, plus how far apart they are</li>
                 <li><b>Live subscription</b> - overall times subscribed, split by QIB, NII, and retail</li>
                 <li><b>Flag</b> - a green, amber, or red read combining premium and demand</li>
                 <li><b>Mainboard and SME</b> - both boards, tagged</li>
               </ul>
               <h4>How to read the flag</h4>
               <p>The flag scores the grey-market premium (55%), overall subscription (30%), and QIB participation (15%),
-                using only the parts that have data yet. A forthcoming issue is scored on premium alone, so it says
-                nothing about demand. QIB money typically arrives on the final day, so a low QIB figure early in a
-                bidding window is normal rather than a warning.</p>
+                using only the parts that have data yet, and then pulls the result toward neutral by however much
+                evidence is missing. A premium quoted by one tracker moves it far less than the same premium on four,
+                and a book still taking bids counts for less than a closed one - Indian issues fill on the last day, so
+                an early figure is incomplete rather than weak. Where too little has been confirmed to call it either
+                way, the flag reads <b>Indicative</b> rather than stating a verdict it cannot support.</p>
             </div>
           </details>
 
@@ -102,7 +104,7 @@
                   <tbody id="ipoPipelineRows"></tbody>
                 </table>
               </div>
-              <p class="muted ipo-note" id="ipoGmpSources">Grey market premium averaged across public trackers.</p>
+              <p class="muted ipo-note" id="ipoGmpSources">Grey market premium: the median across public trackers.</p>
             </article>
 
             <article class="analysis-panel panel-accent-emerald ipo-panel">

@@ -1084,7 +1084,7 @@ function renderIpo(payload) {
   setText(
     "#ipoPipelineSummary",
     pipeline.length
-      ? "Issues accepting bids now or opening within the next 7 days. Expected listing price is the cap price plus the averaged grey market premium."
+      ? "Issues accepting bids now or opening within the next 7 days. Expected listing price is the cap price plus the median grey market premium across trackers."
       : "No IPO is open or scheduled to open in the next 7 days."
   );
 
@@ -1169,7 +1169,7 @@ function renderIpoGmpSources(payload) {
   const parts = [];
   parts.push(
     live.length
-      ? `GMP averaged across ${live.length} tracker${live.length === 1 ? "" : "s"}: ${live.join(", ")}.`
+      ? `GMP is the median across ${live.length} tracker${live.length === 1 ? "" : "s"}: ${live.join(", ")}.`
       : "No grey market tracker responded."
   );
   parts.push("Grey market data is unofficial and unregulated - treat it as sentiment, not a quote.");
@@ -1340,7 +1340,7 @@ function renderIpoPipelineRows(items) {
     const fromGmp = item.source === "gmp";
     const dates = [formatIpoDate(item.openDate), formatIpoDate(item.closeDate)].filter(Boolean).join(" - ");
     const expected = item.gmp?.expectedListingPrice;
-    // Expected listing is just the cap price plus the averaged premium, so its
+    // Expected listing is just the cap price plus the consensus premium, so its
     // upside is identical to the GMP percentage already shown one column left.
     // Showing the arithmetic instead of repeating the number earns the space.
     const expectedBasis =
@@ -2768,7 +2768,7 @@ function renderNseSnapshot(snapshot) {
       <span>${escapeHtml(item.market || "Market")}</span>
       <strong>${displayHtml(item.status, "market status", DATA_LOADING_ETA_MARKET)}</strong>
       <small>${escapeHtml(item.message || item.tradeDate || "")}</small>
-      ${Number.isFinite(item.last) ? `<small>${escapeHtml(item.index || "")} ${formatNumber(item.last)} <em class="${changeClass(item.changePercent)}">${signed(item.changePercent)}%</em></small>` : ""}
+      ${Number.isFinite(item.last) ? `<small>${escapeHtml(item.index || "")} ${formatNumber(item.last)} <em class="${changeClass(item.changePercent)}">${Number.isFinite(item.changePercent) ? `${signed(item.changePercent)}%` : settledText()}</em></small>` : ""}
     `;
     statusGrid.appendChild(card);
   }
@@ -2854,7 +2854,7 @@ function renderSectorStockPerformance(report) {
     row.innerHTML = `
       <td>
         <strong>${escapeHtml(item.sector || "Sector")}</strong>
-        <span>${formatNumber(item.stockCount)} stocks · A/D ${formatNumber(item.advance)} / ${formatNumber(item.decline)}</span>
+        <span>${settledNumber(item.stockCount)} stocks · A/D ${settledNumber(item.advance)} / ${settledNumber(item.decline)}</span>
       </td>
       <td>
         <strong class="${changeClass(item.sectorChangePercent)}">${signed(item.sectorChangePercent)}%</strong>
@@ -2908,8 +2908,8 @@ function renderSectorStockPerformanceHeatmap(container, rows, emptyMessage = "")
         <em>${Number.isFinite(move) ? `${signed(move)}%` : loadingText("sector move", DATA_LOADING_ETA_MARKET)}</em>
       </div>
       <div class="sector-heatmap-meta">
-        <span>${formatNumber(item.stockCount)} stocks</span>
-        <span>A/D ${formatNumber(item.advance)} / ${formatNumber(item.decline)}</span>
+        <span>${settledNumber(item.stockCount)} stocks</span>
+        <span>A/D ${settledNumber(item.advance)} / ${settledNumber(item.decline)}</span>
       </div>
       <div class="sector-heatmap-breadth" aria-label="Advance breadth">
         <span></span>
@@ -2926,7 +2926,7 @@ function renderSectorStockPerformanceHeatmap(container, rows, emptyMessage = "")
 
 function sectorHeatmapMover(label, stock) {
   if (!stock || !stock.symbol) {
-    return `<span><small>${label}</small><strong>${loadingText("stock", DATA_LOADING_ETA_MARKET)}</strong><em></em></span>`;
+    return `<span><small>${escapeHtml(label)}</small><strong class="muted ${SETTLED_VALUE_CLASS}">Not available</strong><em></em></span>`;
   }
   return `
     <span>
@@ -2947,7 +2947,11 @@ function sectorBreadthPercent(item) {
 
 function renderSectorStockMover(stock, sectorChangePercent) {
   if (!stock || !stock.symbol) {
-    return `<span>${loadingText("stock", DATA_LOADING_ETA_MARKET)}</span>`;
+    // These rows only render once the section has resolved, so an empty mover is
+    // the provider's answer rather than a fetch still in flight - the row's own
+    // summary says "constituent best/worst data is not available". A loading
+    // placeholder here promised an arrival that was never coming.
+    return settledText("Not available");
   }
   const spread = Number.isFinite(stock.changePercent) && Number.isFinite(sectorChangePercent)
     ? stock.changePercent - sectorChangePercent
@@ -2955,8 +2959,8 @@ function renderSectorStockMover(stock, sectorChangePercent) {
   return `
     <strong>${escapeHtml(stock.symbol)}</strong>
     <span>${escapeHtml(stock.name || "")}</span>
-    <span class="${changeClass(stock.changePercent)}">${signed(stock.changePercent)}% · ${formatMoney(stock.price, "INR")}</span>
-    <small>vs sector ${Number.isFinite(spread) ? `${spread >= 0 ? "+" : ""}${spread.toFixed(2)} pp` : loadingText("spread", DATA_LOADING_ETA_MARKET)}</small>
+    <span class="${changeClass(stock.changePercent)}">${Number.isFinite(stock.changePercent) ? `${signed(stock.changePercent)}%` : settledText()} · ${Number.isFinite(stock.price) ? formatMoney(stock.price, "INR") : settledText()}</span>
+    <small>vs sector ${Number.isFinite(spread) ? `${spread >= 0 ? "+" : ""}${spread.toFixed(2)} pp` : settledText()}</small>
   `;
 }
 
@@ -3010,8 +3014,8 @@ function renderMentionedStockHeatmap(data) {
         <span class="stock-heatmap-name">${escapeHtml(stock.name || "Tracked stock")}</span>
       </div>
       <div class="stock-heatmap-move">
-        <span>${formatMoney(stock.price, "INR")}</span>
-        <em>${Number.isFinite(stock.changePercent) ? `${signed(stock.changePercent)}%` : loadingText("move", DATA_LOADING_ETA_MARKET)}</em>
+        <span>${Number.isFinite(stock.price) ? formatMoney(stock.price, "INR") : settledText()}</span>
+        <em>${Number.isFinite(stock.changePercent) ? `${signed(stock.changePercent)}%` : settledText()}</em>
       </div>
       <small>${escapeHtml(sources + moreSources)}</small>
     `;
@@ -3311,18 +3315,34 @@ function renderSectorOpenInterest(openInterest) {
   rows.innerHTML = "";
 
   if (!openInterest.available) {
-    const status = openInterest.loading || monitorRefreshing() ? "OI refreshing" : loadingText("OI", DATA_LOADING_ETA_MARKET);
+    // A finished fetch that came back empty is not a fetch still running. The
+    // payload carries its own reason - "NSE sector constituents were
+    // unavailable" - and showing "Loading OI... ETA 20-60s" over it advertised a
+    // countdown to something that had already failed.
+    const pending = Boolean(openInterest.loading) || monitorRefreshing();
+    const status = pending ? "OI refreshing" : "Unavailable";
+    const reason = openInterest.error || openInterest.summary
+      || (pending ? monitorLoadingText("NSE sector-wise OI could not be loaded.") : "NSE sector-wise OI could not be loaded.");
     setText("#sectorOiStatus", status);
+    if (!pending) {
+      document.querySelector("#sectorOiStatus")?.classList.add("muted", SETTLED_VALUE_CLASS);
+    }
     summary.innerHTML = `
       <article class="market-mini-card">
         <span>Sector OI</span>
-        <strong>${escapeHtml(status)}</strong>
-        <small>${escapeHtml(openInterest.error || openInterest.summary || monitorLoadingText("NSE sector-wise OI could not be loaded."))}</small>
+        <strong${pending ? "" : ` class="muted ${SETTLED_VALUE_CLASS}"`}>${escapeHtml(status)}</strong>
+        <small${pending ? "" : ` class="muted ${SETTLED_VALUE_CLASS}"`}>${escapeHtml(reason)}</small>
       </article>
     `;
-    emptyTable("#sectorOiRows", 6, monitorLoadingText("Sector-wise OI is unavailable."));
+    emptyTable(
+      "#sectorOiRows",
+      6,
+      pending ? monitorLoadingText("Sector-wise OI is unavailable.") : "Sector-wise OI is unavailable.",
+      !pending,
+    );
     return;
   }
+  document.querySelector("#sectorOiStatus")?.classList.remove("muted", SETTLED_VALUE_CLASS);
 
   const totals = openInterest.totals || {};
   const coverage = openInterest.coverage || {};
@@ -3474,17 +3494,28 @@ function renderNseHighAndBandRows(highs, priceBands) {
   }
 }
 
-function emptyTable(selector, colspan, message) {
+// ``settled`` marks a section the provider has already answered for, so its
+// explanation is shown as written instead of being swept into a spinner.
+function emptyTable(selector, colspan, message, settled = false) {
   const body = document.querySelector(selector);
   if (body) {
     const rowClass = monitorRefreshing() ? " class=\"is-refreshing-row\"" : "";
-    body.innerHTML = `<tr${rowClass}><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
+    const cellClass = settled ? ` class="muted ${SETTLED_VALUE_CLASS}"` : "";
+    body.innerHTML = `<tr${rowClass}><td colspan="${colspan}"${cellClass}>${escapeHtml(message)}</td></tr>`;
     validateRenderedData(body);
   }
 }
 
 function loadingText(label = "data", eta = DATA_LOADING_ETA_DEFAULT) {
   return `Loading ${label}... ETA ${eta}`;
+}
+
+// Marks a value the renderer knows will not arrive, so the placeholder sweep
+// leaves it alone instead of restyling it as pending.
+const SETTLED_VALUE_CLASS = "data-unreported";
+
+function settledText(text = "n/a") {
+  return `<span class="muted ${SETTLED_VALUE_CLASS}">${escapeHtml(text)}</span>`;
 }
 
 function loadingMarkup(label = "data", eta = DATA_LOADING_ETA_DEFAULT) {
@@ -3527,6 +3558,13 @@ function validateRenderedData(root = document) {
 
   for (const element of elements) {
     if (element.children.length || element.closest("script, style, option, datalist")) {
+      continue;
+    }
+    // A renderer that already knows the value is absent marks it, and that
+    // answer is left alone. Without this the sweep rewrote every "n/a" and
+    // "not available" into a spinner, so a field the provider had explicitly
+    // declined to report was presented as one still arriving - and it never did.
+    if (element.closest(`.${SETTLED_VALUE_CLASS}`)) {
       continue;
     }
     const text = element.textContent.trim();
@@ -3581,10 +3619,19 @@ const settleTimers = new WeakMap();
 const GENERIC_PLACEHOLDER_LABELS = new Set(["data", "value", "percent", "price", "rate", "range", "number"]);
 
 function settleStalePlaceholders(root) {
-  clearTimeout(settleTimers.get(root));
+  // Armed once and left to run, rather than restarted on every render. The
+  // market monitor repaints every second in live mode, so clearing the timer
+  // first meant it was reset sixty times over before it could fire: the one tab
+  // where placeholders visibly pile up was the one tab they could never settle
+  // on. Around 110 spinners sat there indefinitely, several of them over fields
+  // whose own payload already said the data was unavailable.
+  if (settleTimers.has(root)) {
+    return;
+  }
   settleTimers.set(
     root,
     setTimeout(() => {
+      settleTimers.delete(root);
       for (const element of root.querySelectorAll(".data-loading")) {
         const label = element.querySelector("span:not(.data-loading-dot)")?.textContent || "";
         const subject = label.replace(/^Loading\s+/i, "").replace(/\.\.\.$/, "").trim();
@@ -3777,20 +3824,32 @@ function renderTechnical(technical, currency) {
   ].slice(0, 5));
 }
 
+// A stock report is one completed fetch, so a metric absent from it is absent
+// for good - nothing re-requests it. Formatting those as pending left the
+// fundamentals panel counting down forever, most visibly for the fields Yahoo's
+// quoteSummary supplies, which now answers 401 to anonymous callers.
+function reportedNumber(value, format) {
+  return Number.isFinite(value) ? [format(value), false] : ["Not reported", true];
+}
+
+function reportedText(value) {
+  return isMissingValue(value) ? ["Not reported", true] : [String(value), false];
+}
+
 function renderFundamentals(metrics, signals, currency) {
   const rows = [
-    ["Sector", displayText(metrics.sector, "sector", DATA_LOADING_ETA_PROVIDER)],
-    ["Market cap", formatLarge(metrics.marketCap, currency)],
-    ["Revenue", formatLarge(metrics.revenue, currency)],
-    ["Net profit", formatLarge(metrics.netIncome, currency)],
-    ["Trailing P/E", formatNumber(metrics.trailingPE)],
-    ["Revenue growth", formatRatioPercent(metrics.revenueGrowth)],
-    ["Profit margin", formatRatioPercent(metrics.profitMargins)],
-    ["Return on equity", formatRatioPercent(metrics.returnOnEquity)],
-    ["Debt/equity", formatNumber(metrics.debtToEquity)],
-    ["Promoter holding", formatRatioPercent(metrics.promoterHolding)],
-    ["Target mean", formatMoney(metrics.targetMeanPrice, currency)],
-    ["Analyst view", displayText(metrics.recommendationKey, "analyst view", DATA_LOADING_ETA_PROVIDER)]
+    ["Sector", ...reportedText(metrics.sector)],
+    ["Market cap", ...reportedNumber(metrics.marketCap, (value) => formatLarge(value, currency))],
+    ["Revenue", ...reportedNumber(metrics.revenue, (value) => formatLarge(value, currency))],
+    ["Net profit", ...reportedNumber(metrics.netIncome, (value) => formatLarge(value, currency))],
+    ["Trailing P/E", ...reportedNumber(metrics.trailingPE, formatNumber)],
+    ["Revenue growth", ...reportedNumber(metrics.revenueGrowth, formatRatioPercent)],
+    ["Profit margin", ...reportedNumber(metrics.profitMargins, formatRatioPercent)],
+    ["Return on equity", ...reportedNumber(metrics.returnOnEquity, formatRatioPercent)],
+    ["Debt/equity", ...reportedNumber(metrics.debtToEquity, formatNumber)],
+    ["Promoter holding", ...reportedNumber(metrics.promoterHolding, formatRatioPercent)],
+    ["Target mean", ...reportedNumber(metrics.targetMeanPrice, (value) => formatMoney(value, currency))],
+    ["Analyst view", ...reportedText(metrics.recommendationKey)]
   ];
 
   renderTable("#fundamentalMetrics", rows);
@@ -4171,12 +4230,15 @@ function renderTable(selector, rows) {
   const container = document.querySelector(selector);
   container.innerHTML = "";
   const fragment = document.createDocumentFragment();
-  for (const [label, value] of rows) {
+  for (const [label, value, settled] of rows) {
     const row = document.createElement("div");
     const name = document.createElement("span");
     const amount = document.createElement("strong");
     name.textContent = label;
     amount.textContent = value;
+    if (settled) {
+      amount.classList.add("muted", SETTLED_VALUE_CLASS);
+    }
     row.append(name, amount);
     fragment.appendChild(row);
   }
@@ -4574,6 +4636,17 @@ function formatSignedLarge(value) {
 function formatNumber(value) {
   if (!Number.isFinite(value)) {
     return loadingText("value");
+  }
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+}
+
+// For a value inside a section that has already resolved. formatNumber assumes
+// anything non-finite is still on its way, which is right while a payload is in
+// flight and wrong once it has landed with the field empty - the sector rows
+// carry a null stockCount that no later request will fill in.
+function settledNumber(value) {
+  if (!Number.isFinite(value)) {
+    return settledText();
   }
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
 }

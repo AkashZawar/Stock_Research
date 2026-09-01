@@ -63,6 +63,21 @@ Notes on the cost of each provider, which is why the code is shaped this way:
   earns a 429 on the `chart` endpoint, which *does* work and which every report
   depends on. `endpoint_family` strips the symbol so the memo is per route, not
   per symbol.
+- **A remembered 401 stops the waste but does not fill the gap**, so `get_quote`
+  and `get_quotes` fall back to `quote_from_chart_meta`, which reads the same
+  last price, day move and range, 52-week range, volume and names out of the
+  `chart` endpoint's `meta` block under different key names. Nothing there is
+  estimated. Without it the commodity-impact table published `price: null` for
+  every stock outside the breakout watchlist - Hindalco, Tata Steel and Indigo
+  among them - and the UI rendered that as a loading spinner. The crumb handshake
+  (`/v1/test/getcrumb`) is not used: it is itself rate limited and answered 429
+  on repeat attempts, which is the same fragility that broke the quote endpoint.
+- **A retired ticker does not always 404.** `HPCL.NS` answers 200 with the symbol
+  echoed back, `instrumentType: MUTUALFUND`, and every price null, last traded in
+  2019 - Hindustan Petroleum is `HINDPETRO.NS`. `quote_from_chart_meta` therefore
+  requires a finite `regularMarketPrice` before it will call something a quote,
+  and `WatchlistSymbolTests` pins the two symbols that had already drifted
+  (`TATAMOTORS.NS` split into `TMCV.NS` and `TMPV.NS` at the demerger).
 - **The cache** (`cached` / `get_cached` / `set_cached`) is a process-local dict
   with a TTL. Writes take `_cache_lock` because loaders run on the thread pool,
   and `evict_cache_entries` bounds it at `MAX_CACHE_ENTRIES` (expired keys first,
