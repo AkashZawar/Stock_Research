@@ -78,6 +78,23 @@ Notes on the cost of each provider, which is why the code is shaped this way:
   requires a finite `regularMarketPrice` before it will call something a quote,
   and `WatchlistSymbolTests` pins the two symbols that had already drifted
   (`TATAMOTORS.NS` split into `TMCV.NS` and `TMPV.NS` at the demerger).
+- **The detailed monitor scan had to fit inside one request.** It took about 64s,
+  so it could only ever run on a background thread - and a serverless host kills
+  that thread when the response is sent, which is why the live deployment showed
+  "0 scanned" indefinitely. Two things cost the time. The scan pools were set at
+  6/3/2; measured against Yahoo's chart endpoint over the full 120/69/25 symbol
+  universes, every level up to 32 returned zero failures while the wall time fell
+  10.3s -> 3.4s, 9.7s -> 1.8s and 6.6s -> 1.8s, so they are now 20/16/10. The
+  larger cost was `enrich_nifty500_universe_with_yahoo_quotes`, which fills
+  prices onto the constituent CSV whenever NSE declines: seven sequential batches
+  of 80, each degrading to per-symbol chart calls under the 401, for ~34s. The
+  batches are independent and now go out together. Build time fell to 8-26s
+  depending on whether NSE answers, which is what made `?detail=1` possible.
+- **NSE's latency is erratic rather than slow, and the universe has a second
+  source.** `build_nifty500_primary_universe` used to give NSE the default
+  20s x 3 budget before trying the constituent CSV, which answers in under a
+  second with the same 500 names. One short attempt is enough: prices are the
+  only thing NSE adds there, and Yahoo can supply those.
 - **The cache** (`cached` / `get_cached` / `set_cached`) is a process-local dict
   with a TTL. Writes take `_cache_lock` because loaders run on the thread pool,
   and `evict_cache_entries` bounds it at `MAX_CACHE_ENTRIES` (expired keys first,

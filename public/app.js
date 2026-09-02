@@ -722,6 +722,7 @@ async function loadMarketMonitor(forceRefresh, options = {}) {
     } else {
       clearMarketMonitorPoll();
     }
+    requestMonitorDetail(payload);
   } catch (error) {
     if (!silent) {
       monitorError.textContent = error.message;
@@ -734,6 +735,36 @@ async function loadMarketMonitor(forceRefresh, options = {}) {
     if (!silent) {
       monitorLoading.classList.add("is-hidden");
     }
+  }
+}
+
+// The snapshot comes back in about a second and the detailed scan takes longer
+// than any one request should hold, so the two are fetched separately: the
+// dashboard paints on the snapshot, then this asks for the scan and merges it.
+// It replaces waiting on a server-side background refresh, which a serverless
+// host kills when the response is sent - there the detail never arrived at all
+// and the tab kept saying "detailed scan refreshing" indefinitely.
+let monitorDetailRequested = false;
+
+async function requestMonitorDetail(payload) {
+  if (monitorDetailRequested || payload.detailGeneratedAt) {
+    return;
+  }
+  monitorDetailRequested = true;
+  try {
+    const response = await fetch("/api/market-monitor?detail=1");
+    const detail = await response.json();
+    if (!response.ok || !detail.detailGeneratedAt) {
+      return;
+    }
+    latestMonitor = detail;
+    renderMarketMonitor(detail);
+    setMonitorPane(selectedMonitorPane);
+  } catch (error) {
+    // The snapshot is already on screen, so a failed scan leaves the dashboard
+    // as it was rather than replacing it with an error.
+  } finally {
+    monitorDetailRequested = false;
   }
 }
 

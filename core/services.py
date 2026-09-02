@@ -191,9 +191,23 @@ NIFTY_500_CONSTITUENTS_URL = "https://www.niftyindices.com/IndexConstituent/ind_
 NIFTY_500_PRIMARY_CACHE_SECONDS = 6 * 60 * 60
 NIFTY_500_PRIMARY_SCAN_LIMIT = 120
 NIFTY_500_CONSTITUENTS_CSV_URL = NIFTY_500_CONSTITUENTS_URL
-MARKET_MONITOR_PRIMARY_CONCURRENCY = 6
-MARKET_MONITOR_ACTIVITY_CONCURRENCY = 3
-MARKET_MONITOR_CATALYST_CONCURRENCY = 2
+# These scans are what decide whether the detailed monitor can be built inside a
+# single request. At 6/3/2 the three of them took roughly 26s of the ~64s build,
+# which no serverless request survives, so the dashboard depended on a background
+# thread that a serverless host kills the moment the response is sent. Measured
+# against Yahoo's chart endpoint over the full 120/69/25 symbol universes, every
+# level up to 32 returned zero failures, and the wall time fell 10.3s -> 3.4s,
+# 9.7s -> 1.8s and 6.6s -> 1.8s. These sit below the level that was tested clean,
+# to leave headroom for a shared deployment IP that is not the only caller.
+MARKET_MONITOR_PRIMARY_CONCURRENCY = 20
+MARKET_MONITOR_ACTIVITY_CONCURRENCY = 16
+MARKET_MONITOR_CATALYST_CONCURRENCY = 10
+# Yahoo's batch quote endpoint answers 401 to anonymous callers, so a batch of 80
+# degrades into 80 single chart calls. These two multiply - at most four batches
+# in flight, eight symbols each - and the product stays inside the range that
+# scanned the full universe without a single failure.
+UNIVERSE_QUOTE_BATCH_CONCURRENCY = 4
+QUOTE_FALLBACK_CONCURRENCY = 8
 NIFTY_50_INDEX_NAME = "NIFTY 50"
 NSE_SNAPSHOT_ENDPOINTS = {
     "marketStatus": "/api/marketStatus",
@@ -4443,8 +4457,13 @@ def safe_nifty500_primary_universe():
 def build_nifty500_primary_universe():
     errors = []
     try:
+        # NSE is the better source here because it carries prices, which is what
+        # ranks the 500 down to the scan list, but it is not the only source: the
+        # constituent CSV answers in under a second with the same names. On the
+        # default 20s x 3 budget a sulking NSE cost 33s of a ~64s build, so this
+        # gives it one short attempt and then stops waiting.
         rows = build_nifty500_primary_universe_from_index_payload(
-            fetch_nse_stock_index_payload(NIFTY_500_INDEX_NAME)
+            fetch_nse_stock_index_payload(NIFTY_500_INDEX_NAME, timeout=6, attempts=1)
         )
     except RuntimeError as error:
         errors.append(str(error))
@@ -4526,12 +4545,22 @@ def build_nifty500_primary_universe_from_csv():
 
 
 def enrich_nifty500_universe_with_yahoo_quotes(universe):
+    """Fill prices onto a universe that came from the CSV, which carries none.
+
+    This is the branch a deployment takes whenever NSE declines, and it was the
+    single slowest thing the monitor did: 500 symbols in seven sequential
+    batches, each of which now degrades to per-symbol chart calls while Yahoo's
+    batch quote endpoint answers 401. That was ~34s of a ~64s build. The batches
+    are independent, so they go out together; the pool sizes multiply, and the
+    product is held at the level measured clean against Yahoo.
+    """
     quotes = {}
-    for batch in batches([stock.get("symbol") for stock in universe], 80):
-        try:
-            quotes.update(get_quotes(batch))
-        except RuntimeError:
-            continue
+    symbol_batches = list(batches([stock.get("symbol") for stock in universe], 80))
+    for ok, batch_quotes in settle_map(
+        symbol_batches, get_quotes, concurrency=UNIVERSE_QUOTE_BATCH_CONCURRENCY
+    ):
+        if ok and batch_quotes:
+            quotes.update(batch_quotes)
 
     if not quotes:
         return universe
@@ -4634,12 +4663,12 @@ def primary_scan_prefilter_score(stock):
     return score
 
 
-def fetch_nse_stock_index_payload(index_name):
+def fetch_nse_stock_index_payload(index_name, timeout=20, attempts=3):
     path = f"/api/equity-stockIndices?index={quote(index_name)}"
     try:
         return fetch_nse_json(path)
     except RuntimeError:
-        return fetch_nse_json_with_session(path)
+        return fetch_nse_json_with_session(path, timeout=timeout, attempts=attempts)
 
 
 def market_activity_universe(nse_snapshot=None):
@@ -5991,7 +6020,9 @@ def get_quotes(symbols):
     missing = [symbol for symbol in unique_symbols if symbol not in quotes]
     if not missing:
         return quotes
-    for symbol, (ok, value) in zip(missing, settle_map(missing, quote_from_chart_meta, concurrency=6)):
+    for symbol, (ok, value) in zip(
+        missing, settle_map(missing, quote_from_chart_meta, concurrency=QUOTE_FALLBACK_CONCURRENCY)
+    ):
         if ok and value.get("symbol"):
             quotes[symbol] = value
     return quotes

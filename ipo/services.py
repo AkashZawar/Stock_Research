@@ -759,6 +759,139 @@ _subscription_cooldown = {}
 _subscription_failures = {}
 
 
+# Chittorgarh publishes the rest of what NSE carries, under the same report API
+# as the subscription table. The path is
+# report/data-read/<id>/<page>/<month>/<year>/<financialYear>/<sort>/<segment>,
+# and the segment has to be the literal "mainboard" or "sme": passing 0 answers
+# msg=-1 with no rows, which is why these look dead until you get it right.
+CHITTORGARH_REPORT_URL = (
+    "https://webnodejs.chittorgarh.com/cloud/report/data-read/{report}/1/{month}/{year}/0/0/{segment}/0?search="
+)
+# 25 is listing performance, 184 is issue price band and size, 157 is OFS.
+CHITTORGARH_LISTED_REPORT = 25
+CHITTORGARH_ISSUE_REPORT = 184
+CHITTORGARH_OFS_REPORT = 157
+
+
+def fetch_chittorgarh_report(report, segment="mainboard"):
+    today = datetime.now(IST).date()
+    payload = json.loads(
+        fetch_html(
+            CHITTORGARH_REPORT_URL.format(
+                report=report, month=today.month, year=today.year, segment=segment
+            )
+        )
+    )
+    if not isinstance(payload, dict) or payload.get("msg") != 1:
+        return []
+    return [row for row in payload.get("reportTableData") or [] if isinstance(row, dict)]
+
+
+def scrape_recently_listed_chittorgarh():
+    """Recently listed issues, shaped like a row of NSE's past-issues feed.
+
+    Returning NSE's shape rather than the finished table means
+    ``build_recently_listed`` keeps doing the date windowing, equity filtering
+    and price enrichment, so the fallback cannot drift away from the primary
+    path. Chittorgarh files the board under "Issue Category", which maps onto
+    the ``securityType`` codes that ``is_equity_row`` and ``board_of`` expect.
+    """
+    rows = []
+    for segment, security_type in (("mainboard", "EQ"), ("sme", "SME")):
+        for row in fetch_chittorgarh_report(CHITTORGARH_LISTED_REPORT, segment):
+            symbol = clean_text(row.get("NSE Symbol"), 20).upper()
+            listing_date = clean_text(row.get("Listing Date"))
+            if not symbol or not listing_date:
+                continue
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "company": clean_text(row.get("Company")),
+                    "securityType": security_type,
+                    "listingDate": listing_date,
+                    "issuePrice": to_number(row.get("Issue Price (Rs.)")),
+                    "priceRange": "",
+                }
+            )
+    return rows
+
+
+def scrape_issue_terms_chittorgarh():
+    """Price band and issue size per company, keyed for name matching.
+
+    The grey-market trackers quote a premium but never the band it applies to,
+    so a GMP-only pipeline had no cap price - and without a cap price there is
+    no expected listing price to compute.
+    """
+    terms = {}
+    for segment, board in (("mainboard", "Mainboard"), ("sme", "SME")):
+        for row in fetch_chittorgarh_report(CHITTORGARH_ISSUE_REPORT, segment):
+            name = gmp_company_name(clean_text(row.get("Company")))
+            if not name:
+                continue
+            low = to_number(row.get("Price Band Min."))
+            high = to_number(row.get("Price Band Max."))
+            issue_price = to_number(row.get("Issue Price (Rs.)"))
+            if is_finite(issue_price) and not is_finite(high):
+                low = high = issue_price
+            size_crore = to_number(row.get("Issue Amount (Rs.cr.)"))
+            if not is_finite(low) and not is_finite(high) and not is_finite(size_crore):
+                continue
+            terms[normalize_name(name)] = {
+                "company": name,
+                "board": board,
+                # Only allocated once an issue nears listing, so the newest rows
+                # carry none and the column stays honestly empty for them.
+                "symbol": clean_text(row.get("~nse_symbol"), 20).upper(),
+                "priceBandLow": round2(low) if is_finite(low) else None,
+                "priceBandHigh": round2(high) if is_finite(high) else None,
+                "issueSizeCrore": round2(size_crore) if is_finite(size_crore) else None,
+                "openDate": clean_text(row.get("Opening Date")),
+            }
+    return terms
+
+
+def scrape_ofs_chittorgarh(today):
+    """OFS offers, trimmed to the same window the NSE-backed table uses.
+
+    Chittorgarh reports one offer date rather than NSE's open/close pair, so an
+    offer is treated as open on its date and recent for the trailing window.
+    """
+    rows = []
+    for row in fetch_chittorgarh_report(CHITTORGARH_OFS_REPORT):
+        company = clean_text(row.get("Company Name"))
+        offer_date = parse_date(row.get("Offer date") or row.get("~offer_open_date"))
+        if not company or not offer_date:
+            continue
+        if not (today - timedelta(days=RECENT_LISTING_WINDOW_DAYS)
+                <= offer_date
+                <= today + timedelta(days=UPCOMING_WINDOW_DAYS)):
+            continue
+        floor_price = to_number(row.get("Floor price (Rs.)"))
+        cut_off = to_number(row.get("Cut-off Price (Rs.)"))
+        status = "Upcoming" if offer_date > today else "Open" if offer_date == today else "Completed"
+        rows.append(
+            {
+                "company": company,
+                "symbol": "",
+                "status": status,
+                "openDate": iso_date(offer_date),
+                "closeDate": iso_date(offer_date),
+                "floorPrice": round2(floor_price) if is_finite(floor_price) else None,
+                "cutOffPrice": round2(cut_off) if is_finite(cut_off) else None,
+                "currentPrice": None,
+                "discountPercent": None,
+                "issueSize": to_number(row.get("Total Shares offered")),
+                "subscription": {},
+                "recommendation": {"flag": "grey", "label": "Not rated", "score": None},
+                "analysisSymbol": None,
+                "source": "Chittorgarh",
+            }
+        )
+    rows.sort(key=lambda item: (item["openDate"] or "", item["company"]))
+    return rows
+
+
 def subscription_from_fallback(company, board, rows):
     """The fallback's figures for one company, or ``None`` if it does not list it."""
     for row in rows or []:
@@ -1516,13 +1649,14 @@ def gmp_field_consensus(company, quotes, key):
     return Counter(votes).most_common(1)[0][0]
 
 
-def build_pipeline_from_gmp(quotes, today):
+def build_pipeline_from_gmp(quotes, today, issue_terms=None):
     """Pipeline rows assembled from the grey-market aggregators alone.
 
-    NSE is the only source for the symbol, the issue size and subscription, so
-    when it is unreachable those columns have no source rather than being
-    momentarily empty. The rows carry ``source: "gmp"`` so the table can say so
-    instead of showing a loading placeholder that would never resolve.
+    The aggregators publish a premium and little else, so ``issue_terms`` - the
+    price band and issue size republished by Chittorgarh - is merged in where it
+    matches by name. It matters beyond filling two columns: the trackers quote a
+    premium in rupees, and turning that into a percentage or an expected listing
+    price needs the cap price, which only the terms carry.
 
     Status, board and dates are recovered from the aggregators themselves,
     which publish all three. Status matters most: their pages keep listing an
@@ -1557,31 +1691,37 @@ def build_pipeline_from_gmp(quotes, today):
         if not status and open_date:
             status = "Open" if open_date <= today else "Upcoming"
 
+        terms = (issue_terms or {}).get(normalize_name(company)) or {}
+        # The aggregators' own band is preferred where they publish one, because
+        # it is the band their premium was quoted against.
         band_high = gmp_band_high(company, quotes)
+        if not is_finite(band_high):
+            band_high = terms.get("priceBandHigh")
         gmp = gmp_consensus(company, quotes, band_high)
         if not gmp:
             continue
 
-        board = gmp_field_consensus(company, quotes, "board")
+        board = gmp_field_consensus(company, quotes, "board") or terms.get("board")
         subscription = subscription_from_fallback(company, board, fallback_subscriptions)
 
         pipeline.append(
             {
-                "symbol": "",
+                "symbol": terms.get("symbol") or "",
                 "company": company,
                 "board": board,
                 "status": status,
                 "openDate": iso_date(open_date),
                 "closeDate": iso_date(close_date),
-                "priceBandLow": None,
-                "priceBandHigh": round2(band_high) if is_finite(band_high) else None,
-                "issueSize": None,
+                "priceBandLow": terms.get("priceBandLow"),
+                "priceBandHigh": round2(band_high) if is_finite(band_high) else terms.get("priceBandHigh"),
+                "issueSize": terms.get("issueSizeCrore"),
+                "termsSource": "Chittorgarh" if terms else None,
                 "subscription": subscription,
                 "gmp": gmp,
                 "recommendation": upcoming_flag(
                     gmp, subscription, status == "Open", bidding_progress(open_date, close_date, today)
                 ),
-                "analysisSymbol": None,
+                "analysisSymbol": f"{terms['symbol']}.NS" if terms.get("symbol") else None,
                 "source": "gmp",
             }
         )
@@ -1952,30 +2092,59 @@ def build_ipo_dashboard():
 
     notes = []
     if nse_down:
-        # NSE carries the symbols, dates, board and subscription; the grey market
-        # sources carry none of those. Falling back to them loses some columns but
-        # keeps the tab answering its question, which an error page does not.
-        # Subscription is the exception: the republishers can still supply it.
-        recently_listed = []
-        pipeline = build_pipeline_from_gmp(quotes, today)
-        ofs = {"available": False, "rows": [], "note": "NSE is not responding, and it is the only OFS source."}
+        # The grey-market trackers carry a premium and nothing else - no symbol,
+        # no listing history, no OFS, no price band. Chittorgarh republishes all
+        # of those from the same exchange filings, so it stands in for NSE rather
+        # than the tab losing whole tables. Every row it supplies is attributed.
+        fallbacks = settle_named_loaders(
+            {
+                "listed": scrape_recently_listed_chittorgarh,
+                "terms": scrape_issue_terms_chittorgarh,
+                "ofs": lambda: scrape_ofs_chittorgarh(today),
+            },
+            concurrency=3,
+        )
+        recently_listed = [
+            dict(row, source="Chittorgarh")
+            for row in build_recently_listed(fallbacks.get("listed") or [], today)
+        ]
+        pipeline = build_pipeline_from_gmp(quotes, today, fallbacks.get("terms") or {})
+        ofs_rows = fallbacks.get("ofs") or []
+        ofs = {
+            "available": bool(ofs_rows),
+            "rows": ofs_rows,
+            "source": "Chittorgarh" if ofs_rows else None,
+            "note": (
+                "NSE is not responding; these offers come from Chittorgarh, which "
+                "reports one offer date rather than an open and close pair."
+                if ofs_rows
+                else "NSE is not responding and no fallback listed an OFS in this window."
+            ),
+        }
 
-        # Say which columns are actually missing, rather than naming subscription
-        # as lost while a fallback is visibly filling it in.
+        # Name the columns actually lost, rather than declaring whole tables
+        # unavailable while a fallback is visibly filling them in.
         subscription_source = next(
             (row["subscription"]["source"] for row in pipeline
              if (row.get("subscription") or {}).get("source")),
             None,
         )
-        subscription_note = (
-            f"Subscription is coming from {subscription_source} instead"
-            if subscription_source
-            else "Subscription is unavailable"
-        )
+        filled = [
+            label for label, present in (
+                ("listing history", bool(recently_listed)),
+                ("OFS", bool(ofs_rows)),
+                ("price bands and issue size", bool(fallbacks.get("terms"))),
+                (f"subscription (via {subscription_source})", bool(subscription_source)),
+            ) if present
+        ]
         notes.append(
-            "NSE India is not responding, so listing history, issue dates and OFS "
-            f"are unavailable. {subscription_note}, and the issues below come from "
-            f"the grey-market sources alone. ({nse_failure_reason(feed_errors)})"
+            "NSE India is not responding, so "
+            + (
+                f"{', '.join(filled)} are coming from Chittorgarh instead. "
+                if filled
+                else "listing history, issue dates and OFS are unavailable. "
+            )
+            + f"Issue dates and symbols may be incomplete. ({nse_failure_reason(feed_errors)})"
         )
     else:
         recently_listed = build_recently_listed(past_issues, today)

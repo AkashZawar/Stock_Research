@@ -145,6 +145,25 @@ tab works around.
 python3 manage.py test
 ```
 
+## Deployment
+
+Deployed on Vercel from `main`. `vercel.json` pins function execution to `bom1`
+(Mumbai) rather than Vercel's `iad1` (Washington DC) default.
+
+The reason is that this app reads Indian market sources. Measured against the
+live deployment running in `iad1`, NSE's market endpoints answered normally
+while three IPO endpoints - `all-upcoming-issues`, `ipo-current-issue` and
+`public-past-issues` - did not, and the same code answers from a machine in
+India. That is a difference in where the request came from, not in the code, so
+the function is placed in the region the data is served from.
+
+Two honest caveats. Vercel documents outbound IPs as a dynamic pool and nowhere
+promises that egress geolocation follows the function region, so this is
+reasoned from the region-to-AWS mapping (`bom1` is `ap-south-1`) rather than
+guaranteed; verify against the live deployment rather than assuming. And it is
+not a fix the app relies on - every affected section has a fallback source, so
+if NSE stays unreachable the tab still fills. Hobby plans may pin one region.
+
 ## Notes
 
 - The report is for research and education only.

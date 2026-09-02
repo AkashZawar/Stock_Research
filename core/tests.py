@@ -853,6 +853,37 @@ class MarketMonitorEndpointTests(SimpleTestCase):
         self.assertEqual(start_refresh.call_count, 1)
         self.assertEqual(build_live.call_count, 1)
 
+    def test_the_detail_request_builds_the_scan_instead_of_backgrounding_it(self):
+        # A serverless host kills the background thread when the response is
+        # sent, so a caller that asks for the detail has to be given it rather
+        # than a promise that it is coming.
+        detail = {"generatedAt": "2026-05-22T10:00:00+05:30", "scannedCount": 120}
+
+        with (
+            patch("core.services.build_market_monitor", return_value=detail) as build,
+            patch("core.services.start_market_monitor_refresh") as start_refresh,
+            patch("core.services.build_live_market_monitor", side_effect=lambda payload, **kwargs: payload),
+        ):
+            response = self.client.get("/api/market-monitor?detail=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["scannedCount"], 120)
+        self.assertEqual(build.call_count, 1)
+        start_refresh.assert_not_called()
+
+    def test_a_second_detail_request_reuses_the_first_scan(self):
+        detail = {"generatedAt": "2026-05-22T10:00:00+05:30", "scannedCount": 120}
+
+        with (
+            patch("core.services.build_market_monitor", return_value=detail) as build,
+            patch("core.services.build_live_market_monitor", side_effect=lambda payload, **kwargs: payload),
+        ):
+            self.client.get("/api/market-monitor?detail=1")
+            second = self.client.get("/api/market-monitor?detail=1")
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(build.call_count, 1)
+
 
 class OpenInterestTests(SimpleTestCase):
     def test_build_open_interest_report_summarizes_expiry_horizons(self):

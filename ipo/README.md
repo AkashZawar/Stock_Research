@@ -43,9 +43,36 @@ from `core.services`.
 | Live OFS floor price, LTP, subscription by category | NSE `/api/live-ofs-active-issues` |
 | Scheduled OFS | NSE `/api/all-upcoming-issues?category=forthcoming` |
 | Completed OFS, allotment price | NSE `/api/live-ofs-past-issues` |
+| Listing history when NSE is unreachable | Chittorgarh report 25 (fallback, attributed in the UI) |
+| Price band, issue size, NSE symbol when NSE is unreachable | Chittorgarh report 184 (fallback, attributed in the UI) |
+| OFS when NSE is unreachable | Chittorgarh report 157 (fallback, attributed in the UI) |
 
 ## Things worth knowing before changing this
 
+- **NSE is reachable from a laptop and often not from the deployment.** The live
+  Vercel deployment answers `nseAvailable: false` while the same code answers
+  `true` locally, so the NSE-down branch is the branch most users actually see -
+  it is the normal path in production, not an edge case. It used to return an
+  empty listings table, no OFS and a pipeline with no price band, because those
+  columns had no source but NSE. Chittorgarh republishes all three from the same
+  filings, so `build_ipo_dashboard` now fetches reports 25 (listing history), 184
+  (price band, issue size, symbol) and 157 (OFS) concurrently whenever NSE gave
+  nothing. Measured against a simulated outage this moved the tab from 0 listings
+  / 0 OFS / 0 price bands to 12 / 3 / 14-of-14.
+- **The listing fallback returns NSE's row shape, not the finished table.**
+  `scrape_recently_listed_chittorgarh` emits `securityType`, `listingDate`,
+  `issuePrice` and so on, and `build_recently_listed` consumes it unchanged. The
+  date window, the debt-series filter and the Yahoo price enrichment therefore
+  stay on one code path and cannot drift apart between the two sources.
+- **The price band matters more than the two columns it fills.** The grey-market
+  trackers quote a premium in rupees and never the band it was quoted against.
+  Without a cap price that premium cannot be turned into a percentage or an
+  expected listing price, so report 184 is what makes the GMP columns meaningful
+  when NSE is gone, not just what fills "price band".
+- **An upcoming issue has no NSE symbol yet, and that is real.** Report 184
+  carries `~nse_symbol` for 56 of 65 rows; the empty ones are the issues that
+  have not been allocated a symbol. Those rows leave the column empty rather than
+  inventing one.
 - **Subscription has two fallbacks, and neither is a peer of the exchange.** When
   NSE is unreachable the subscription column has no source at all, which is what
   the live deployment sees. `fetch_subscription_fallback` tries Chittorgarh's

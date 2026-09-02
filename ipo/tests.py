@@ -1029,11 +1029,19 @@ class GmpOnlyPipelineTests(SimpleTestCase):
 class NseOutageTests(SimpleTestCase):
     """What the tab does when NSE answers nothing at all."""
     def setUp(self):
-        # The pipeline consults the fallback subscription source; without this
-        # the test would reach the network and depend on the day's listings.
-        patcher = patch.object(services, "fetch_subscription_fallback", return_value=[])
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # With NSE gone the tab consults fallbacks for subscription, listing
+        # history, issue terms and OFS. All four are stubbed off by default so a
+        # test neither reaches the network nor depends on which issues happen to
+        # be live today; the tests that care opt back in.
+        for name, kwargs in (
+            ("fetch_subscription_fallback", {"return_value": []}),
+            ("scrape_recently_listed_chittorgarh", {"return_value": []}),
+            ("scrape_issue_terms_chittorgarh", {"return_value": {}}),
+            ("scrape_ofs_chittorgarh", {"side_effect": lambda today: []}),
+        ):
+            patcher = patch.object(services, name, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
 
     def gmp_rows(self):
@@ -1079,11 +1087,99 @@ class NseOutageTests(SimpleTestCase):
         self.assertEqual(len(payload["pipeline"]), 1)
         self.assertEqual(payload["pipeline"][0]["company"], "Lumino Industries")
 
-    def test_the_sections_only_nse_can_fill_are_empty_rather_than_stale(self):
+    def test_sections_with_no_fallback_left_are_empty_rather_than_stale(self):
         payload = self.build_with_nse_down()
         self.assertEqual(payload["recentlyListed"], [])
         self.assertFalse(payload["ofs"]["available"])
         self.assertEqual(payload["counts"]["recentlyListed"], 0)
+
+    def test_listing_history_is_rebuilt_from_the_fallback_when_nse_is_gone(self):
+        # Chittorgarh rows are returned in NSE's own shape, so the date window,
+        # equity filter and price enrichment stay on the one code path.
+        today = datetime.now(services.IST).date()
+        listed = [{
+            "symbol": "SYMBIOTEC",
+            "company": "Symbiotec Pharmalab Ltd.",
+            "securityType": "EQ",
+            "listingDate": (today - timedelta(days=1)).strftime("%d-%b-%Y"),
+            "issuePrice": 988.0,
+            "priceRange": "",
+        }]
+        with patch.object(services, "scrape_recently_listed_chittorgarh", return_value=listed), \
+             patch.object(services, "listing_and_current_price",
+                          return_value={"listingPrice": 1000.0, "currentPrice": 1126.25}):
+            payload = self.build_with_nse_down()
+
+        self.assertEqual(len(payload["recentlyListed"]), 1)
+        row = payload["recentlyListed"][0]
+        self.assertEqual(row["symbol"], "SYMBIOTEC")
+        self.assertEqual(row["issuePrice"], 988.0)
+        self.assertEqual(row["source"], "Chittorgarh")
+        self.assertEqual(payload["counts"]["recentlyListed"], 1)
+
+    def test_a_listing_outside_the_window_is_still_excluded_from_the_fallback(self):
+        today = datetime.now(services.IST).date()
+        listed = [{
+            "symbol": "OLD",
+            "company": "Old Listing Ltd.",
+            "securityType": "EQ",
+            "listingDate": (today - timedelta(days=40)).strftime("%d-%b-%Y"),
+            "issuePrice": 100.0,
+            "priceRange": "",
+        }]
+        with patch.object(services, "scrape_recently_listed_chittorgarh", return_value=listed):
+            payload = self.build_with_nse_down()
+
+        self.assertEqual(payload["recentlyListed"], [])
+
+    def test_ofs_comes_from_the_fallback_and_says_where_it_came_from(self):
+        today = datetime.now(services.IST).date()
+        rows = [{
+            "company": "Hindustan Copper Ltd.", "symbol": "", "status": "Completed",
+            "openDate": today.isoformat(), "closeDate": today.isoformat(),
+            "floorPrice": 514.0, "cutOffPrice": None, "currentPrice": None,
+            "discountPercent": None, "issueSize": None, "subscription": {},
+            "recommendation": {"flag": "grey", "label": "Not rated", "score": None},
+            "analysisSymbol": None, "source": "Chittorgarh",
+        }]
+        with patch.object(services, "scrape_ofs_chittorgarh", side_effect=lambda today: rows):
+            payload = self.build_with_nse_down()
+
+        self.assertTrue(payload["ofs"]["available"])
+        self.assertEqual(len(payload["ofs"]["rows"]), 1)
+        self.assertEqual(payload["ofs"]["source"], "Chittorgarh")
+
+    def test_the_price_band_the_grey_market_never_publishes_is_filled_in(self):
+        # Without a cap price a rupee premium cannot be turned into a percentage
+        # or an expected listing price, so this fills more than two columns.
+        terms = {
+            services.normalize_name("Lumino Industries"): {
+                "company": "Lumino Industries", "board": "Mainboard",
+                "priceBandLow": 78.0, "priceBandHigh": 82.0,
+                "issueSizeCrore": 720.0, "openDate": "",
+            }
+        }
+        with patch.object(services, "scrape_issue_terms_chittorgarh", return_value=terms):
+            payload = self.build_with_nse_down()
+
+        row = payload["pipeline"][0]
+        self.assertEqual(row["priceBandLow"], 78.0)
+        self.assertEqual(row["issueSize"], 720.0)
+        self.assertEqual(row["termsSource"], "Chittorgarh")
+
+    def test_the_note_names_each_column_the_fallback_actually_filled(self):
+        terms = {
+            services.normalize_name("Lumino Industries"): {
+                "company": "Lumino Industries", "board": "Mainboard",
+                "priceBandLow": 78.0, "priceBandHigh": 82.0,
+                "issueSizeCrore": 720.0, "openDate": "",
+            }
+        }
+        with patch.object(services, "scrape_issue_terms_chittorgarh", return_value=terms):
+            note = " ".join(self.build_with_nse_down()["notes"])
+
+        self.assertIn("Chittorgarh", note)
+        self.assertIn("price bands and issue size", note)
 
     def test_what_nse_actually_said_reaches_the_payload(self):
         # settle_named_loaders used to swallow the exception, leaving a generic
@@ -1095,9 +1191,9 @@ class NseOutageTests(SimpleTestCase):
         payload = self.build_with_nse_down()
         self.assertNotIn("NSE India", payload["source"])
 
-    def test_the_note_calls_subscription_missing_only_when_it_really_is(self):
+    def test_the_note_does_not_credit_a_column_no_fallback_filled(self):
         note = " ".join(self.build_with_nse_down()["notes"])
-        self.assertIn("Subscription is unavailable", note)
+        self.assertNotIn("subscription", note)
 
     def test_the_note_credits_the_fallback_when_it_filled_subscription_in(self):
         # The note used to say subscription was unavailable while a fallback was
@@ -1110,8 +1206,7 @@ class NseOutageTests(SimpleTestCase):
         ):
             payload = self.build_with_nse_down()
         note = " ".join(payload["notes"])
-        self.assertIn("Subscription is coming from Chittorgarh", note)
-        self.assertNotIn("Subscription is unavailable", note)
+        self.assertIn("subscription (via Chittorgarh)", note)
 
     def test_it_still_fails_loudly_when_no_source_of_any_kind_responds(self):
         def blocked():

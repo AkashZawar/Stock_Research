@@ -2,9 +2,18 @@
 
 - ``market_monitor`` (``/api/market-monitor``): returns the cached market
   monitor, kicking off a background refresh when data is stale. Supports
-  ``?live=1`` and ``?refresh=1``.
+  ``?live=1``, ``?refresh=1`` and ``?detail=1``.
 - ``cache_live_market_monitor`` / ``mark_monitor_refreshing``: helpers that
   assemble and flag the live payload built by ``core.services``.
+
+``?detail=1`` exists because the background refresh is not dependable off a
+long-lived server. It fills a process-local cache from a daemon thread, and a
+serverless host freezes that thread when the response is sent and routes the
+next request to a different instance, so the promise the dashboard makes -
+"detailed sections are loading in the background and will appear" - was one the
+deployment could not keep, and the tab sat empty saying "0 scanned". This builds
+the same payload inside the request instead, so the caller waits once and gets
+an answer rather than polling for one that may never arrive.
 """
 from django.http import JsonResponse
 
@@ -13,6 +22,13 @@ from core import services
 
 def market_monitor(request):
     try:
+        if request.GET.get("detail") == "1":
+            # A build already cached is reused: two visitors arriving together
+            # should not each pay for a scan of the same universe.
+            payload = services.get_cached("market-monitor") or services.build_market_monitor()
+            services.set_cached("market-monitor", payload, services.MARKET_MONITOR_CACHE_SECONDS)
+            return JsonResponse(cache_live_market_monitor(payload))
+
         if request.GET.get("live") == "1":
             fresh_payload = services.get_cached("market-monitor")
             cached_payload = fresh_payload or services.get_cached("market-monitor", include_expired=True)
