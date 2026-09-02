@@ -1458,9 +1458,14 @@ function ipoDetailMarkup(item) {
     ["Symbol", item.symbol],
     ["Board", item.board],
     // Neither NSE's issue feeds nor its issue-information block carry an
-    // industry classification before listing, so this is stated as absent
-    // rather than dropped - the offer document is the only place it exists.
-    ["Sector", item.sector || "Not classified until listing (see RHP)"],
+    // industry classification, so this comes from elsewhere and says so. Absent
+    // a match it is stated as unknown rather than dropped.
+    [
+      "Sector",
+      item.sector
+        ? `${item.sector}${item.sectorSource ? ` (via ${item.sectorSource})` : ""}`
+        : "Not classified until listing (see RHP)",
+    ],
     ["Issue size", ipoIssueSizeText(item)],
     ["Issue type", profile.issueType],
     ["Price range", profile.priceRange || formatIpoBand(item.priceBandLow, item.priceBandHigh)],
@@ -1490,11 +1495,14 @@ function ipoDetailMarkup(item) {
 
 // The offer feed reports issue size in shares; the issue-information block
 // states it in rupees but only as prose. Both are shown when both exist,
-// because neither on its own answers "how big is this".
+// because neither on its own answers "how big is this". The fallback source
+// publishes neither - it gives the rupee value as a number - so that carries its
+// own field and its own unit rather than being counted as shares.
 function ipoIssueSizeText(item) {
   const shares = Number.isFinite(item.issueSize) ? `${formatCompactNumber(item.issueSize)} shares` : "";
+  const crore = Number.isFinite(item.issueSizeCrore) ? `${formatNumber(item.issueSizeCrore)} crore` : "";
   const text = item.profile?.issueSizeText || "";
-  return [shares, text].filter(Boolean).join(" - ");
+  return [shares, crore, text].filter(Boolean).join(" - ");
 }
 
 function ipoInstitutionalMarkup(item) {
@@ -1503,9 +1511,17 @@ function ipoInstitutionalMarkup(item) {
 
   if (!split) {
     // Before bidding opens there is no book to report, which is not a failure.
-    return item.status === "Upcoming"
-      ? `<p class="muted">Bidding has not opened, so there is no institutional book yet.</p>`
-      : `<p class="muted">NSE publishes no FII/DII split for this issue.</p>`;
+    if (item.status === "Upcoming") {
+      return `<p class="muted">Bidding has not opened, so there is no institutional book yet.</p>`;
+    }
+    // Only NSE breaks the QIB book into FII, DII and mutual funds, so when NSE
+    // is unreachable the split is missing because it was never fetched. Saying
+    // "NSE publishes no split" there blames the exchange for our own outage and
+    // tells the reader the number does not exist when it does.
+    if (latestIpo?.nseAvailable === false) {
+      return `<p class="muted">NSE is not responding, and it is the only source that splits the QIB book into FII, DII and mutual funds. The combined QIB figure above comes from the fallback source.</p>`;
+    }
+    return `<p class="muted">NSE publishes no FII/DII split for this issue.</p>`;
   }
 
   const legs = ["fii", "dii", "mutualFunds", "otherQib"]
@@ -1537,7 +1553,14 @@ function ipoInstitutionalMarkup(item) {
         )
         .join("")}
     </ul>
-    <p class="muted ipo-detail-note">Share of the QIB book by shares bid. NSE reports no times-subscribed figure for these sub-categories.</p>
+    <p class="muted ipo-detail-note">Share of the QIB book by shares bid${
+      item.profile?.institutionalSource ? `, via ${escapeHtml(item.profile.institutionalSource)}` : ""
+    }. No times-subscribed figure is reported for these sub-categories.</p>
+    ${
+      item.profile?.institutionalNote
+        ? `<p class="muted ipo-detail-note">${escapeHtml(item.profile.institutionalNote)}</p>`
+        : ""
+    }
   `;
 }
 

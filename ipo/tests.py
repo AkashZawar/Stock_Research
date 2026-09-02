@@ -1038,6 +1038,8 @@ class NseOutageTests(SimpleTestCase):
             ("scrape_recently_listed_chittorgarh", {"return_value": []}),
             ("scrape_issue_terms_chittorgarh", {"return_value": {}}),
             ("scrape_ofs_chittorgarh", {"side_effect": lambda today: []}),
+            ("scrape_sectors_chittorgarh", {"return_value": {}}),
+            ("scrape_institutional_bse", {"return_value": {}}),
         ):
             patcher = patch.object(services, name, **kwargs)
             patcher.start()
@@ -1164,8 +1166,12 @@ class NseOutageTests(SimpleTestCase):
 
         row = payload["pipeline"][0]
         self.assertEqual(row["priceBandLow"], 78.0)
-        self.assertEqual(row["issueSize"], 720.0)
         self.assertEqual(row["termsSource"], "Chittorgarh")
+        # The rupee value keeps its own field. Put in ``issueSize``, which every
+        # other source fills with a share count and which the UI labels "shares",
+        # it rendered a 720 crore issue as "720 shares".
+        self.assertEqual(row["issueSizeCrore"], 720.0)
+        self.assertIsNone(row["issueSize"])
 
     def test_the_note_names_each_column_the_fallback_actually_filled(self):
         terms = {
@@ -1180,6 +1186,63 @@ class NseOutageTests(SimpleTestCase):
 
         self.assertIn("Chittorgarh", note)
         self.assertIn("price bands and issue size", note)
+
+    def test_the_sector_no_nse_feed_carries_is_filled_and_attributed(self):
+        # Absent this the tab called every issue unclassified, in every
+        # environment - NSE carries no industry whether or not it is answering.
+        with patch.object(
+            services, "scrape_sectors_chittorgarh", return_value={"lumino": "Specialty Chemicals"}
+        ):
+            payload = self.build_with_nse_down()
+
+        row = payload["pipeline"][0]
+        self.assertEqual(row["sector"], "Specialty Chemicals")
+        self.assertEqual(row["sectorSource"], "Chittorgarh")
+        self.assertIn("sector (via Chittorgarh)", " ".join(payload["notes"]))
+
+    def test_the_qib_split_comes_from_bse_when_nse_cannot_be_asked(self):
+        split = {"fii": {"label": "Foreign institutional", "sharesBid": 100.0, "shareOfQib": 50.0}}
+        with patch.object(
+            services,
+            "scrape_institutional_bse",
+            return_value={"lumino": {"institutional": split, "qibTimes": 10.0}},
+        ):
+            payload = self.build_with_nse_down()
+
+        profile = payload["pipeline"][0]["profile"]
+        self.assertEqual(profile["institutional"], split)
+        self.assertEqual(profile["institutionalSource"], "BSE")
+
+    def test_a_bse_book_that_contradicts_the_subscription_figure_is_flagged(self):
+        # BSE reconciles with the other sources on some issues and reports a far
+        # smaller book on others, so the row warns rather than presenting both as
+        # though they agree.
+        split = {"fii": {"label": "Foreign institutional", "sharesBid": 100.0, "shareOfQib": 100.0}}
+        with patch.object(
+            services, "fetch_subscription_fallback",
+            return_value=[{"company": "Lumino Industries", "overall": 20.0, "qib": 20.0, "source": "Chittorgarh"}],
+        ), patch.object(
+            services,
+            "scrape_institutional_bse",
+            return_value={"lumino": {"institutional": split, "qibTimes": 3.0}},
+        ):
+            payload = self.build_with_nse_down()
+
+        self.assertIn("proportions", payload["pipeline"][0]["profile"]["institutionalNote"])
+
+    def test_an_agreeing_bse_book_carries_no_warning(self):
+        split = {"fii": {"label": "Foreign institutional", "sharesBid": 100.0, "shareOfQib": 100.0}}
+        with patch.object(
+            services, "fetch_subscription_fallback",
+            return_value=[{"company": "Lumino Industries", "overall": 20.0, "qib": 20.0, "source": "Chittorgarh"}],
+        ), patch.object(
+            services,
+            "scrape_institutional_bse",
+            return_value={"lumino": {"institutional": split, "qibTimes": 20.4}},
+        ):
+            payload = self.build_with_nse_down()
+
+        self.assertNotIn("institutionalNote", payload["pipeline"][0]["profile"])
 
     def test_what_nse_actually_said_reaches_the_payload(self):
         # settle_named_loaders used to swallow the exception, leaving a generic

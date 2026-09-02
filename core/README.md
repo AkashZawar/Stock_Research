@@ -95,6 +95,14 @@ Notes on the cost of each provider, which is why the code is shaped this way:
   20s x 3 budget before trying the constituent CSV, which answers in under a
   second with the same 500 names. One short attempt is enough: prices are the
   only thing NSE adds there, and Yahoo can supply those.
+- **`fetch_nse_json_with_session` names what NSE said.** After the last retry it
+  used to raise a bare "NSE India endpoint is temporarily unavailable: <path>",
+  discarding the exception it had been holding. That message reaches users, via
+  the note the IPO tab prints, so neither they nor we could tell a refused
+  request from a slow one - the difference between NSE blocking the deployment
+  and NSE being briefly down. The status code, or the exception type, is now
+  appended. It matters because every NSE IPO endpoint answers from an Indian
+  network and fails from the deployment, so the code is the evidence for why.
 - **The cache** (`cached` / `get_cached` / `set_cached`) is a process-local dict
   with a TTL. Writes take `_cache_lock` because loaders run on the thread pool,
   and `evict_cache_entries` bounds it at `MAX_CACHE_ENTRIES` (expired keys first,

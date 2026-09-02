@@ -264,8 +264,8 @@ def parse_html_tables(html):
     return tables
 
 
-def fetch_html(url, timeout=GMP_FETCH_TIMEOUT):
-    request = Request(url, headers=BROWSER_HEADERS)
+def fetch_html(url, timeout=GMP_FETCH_TIMEOUT, headers=None):
+    request = Request(url, headers=headers or BROWSER_HEADERS)
     with urlopen(request, timeout=timeout, context=SSL_CONTEXT) as response:
         return response.read().decode("utf-8", errors="replace")
 
@@ -849,6 +849,202 @@ def scrape_issue_terms_chittorgarh():
                 "openDate": clean_text(row.get("Opening Date")),
             }
     return terms
+
+
+# Only NSE splits the QIB book into FII, DII and mutual funds, so when NSE is
+# unreachable that section of the expanded row had nothing to draw. BSE runs the
+# same book and publishes the same 1(a)-1(d) rows, which makes it the one
+# fallback that answers the question rather than approximating it.
+BSE_API_BASE = "https://api.bseindia.com/BseIndiaAPI/api"
+# Both headers are load-bearing: without the Referer BSE answers 403, and
+# without a browser User-Agent it redirects to an error page.
+BSE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.bseindia.com/",
+    "Accept": "application/json, text/plain, */*",
+}
+BSE_FETCH_TIMEOUT = 8
+BSE_INDEX_CACHE_SECONDS = 30 * 60
+BSE_SPLIT_CONCURRENCY = 5
+
+# BSE is inconsistent about the case of the last serial - "1(d)" on some issues
+# and "1(D)" on others - so serials are matched lowered.
+BSE_QIB_SUBCATEGORIES = (
+    ("1(a)", "fii", "Foreign institutional"),
+    ("1(b)", "dii", "Domestic institutions"),
+    ("1(c)", "mutualFunds", "Mutual funds"),
+    ("1(d)", "otherQib", "Other QIB"),
+)
+
+
+def fetch_bse_json(path):
+    payload = json.loads(fetch_html(f"{BSE_API_BASE}{path}", BSE_FETCH_TIMEOUT, BSE_HEADERS))
+    return payload if isinstance(payload, (dict, list)) else {}
+
+
+def bse_ipo_index():
+    """Company name to BSE's internal issue number.
+
+    Flag 1 is the open book and flag 2 the closed one; an issue that has closed
+    but not listed sits in the second, which is exactly the window this tab
+    covers, so both are read.
+    """
+
+    def load():
+        index = {}
+        for flag in (1, 2):
+            payload = fetch_bse_json(f"/GetPublicIssue_par_updated/w?flag={flag}")
+            rows = payload if isinstance(payload, list) else (payload.get("Table") or [])
+            for row in rows:
+                if not isinstance(row, dict) or clean_text(row.get("IR_flag")).upper() != "IPO":
+                    continue
+                name = gmp_company_name(clean_text(row.get("Scrip_Name")))
+                issue_no = clean_text(row.get("IPO_NO"), 12)
+                if name and issue_no:
+                    index.setdefault(normalize_name(name), issue_no)
+        return index
+
+    return cached("ipo-bse-index", load, BSE_INDEX_CACHE_SECONDS) or {}
+
+
+def parse_bse_institutional_split(payload):
+    """The QIB sub-categories, in the shape NSE's own split is parsed into.
+
+    BSE leaves the sub-category cells empty until institutions actually bid, so
+    an empty split means "nobody has bid yet", not a parse failure.
+    """
+    by_serial = {}
+    for row in payload.get("table2") or []:
+        if isinstance(row, dict):
+            by_serial[clean_text(row.get("SRNo")).lower()] = row
+
+    split = {}
+    for serial, key, label in BSE_QIB_SUBCATEGORIES:
+        shares = to_number((by_serial.get(serial) or {}).get("col4"))
+        if is_finite(shares) and shares > 0:
+            split[key] = {"label": label, "sharesBid": shares}
+
+    total = sum(entry["sharesBid"] for entry in split.values())
+    if total > 0:
+        for entry in split.values():
+            entry["shareOfQib"] = round2(entry["sharesBid"] / total * 100)
+    return split, to_number((by_serial.get("1") or {}).get("col5"))
+
+
+def scrape_institutional_bse(companies):
+    """QIB split per company, keyed for name matching."""
+    wanted = {normalize_name(name): name for name in companies if name}
+    if not wanted:
+        return {}
+
+    index = bse_ipo_index()
+    keys = [key for key in wanted if key in index]
+    if not keys:
+        return {}
+
+    found = {}
+    for key, (ok, result) in zip(
+        keys,
+        settle_map(
+            [index[key] for key in keys],
+            lambda issue_no: parse_bse_institutional_split(
+                fetch_bse_json(f"/Pubissues_GetBkbldgCatdem_ng/w?IPO_NO={issue_no}")
+            ),
+            concurrency=BSE_SPLIT_CONCURRENCY,
+        ),
+    ):
+        if ok and result and result[0]:
+            found[key] = {"institutional": result[0], "qibTimes": result[1]}
+    return found
+
+
+# Neither NSE feed carries an industry, so before this the tab said every issue
+# was unclassified until listing - in every environment, not just when NSE was
+# down. Chittorgarh files one, but indirectly: the per-issue page embeds a
+# numeric industry id, and the id-to-name table is the sector dropdown on the
+# sector-wise report. Two cheap lookups plus one page per issue.
+CHITTORGARH_SECTOR_URL = "https://www.chittorgarh.com/report/sector-wise-ipo-list-in-india/96/all/77/"
+CHITTORGARH_IPO_PAGE_URL = "https://www.chittorgarh.com/ipo/{slug}/{id}/"
+SECTOR_CACHE_SECONDS = 24 * 60 * 60
+SECTOR_LOOKUP_CONCURRENCY = 6
+
+# The payload is embedded in a Next.js script block, so the JSON arrives
+# double-escaped and the quotes may or may not carry backslashes.
+INDUSTRY_ID_PATTERN = re.compile(r'ipo_industry\\*"\s*:\s*\\*"(\d+)')
+SECTOR_OPTION_PATTERN = re.compile(r'<option[^>]*value="(\d+)"[^>]*>([^<]{2,60})</option>')
+
+
+def chittorgarh_sector_map():
+    """Industry id to industry name.
+
+    Cached for a day: this is a reference table that changes when a new industry
+    is coined, not when an issue opens.
+    """
+
+    def load():
+        html = fetch_html(CHITTORGARH_SECTOR_URL).replace("\\u003c", "<").replace("\\u003e", ">")
+        return {
+            key: clean_text(value)
+            for key, value in SECTOR_OPTION_PATTERN.findall(html)
+            if clean_text(value)
+        }
+
+    return cached("ipo-sector-map", load, SECTOR_CACHE_SECONDS) or {}
+
+
+def chittorgarh_ipo_page_index():
+    """Company name to the slug and id its Chittorgarh page lives at."""
+    index = {}
+    for segment in ("mainboard", "sme"):
+        for row in fetch_chittorgarh_report(CHITTORGARH_ISSUE_REPORT, segment):
+            name = gmp_company_name(clean_text(row.get("Company")))
+            slug = clean_text(row.get("~URLRewrite_Folder_Name"), 120)
+            issue_id = clean_text(row.get("~id"), 12)
+            if name and slug and issue_id:
+                index.setdefault(normalize_name(name), (slug, issue_id))
+    return index
+
+
+def fetch_chittorgarh_sector(entry, sectors):
+    slug, issue_id = entry
+    match = INDUSTRY_ID_PATTERN.search(
+        fetch_html(CHITTORGARH_IPO_PAGE_URL.format(slug=slug, id=issue_id))
+    )
+    return sectors.get(match.group(1)) if match else None
+
+
+def scrape_sectors_chittorgarh(companies):
+    """Industry per company, for the names the tab is about to show.
+
+    One page request per issue, so it is scoped to the pipeline rather than run
+    across every issue of the year, and failures are per-company: a page that
+    does not load costs that row its sector and nothing else.
+    """
+    wanted = {normalize_name(name): name for name in companies if name}
+    if not wanted:
+        return {}
+
+    sectors = chittorgarh_sector_map()
+    index = chittorgarh_ipo_page_index()
+    keys = [key for key in wanted if key in index]
+    if not sectors or not keys:
+        return {}
+
+    found = {}
+    for key, (ok, sector) in zip(
+        keys,
+        settle_map(
+            [index[key] for key in keys],
+            lambda entry: fetch_chittorgarh_sector(entry, sectors),
+            concurrency=SECTOR_LOOKUP_CONCURRENCY,
+        ),
+    ):
+        if ok and sector:
+            found[key] = sector
+    return found
 
 
 def scrape_ofs_chittorgarh(today):
@@ -1714,7 +1910,13 @@ def build_pipeline_from_gmp(quotes, today, issue_terms=None):
                 "closeDate": iso_date(close_date),
                 "priceBandLow": terms.get("priceBandLow"),
                 "priceBandHigh": round2(band_high) if is_finite(band_high) else terms.get("priceBandHigh"),
-                "issueSize": terms.get("issueSizeCrore"),
+                # ``issueSize`` is a share count everywhere else, which is what
+                # NSE's offer feed reports and what the UI labels it. Chittorgarh
+                # publishes the rupee value instead, so it gets its own field:
+                # put in the shared one it rendered "44.87 shares" for an issue
+                # of 44.87 crore.
+                "issueSize": None,
+                "issueSizeCrore": terms.get("issueSizeCrore"),
                 "termsSource": "Chittorgarh" if terms else None,
                 "subscription": subscription,
                 "gmp": gmp,
@@ -2056,6 +2258,78 @@ def nse_failure_message(feed_errors):
     )
 
 
+# BSE's absolute bid quantities reconcile with the other sources on some issues
+# and come in far below them on others, which suggests it publishes its own book
+# rather than the combined one for part of the market. The proportions within
+# QIB survive that either way, so the split is trusted for shape and checked for
+# scale: where BSE's own QIB multiple disagrees with the subscription figure the
+# tab already shows, the row says so instead of quietly presenting both.
+BSE_QIB_AGREEMENT_TOLERANCE = 0.25
+
+
+def bse_split_disagrees(bse_times, reported_times):
+    if not is_finite(bse_times) or not is_finite(reported_times) or reported_times <= 0:
+        return False
+    return abs(bse_times - reported_times) / reported_times > BSE_QIB_AGREEMENT_TOLERANCE
+
+
+def enrich_pipeline_details(pipeline):
+    """Fill the two fields the NSE issue feeds never carry between them.
+
+    Sector is absent from every NSE feed, so it was missing in every environment
+    rather than only when NSE was down. The QIB split is NSE-only, so it goes
+    missing exactly when NSE does. They are fetched together because both are
+    per-company lookups over the same handful of rows.
+    """
+    if not pipeline:
+        return []
+
+    companies = [row.get("company") for row in pipeline]
+    # An issue that has not opened has no book, so asking BSE about it would
+    # spend a request to be told what the row already knows.
+    needs_split = [
+        row.get("company")
+        for row in pipeline
+        if row.get("status") != "Upcoming" and not (row.get("profile") or {}).get("institutional")
+    ]
+
+    extra = settle_named_loaders(
+        {
+            "sectors": lambda: scrape_sectors_chittorgarh(companies),
+            "institutional": lambda: scrape_institutional_bse(needs_split),
+        },
+        concurrency=2,
+    )
+    sectors = extra.get("sectors") or {}
+    splits = extra.get("institutional") or {}
+
+    for row in pipeline:
+        key = normalize_name(row.get("company"))
+        if sectors.get(key):
+            row["sector"] = sectors[key]
+            row["sectorSource"] = "Chittorgarh"
+
+        found = splits.get(key)
+        if not found:
+            continue
+        profile = dict(row.get("profile") or {})
+        profile["institutional"] = found["institutional"]
+        profile["institutionalSource"] = "BSE"
+        if bse_split_disagrees(found.get("qibTimes"), (row.get("subscription") or {}).get("qib")):
+            profile["institutionalNote"] = (
+                "BSE's own QIB multiple differs from the subscription figure above, so treat "
+                "the shares bid as BSE's book and the proportions as the reliable part."
+            )
+        row["profile"] = profile
+
+    filled = []
+    if sectors:
+        filled.append("sector (via Chittorgarh)")
+    if splits:
+        filled.append("institutional demand (via BSE)")
+    return filled
+
+
 def build_ipo_dashboard():
     today = datetime.now(IST).date()
 
@@ -2150,6 +2424,12 @@ def build_ipo_dashboard():
         recently_listed = build_recently_listed(past_issues, today)
         pipeline = build_pipeline(upcoming_issues, current_issues, quotes, today)
         ofs = build_ofs(today, feeds.get("ofsActive"), feeds.get("ofsForthcoming"), feeds.get("ofsPast"))
+
+    # Runs on both paths: sector is missing from NSE's feeds whether or not NSE
+    # is answering, so this is not part of the outage branch.
+    enriched = enrich_pipeline_details(pipeline)
+    if enriched:
+        notes.append(f"NSE publishes neither field, so {' and '.join(enriched)} are filled from elsewhere.")
 
     if failed_sources:
         notes.append(

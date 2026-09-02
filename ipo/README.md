@@ -46,6 +46,8 @@ from `core.services`.
 | Listing history when NSE is unreachable | Chittorgarh report 25 (fallback, attributed in the UI) |
 | Price band, issue size, NSE symbol when NSE is unreachable | Chittorgarh report 184 (fallback, attributed in the UI) |
 | OFS when NSE is unreachable | Chittorgarh report 157 (fallback, attributed in the UI) |
+| Sector / industry | Chittorgarh: `ipo_industry` id on the per-issue page, named via the sector dropdown on report 96 (no NSE feed carries this) |
+| FII / DII / mutual-fund split when NSE is unreachable | BSE `Pubissues_GetBkbldgCatdem_ng/w?IPO_NO=` (fallback, attributed in the UI) |
 
 ## Things worth knowing before changing this
 
@@ -59,6 +61,37 @@ from `core.services`.
   (price band, issue size, symbol) and 157 (OFS) concurrently whenever NSE gave
   nothing. Measured against a simulated outage this moved the tab from 0 listings
   / 0 OFS / 0 price bands to 12 / 3 / 14-of-14.
+- **Sector was missing everywhere, not just when NSE was down.** No NSE issue
+  feed carries an industry, so the tab said "not classified until listing" for
+  every row in every environment - it looked like an outage symptom and was not.
+  Chittorgarh files one, but indirectly: the per-issue page embeds a numeric
+  `ipo_industry` id, and the id-to-name table is the sector dropdown on report
+  96. The dropdown lists all 218 industries on any single sector page, so the
+  reverse lookup costs one cached fetch rather than a crawl of every sector.
+  `enrich_pipeline_details` therefore runs on both the NSE-up and NSE-down paths.
+- **BSE is the only fallback that answers the QIB split rather than estimating
+  it.** It runs the same book and publishes the same `1(a)`-`1(d)` rows. Two
+  details bite: `Referer: https://www.bseindia.com/` is mandatory (403 without
+  it) alongside a browser User-Agent (redirect to an error page without it), and
+  the last serial is `1(d)` on some issues and `1(D)` on others, so serials are
+  matched lowered.
+- **BSE's absolute quantities are not always the whole market's.** They matched
+  another source to the unit on one issue and came in around 15% of it on
+  another, which suggests BSE reports its own book for part of the market. The
+  proportions within QIB hold either way, so the split is trusted for shape and
+  checked for scale: `bse_split_disagrees` compares BSE's own QIB multiple with
+  the subscription figure the row already shows, and past 25% the row says which
+  half to trust rather than presenting two numbers that quietly disagree.
+- **`issueSize` is a share count; the fallback's rupee figure is not.** NSE's
+  offer feed reports issue size as a number of shares, and that is what the tab
+  labels it. Chittorgarh reports the rupee value instead, so it lands in
+  `issueSizeCrore` and renders with its own unit. Routed through the shared
+  field, a 44.87 crore issue was shown to users as "45 shares".
+- **The institutional block says which of two things is missing.** Only NSE
+  splits the QIB book into FII, DII and mutual funds, so when NSE is unreachable
+  that section has nothing to draw. It now says so, instead of "NSE publishes no
+  FII/DII split for this issue" - which blamed the exchange for our own outage
+  and told the reader a number does not exist when it does.
 - **The listing fallback returns NSE's row shape, not the finished table.**
   `scrape_recently_listed_chittorgarh` emits `securityType`, `listingDate`,
   `issuePrice` and so on, and `build_recently_listed` consumes it unchanged. The

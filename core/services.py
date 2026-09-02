@@ -10495,7 +10495,16 @@ def fetch_nse_json_with_session(path, timeout=20, attempts=3):
             last_error = error
         if attempt < attempts - 1:
             time.sleep(0.4 * (attempt + 1))
-    raise RuntimeError(f"NSE India endpoint is temporarily unavailable: {path}") from last_error
+    # What NSE said is carried into the message. Without it every deployment
+    # failure read "temporarily unavailable", which cannot distinguish a refused
+    # request from a slow one, and the note the tab shows the user inherits that
+    # message - so the page could not say why either.
+    detail = f"{type(last_error).__name__}: {last_error}" if last_error else "no response"
+    if isinstance(last_error, HTTPError):
+        detail = f"HTTP {last_error.code}"
+    raise RuntimeError(
+        f"NSE India endpoint is temporarily unavailable: {path} ({detail})"
+    ) from last_error
 
 
 def endpoint_family(endpoint):
